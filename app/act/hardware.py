@@ -6,12 +6,19 @@
 import threading
 import time
 
-from app.act.channels.base import (CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ,
-                                   CAP_FAN_RPM, MODE_LABELS)
-from app.act.channels.ec_acpi import EcChannel
+from app.act.channels.base import (CAP_FAN_MODE, CAP_MODE_READ, CAP_MODE_WRITE,
+                                   CAP_PL_READ, CAP_FAN_RPM, MODE_LABELS)
+from app.act.channels.ec_gpd import EcChannel
 from app.act.channels.mqtt_gcu import MqttChannel
 
 ECHO_SUPPRESS_S = 8.0
+# EC 通道能给出的额外语义值，一并进快照供面板展示
+STATE_KEYS = ('mode', 'pl1', 'pl2', 'pl4', 'fan_rpm', 'fan2_rpm', 'fan_boost', 'fan_mode',
+              'fan_duty_l', 'fan_duty_r', 'fan_ctl_byte', 'fan_mode_flag', 'kb_backlight',
+              'pl1_setting', 'pl2_setting', 'pl4_setting', 'vrm_max_limit',
+              'battery_pct_ec', 'battery_temp_c', 'battery_cycles', 'charge_limit_up',
+              'charge_limit_down', 'project_id', 'vrm_limit', 'silent_mode',
+              'mode_index', 'ec_power_source')
 
 
 class Hardware:
@@ -22,9 +29,8 @@ class Hardware:
         self.ec = EcChannel(cfg, log)
         self.mqtt = MqttChannel(cfg, log)
         self.channels = [self.ec, self.mqtt]
-        self.state = {'mode': None, 'pl1': None, 'pl2': None, 'fan_rpm': None,
-                      'fan_boost': None, 'kb_backlight': None, 'source': None,
-                      'last_event': None}
+        self.state = {k: None for k in STATE_KEYS}
+        self.state.update({'source': None, 'last_event': None, 'ec_raw': {}})
         self._last_write_ts = 0.0
         self._guard_log_ts = 0.0
         self.mqtt.set_mode_callback(self._on_mode_event)
@@ -65,7 +71,7 @@ class Hardware:
     # ---------- 能力 ----------
     def capability_map(self):
         merged = {}
-        rank = {'verified': 4, 'unknown': 3, 'blocked': 2, 'unsupported': 1}
+        rank = {'verified': 4, 'unknown': 3, 'blocked': 2, 'missing': 2, 'unsupported': 1}
         for ch in self.channels:
             for cap, state in ch.caps.items():
                 prev = merged.get(cap)
@@ -81,6 +87,8 @@ class Hardware:
         merged = {}
         for ch in self.channels:
             ch.tick()
+            if not ch.alive:
+                continue          # 没连上的通道不许往快照里写字段（否则 source 会被冒名顶替）
             try:
                 data = ch.read() or {}
             except Exception as exc:                       # noqa: BLE001
@@ -91,10 +99,16 @@ class Hardware:
             if data.get('mode'):
                 merged['source'] = ch.name
         with self.lock:
-            for key in ('mode', 'pl1', 'pl2', 'fan_rpm', 'fan_boost', 'kb_backlight'):
-                if key in merged:
+            for key in STATE_KEYS:
+                if merged.get(key) is not None:
                     self.state[key] = merged[key]
             self.state['source'] = merged.get('source', self.state.get('source'))
+            try:
+                raw = self.ec.raw_values()
+            except Exception:                              # noqa: BLE001
+                raw = {}
+            if raw:
+                self.state['ec_raw'] = raw
 
     def snapshot(self):
         with self.lock:
@@ -118,6 +132,27 @@ class Hardware:
         if not results:
             return False, '没有可用通道支持写档位（EC 未验证 / GCUBridge 未连接）'
         return False, '; '.join('%s:%s' % (n, d) for n, _, d in results)
+
+    def set_fan_mode(self, flag):
+        """写 EC 风扇模式字节（取值来自 OEM 枚举，语义已确认）。"""
+        for ch in self.channels:
+            if hasattr(ch, 'set_fan_mode') and ch.caps.get(CAP_FAN_MODE) == 'verified':
+                ok, detail = ch.set_fan_mode(flag)
+                if ok:
+                    self.log.info('[硬件] 风扇模式 → %s' % flag)
+                    with self.lock:
+                        self.state['fan_mode'] = flag
+                return ok, detail
+        for ch in self.channels:
+            if hasattr(ch, 'set_fan_mode'):
+                return False, ch.detail.get('fan_mode_reason') or '该通道不支持写风扇模式'
+        return False, '没有通道支持写风扇模式'
+
+    def fan_modes(self):
+        for ch in self.channels:
+            if hasattr(ch, 'fan_modes'):
+                return ch.fan_modes()
+        return {}
 
     def send_action(self, action, extra=None, note=''):
         for ch in self.channels:

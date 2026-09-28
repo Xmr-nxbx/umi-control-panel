@@ -108,6 +108,9 @@ def make_handler(daemon, cfg, on_shutdown):
                 extra = body.get('extra') if isinstance(body.get('extra'), dict) else None
                 ok, detail = daemon.hw.send_action(action, extra)
                 self._send(200 if ok else 409, {'ok': ok, 'detail': detail})
+            elif path == '/api/fan-mode':
+                ok, detail = daemon.set_fan_mode(str(body.get('flag', '')))
+                self._send(200 if ok else 409, {'ok': ok, 'detail': detail})
             elif path == '/api/bench':
                 ok, detail = daemon.start_bench(str(body.get('mode', 'current')))
                 self._send(200 if ok else 409, {'ok': ok, 'detail': detail})

@@ -30,8 +30,12 @@
 | 内置跑分对比（单线程 / 多线程 / 短任务延迟 / 内存） | **可用** | `main.py --bench compare` 或面板「跑分对比」卡，纯标准库，不下载任何软件 |
 | 息屏掉档拦截、驻留期、亮屏缓冲 | **可用** | 纯软件层，见 `app/policy/scheduler.py`，19 条决策表测试覆盖 |
 | CPU 温度 / 占用、GPU 温度/功耗/占用、内存、空闲、前台进程 | **可用** | PDH 热区 + nvidia-smi + Win32 API，**零内核驱动** |
-| 硬件档位读写（EC） | **未打通** | `\\.\ACPIDriver` 普通用户可开句柄，但请求布局还没逆向确认（见第 6 节，禁止穷举） |
-| 风扇转速 / 风扇曲线 | **未验证** | 只有 EC 通道能提供；不做任何驱动穷举（见第 6 节） |
+| 硬件档位读写（EC） | **只读已打通** | `\\.\ACPIDriver` + `IOCTL_GPD_ACPI_ECREAD`，普通权限即可，见第 6 节 |
+| 风扇转速 / 占空比 / 风扇模式 | **可用** | 实测 2093/2123 RPM、30%、Turbo_Mode；模式可写（自动/强冷/加速），需 `allow_write` |
+| 电池电量 / 温度 / 循环 / 充电阈值 | **可用** | 电量与系统 API 互相印证（100% = 100%），阈值读到 80%/75% |
+| 各模式出厂 PL 默认值、机型 ID | **可用（只读）** | 办公 35W / 均衡 60W / 省电档 75W；ProjectID=15 |
+| 实时 PL1/PL2 写入、硬件档位切换 | **未生效 / 未确认** | 写进去会自清、性能无变化；档位寄存器语义矛盾，面板显示「未确认」不假装 |
+| 风扇曲线 | **未验证** | 只有 EC 通道能提供；不做任何驱动穷举（见第 6 节） |
 | OEM MQTT 兜底通道 | **对端已停** | GCUBridge 服务当前 `Stopped / Disabled`（被 OpenRevo takeover 干的），需要恢复服务才可用 |
 
 ### 实测结论：为什么「切了档却体会不出来」
@@ -67,13 +71,18 @@
 :: 1) 准备运行时（便携 Python 3.12，仓库里不入库）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup_runtime.ps1
 
-:: 2) 启动面板（会自动开浏览器）
+:: 2) 生成本机 EC 寄存器表（只需一次；只读 Creator Center 的元数据，不碰设备）
+scripts\生成EC寄存器表.bat
+
+:: 3) 启动面板（会自动开浏览器）
 scripts\启动面板.bat
 
-:: 3) 开机自启（HKCU Run，不需要管理员）
+:: 4) 开机自启（HKCU Run，不需要管理员）
 scripts\安装开机自启.bat
 
-:: 自检 / 停止（停止会还原改过的电源设置）
+:: 自检 / 跑分 / 停止（停止会还原改过的电源设置）
+scripts\EC只读自检.bat
+scripts\跑分对比.bat
 scripts\面板状态.bat
 scripts\停止面板.bat
 ```
@@ -87,7 +96,7 @@ scripts\停止面板.bat
 | `main.py --bench current` | 只测当前档位，约 15 秒 |
 | `main.py --one-shot` | 采一次快照打 JSON，自检用，不改电源设置 |
 | `main.py --stop` | 让运行中的实例优雅退出 |
-| `main.py --probe-acpi` | **只读**枚举 ACPI 命名空间（需管理员），用于 EC 逆向 |
+| `main.py --ec-test` | EC **只读**自检：验证通道并打印寄存器读数（普通权限即可） |
 
 ## 4. 架构
 
@@ -106,14 +115,26 @@ app/
   sense/gpu.py              GPU 遥测（nvidia-smi）
   act/power.py              powercfg 方案 + EPP + turbo + min/max，注册表回读校验
   act/hardware.py           通道总管：能力协商、切档、息屏掉档守护
-  act/channels/ec_acpi.py   主通道：EC 直连（文档化 ACPI AML 求值）
+  act/channels/ec_gpd.py    主通道：EC 直连（\.\ACPIDriver + IOCTL_GPD_ACPI_ECREAD/ECWRITE）
   act/channels/mqtt_gcu.py  兜底通道：OEM GCUBridge MQTT + 命令白名单
   act/channels/gcu_actions.json  只允许发送已在本机逆向字符串中确认存在的 Action
   server/httpd.py           标准库 ThreadingHTTPServer + REST + 静态白名单
   web/                      index.html / app.js / style.css（无构建步骤）
   tray/tray.py              Shell_NotifyIcon 托盘，图标颜色随档位变化（代码自绘 ICO）
 tests/test_scheduler.py     19 个调度决策场景
-scripts/                    setup_runtime.ps1、make_bats.py（bat 生成器）、6 个入口 bat
+scripts/                    setup_runtime.ps1、make_bats.py（bat 生成器）、10 个入口 bat（GBK+CRLF）
+tools/                      全部离线只读的逆向与验证工具，产物落 tools/out（已 gitignore）
+  gen_ec_map.py             从本机 Creator Center 生成 data/ec_map.local.json（不入仓库）
+  oem_constant_dump.ps1     反射导出 OEM 程序集的常量与枚举（IOCTL 码、寄存器名、模式取值）
+  oem_pinvoke_dump.ps1      反射导出 P/Invoke 与包装方法签名
+  oem_il_dump.ps1           IL 字节 + 标记还原（GCUService 的 IL 被加密，此路不通，留作记录）
+  pe_inspect.py             PE 体检：节表/导入/导出/.NET 判定（发现了 ReadEC/WriteEC 导出）
+  ioctl_layout_probe.py     在驱动镜像里定位 IOCTL 常量、按 .pdata 还原函数边界、解 cmp 立即数
+  ec_gpd_read_test.py       单次只读验证（带电量自校验）
+  ec_write_test.py          可逆写验证（风扇模式 + 85°C 温度保险 + 自动还原）
+  ec_pl_test.py             功耗墙写入的可逆实验（写→全核跑分→还原）
+  tier_effect_test.py       逐项验证 Windows 电源旋钮在本机是否有效（结论：无效）
+  freq_probe.py             PDH 频率计数器可用性探测
 ```
 
 **设计原则**
@@ -148,26 +169,63 @@ scripts/                    setup_runtime.ps1、make_bats.py（bat 生成器）�
 
 **⚠️ 本项目不允许对任何内核驱动做穷举/暴力 IOCTL 探测。** 上一轮开发中，
 对 `\\.\ACPIDriver` 暴力发送 7000+ 组 IOCTL 的行为导致过一次蓝屏（DRIVER_POWER_STATE_FAILURE）。
-因此本项目的通道结论以实测为准（`tools\acpi_probe.py`，只开句柄、不发任何请求）：
+
+### 6.1 已经打通的门（2026-09-29 实测确认）
 
 | 目标 | 普通权限实测 | 结论 |
 | :--- | :--- | :--- |
-| `\\.\ACPI` | **打不开**，err=2（系统找不到指定的文件） | ACPI.sys 在本机没有用户态设备名，微软文档化的 AML 求值接口在用户态无入口——**推翻了我最初"绕开 OEM 驱动"的设想** |
-| `\\.\ACPIDriver`（UWACPIDriver） | **能打开，且 GENERIC_READ\|GENERIC_WRITE** | 它的 DACL 向所有用户开放，是当前唯一可用的 EC 门 |
+| `\\.\ACPI`（微软文档化 AML 求值） | **打不开**，err=2 | 用户态无入口，此路不通 |
+| `\\.\ACPIDriver`（UWACPIDriver.sys，RUNNING/DEMAND_START） | **可读写打开** | 唯一的 EC 门，不需要管理员 |
 
-驱动镜像离线静态分析（`tools\driver_ioctl_scan.py` + 二进制标记搜索，只读磁盘文件）：
-`ECRR` / `ECRW` / `SMRW` 三个方法名与 `AeiC` / `AeoB` 签名都硬编码在驱动的**代码段**里
-（AeiC 4 处、AeoB 4 处、方法名各 1 处），而代码段里找不到任何 `cmp reg, imm32` 形态的
-IOCTL 常量——结合旧日志里"IoControlCode=0 也返回 SUCCESS"的现象，
-它很可能不看 IOCTL 码、只按缓冲内容分发，方法名由驱动内部填。
+它不认微软的 `IOCTL_ACPI_ASYNC_EVAL_METHOD(0x32C004)`（发过去只会把缓冲原样回显），
+而是自己实现了一族 `IOCTL_GPD_*`（设备类型 **0x9C40**，和微软的 0x32 完全不同）：
 
-由此定下的规矩（不可协商）：
+| 功能 | IOCTL | 输入 | 输出 |
+| :--- | :--- | :--- | :--- |
+| 读 EC | `0x9C40A488` | 4 字节地址 | 4 字节值 |
+| 写 EC | `0x9C40A48C` | 4 字节地址 + 1 字节值（共 8 字节） | 4 字节状态 |
 
-1. EC 探测只允许**离线分析磁盘镜像**与**单次只读实测**两条路，禁止任何穷举/循环探测；
-2. `tools\ec_read_test.py` 在进程内写死最多 1 次请求，且只用读方法 `ECRR`；
-   失败即停手，把原始回包字节落盘供离线分析，不换码、不改缓冲长度瞎试；
-3. 写 EC（`ECRW`）默认关闭，需 `config.hardware.ec.allow_write = true` 且由用户逐项确认；
-4. 兜底通道的 broker 凭据不入仓库（见第 2 节的 `data/mqtt_identity.json`）。
+**证据链（全部离线只读，可复现）**：
+
+1. IOCTL 码来自 `GCUService.exe`（.NET）的常量表，
+   用 `tools/oem_constant_dump.ps1` 反射读出（`IOCTL_GPD_ACPI_ECREAD=0x9C40A488` 等 27 个）；
+2. 这些码在**正在运行的** `UWACPIDriver.sys` 分发链里逐个确认存在
+   （`tools/ioctl_layout_probe.py`：`cmp dword [rsp+24h], 9C40A488h; je …`）；
+3. 缓冲布局是把驱动的 ECREAD/ECWRITE 处理函数字节级读出来的：
+   它自己拼 `'AeiC'+'ECRR'`（写是 `'ECRW'`，参数个数 2）、Length=0x28，
+   从调用者输入缓冲 memcpy 4 字节地址（写再从 +4 拷 1 字节值），
+   然后才用 0x32C004 转交 ACPI.sys，最后校验 `'AeoB'`；
+4. **实测自校验**：读电量寄存器返回 100，与 `GetSystemPowerStatus` 的 100% 一致
+   （`tools/ec_gpd_read_test.py`，单次、只读、不重试）；
+5. **实测写生效且可逆**：风扇模式字节 Turbo_Mode(0x10) → Normal_Mode(0x00)，
+   20 秒内主风扇 2436 → 2105 RPM、占空比 35% → 30%，随后原值写回并回读一致
+   （`tools/ec_write_test.py`，带 85°C 温度保险，超温立即还原）。
+
+寄存器「名字 → 地址」表**不在仓库里**：由 `tools/gen_ec_map.py` 在每台机器上
+从本机安装的 Creator Center 现场生成到 `data/ec_map.local.json`（已 gitignore）。
+代码里只出现名字，一个地址数字都不写死——换机型也能用，且不涉及分发 OEM 私有定义。
+
+### 6.2 已经读到 / 还读不懂的
+
+| 项目 | 状态 |
+| :--- | :--- |
+| 主/副风扇转速、左右占空比、风扇模式字节 | **可用**（实测 2093/2123 RPM、30%、Turbo_Mode） |
+| 电池电量、电池温度、循环次数、充电阈值 80%/75% | **可用**（电量与系统 API 互相印证） |
+| 各模式出厂 PL 默认值（办公 35W / 均衡 60W / 省电档 75W）、TCC offset | **可用**（只读） |
+| 机型标识 ProjectID=15、ModuleID=54 | **可用** |
+| 风扇模式写入（自动 / 强冷 / 加速） | **可用**，需 `allow_write=true` |
+| 硬件档位（办公/均衡/狂暴）寄存器 | **未确认**：`MAFAN_CONTROL_BYTE` 说 Turbo_Mode、`MyFanCCI_Mode_Index` 说 0，两者矛盾，面板如实显示「未确认」，不猜 |
+| 实时 PL1/PL2 写入 | **未生效**：写 `ADDR_PL1_SETTING_VALUE=35` 回读为 35 但 1 秒内自清 0，全核跑分与频率毫无变化（对照 20.71 → 21.22 Mops/s）。说明它是请求寄存器而非状态寄存器，或需要 TRIGGER/STATUS 握手时序 |
+
+### 6.3 规矩（不可协商）
+
+1. 禁止对任何内核驱动做穷举/循环探测；只发**已从 OEM 代码里确认**的 IOCTL 码；
+2. 新的写操作必须满足三条才允许下发：语义有 OEM 枚举/常量表佐证、可逆（先存原值、测完写回并回读）、
+   带温度保险（超温立即还原）；
+3. 写 EC 默认关闭，需 `config.hardware.ec.allow_write = true`；
+   即使打开，档位/PL 这类语义未确认的寄存器仍然**拒绝写入**（代码里硬拦，不是配置项）；
+4. 连续 5 次失败即熔断关闭句柄，60 秒后才复查，不空转打驱动；
+5. 兜底通道的 broker 凭据不入仓库（见第 2 节的 `data/mqtt_identity.json`）。
 
 ## 7. 运行方式（目标是"不用盯着"）
 
@@ -181,15 +239,20 @@ IOCTL 常量——结合旧日志里"IoControlCode=0 也返回 SUCCESS"的现象
 
 ## 8. 已知问题 / 待办
 
-- [ ] EC 单次只读实测：等用户授权后再跑（见第 6 节规矩 2）
-- [ ] 风扇转速 / 风扇曲线：拿到 EC 只读通道后才能验证，当前面板如实显示「不可控」
-- [ ] 硬件档位写入：只读通过后逐档确认（办公 / 均衡 / 狂暴）
-- [ ] 电池保养三档（长效/平衡/健康）：命令未逆向成功，**故意不做**，不编造
+- [x] EC 只读通道：已打通并自校验（电量与系统 API 一致），风扇/电池/PL 默认值/机型 ID 全部可读
+- [x] EC 写通道：布局已确认，风扇模式写入实测生效且可逆还原
+- [ ] **档位切换（办公/均衡/狂暴）**：还没找到生效路径。`PL*_SETTING_VALUE` 写入会自清、
+      全核性能无变化；`MAFAN_CONTROL_BYTE` 与 `MyFanCCI_Mode_Index` 语义矛盾。
+      下一步只做静态分析（CreatorCenter.exe 的方法名/IL、TRIGGER+STATUS 握手时序），
+      确认前不下发任何猜测性写入
+- [ ] 风扇曲线读写：寄存器已定位（`ADDR_L*_PWM_DEFAULT_MYFAN2/3`），语义未确认，暂不写
+- [ ] 电池保养三档（长效/平衡/健康）：阈值可读（80%/75%），写入语义未确认，**故意不做**，不编造
 - [ ] 兜底通道：需恢复 GCUBridge 服务（`scripts\启用造物者档控制.bat`，会弹 UAC）
 - [ ] 托盘图标的桌面可见性需本机确认（沙箱内截不到图）
-- [ ] 实体「造物者模式」按键：按键直连 EC 不走键盘通道，事件源要靠 EC 读或 MQTT 兜底
+- [ ] 实体「造物者模式」按键：按键直连 EC 不走键盘通道，
+      现在可以靠轮询 `MAFAN_CONTROL_BYTE` / `MyFanCCI_Mode_Index` 的变化来捕获事件
 
-## 8. 协议与许可参考
+## 9. 协议与许可参考
 
 EC/ACPI 交互的设计思路参考社区项目 [OpenRevo](https://github.com/faintonce/open-revo)（MIT，Copyright (c) 2026 faintonce）。
 本项目为独立实现，不含其源码或二进制；厂商私有寄存器映射与机型表不在本仓库分发范围内。

@@ -78,23 +78,57 @@ if errorlevel 1 (
 pause
 """
 
-BATS['ACPI只读探测.bat'] = r"""@echo off
+BATS['生成EC寄存器表.bat'] = r"""@echo off
 setlocal
+rem 从本机安装的 Creator Center 里导出 EC 寄存器表到 data\ec_map.local.json。
+rem 只读元数据，不加载执行 OEM 代码、不碰任何设备。这份表是 OEM 私有定义，
+rem 按约定只留在本机 data\ 目录（已 gitignore），不进仓库、不再分发。
 cd /d "%~dp0.."
-net session >nul 2>&1
-if errorlevel 1 (
-  echo 需要管理员权限（打开 \\.\ACPI 设备），正在提权重启本脚本...
-  powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
-  exit /b
+if not exist "data" mkdir "data"
+if exist "runtime\UmiPanel.exe" (
+  "runtime\UmiPanel.exe" "tools\gen_ec_map.py"
+) else (
+  "runtime\python.exe" "tools\gen_ec_map.py"
 )
+echo.
+echo 生成结果：data\ec_map.local.json
+pause
+"""
+
+BATS['EC只读自检.bat'] = r"""@echo off
+setlocal
+rem EC 只读自检：普通权限即可（\\.\ACPIDriver 对普通用户开放读写）。
+rem 只发确认过的 ECREAD，绝不穷举、不写任何寄存器。
+cd /d "%~dp0.."
+if not exist "tools\out" mkdir "tools\out"
+if not exist "data\ec_map.local.json" (
+  echo 还没有本机寄存器表，先运行 生成EC寄存器表.bat
+  pause
+  exit /b 1
+)
+if exist "runtime\UmiPanel.exe" (
+  "runtime\UmiPanel.exe" "main.py" --ec-test > "tools\out\ec-selftest.txt" 2>&1
+) else (
+  "runtime\python.exe" "main.py" --ec-test > "tools\out\ec-selftest.txt" 2>&1
+)
+type "tools\out\ec-selftest.txt"
+echo.
+echo 结果同时写入 tools\out\ec-selftest.txt
+pause
+"""
+
+BATS['跑分对比.bat'] = r"""@echo off
+setlocal
+rem 四档逐一对比跑分（约 2 分钟）：面板在跑就交给面板执行，否则本机独立跑。
+rem 纯内置负载，不下载任何第三方跑分软件。结束后自动还原电源设置。
+cd /d "%~dp0.."
 if not exist "tools\out" mkdir "tools\out"
 if exist "runtime\UmiPanel.exe" (
-  "runtime\UmiPanel.exe" "main.py" --probe-acpi > "tools\out\acpi-namespace.txt" 2>&1
+  "runtime\UmiPanel.exe" "main.py" --bench compare > "tools\out\bench-compare.txt" 2>&1
 ) else (
-  "runtime\python.exe" "main.py" --probe-acpi > "tools\out\acpi-namespace.txt" 2>&1
+  "runtime\python.exe" "main.py" --bench compare > "tools\out\bench-compare.txt" 2>&1
 )
-echo 结果已写入 tools\out\acpi-namespace.txt
-echo 请把该文件内容给我，用于确定 EC 读写方法的完整路径（本脚本只枚举，不读写 EC）
+type "tools\out\bench-compare.txt"
 pause
 """
 

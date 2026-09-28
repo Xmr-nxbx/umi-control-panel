@@ -198,6 +198,7 @@ class Daemon:
                 'foreground': snap.get('foreground'),
             },
             'hardware': self.hw.snapshot(),
+            'fan_modes': self.hw.fan_modes(),
             'capabilities': self.hw.capability_map(),
             'channels': [c.status() for c in self.hw.channels],
             'power_caps': self.capabilities,
@@ -240,6 +241,13 @@ class Daemon:
         if ok:
             self.wanted_hw_mode = mode
         return ok, detail
+
+    def set_fan_mode(self, flag):
+        """直接写 EC 风扇模式（自动/强冷/加速）。"""
+        return self.hw.set_fan_mode(flag)
+
+    def fan_modes(self):
+        return self.hw.fan_modes()
 
     def set_tier_now(self, tier):
         if tier not in self.cfg['tiers']:

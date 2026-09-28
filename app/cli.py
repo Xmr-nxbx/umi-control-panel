@@ -32,27 +32,34 @@ def _find_free_port(httpd_factory, bind, port):
     return None, None
 
 
-def cmd_probe_acpi(cfg, log):
-    """只读枚举 ACPI 命名空间并退出。需要管理员，否则如实报错。"""
-    from app.act.channels.ec_acpi import AcpiHandle, EC_METHOD_CANDIDATES
-    acpi = AcpiHandle()
-    if not acpi.open():
-        print('[失败] %s' % acpi.error)
-        print('提示：用管理员身份运行  tools\\acpi_probe.bat')
+def cmd_ec_test(cfg, log):
+    """EC 只读自检：验证通道、打印关键寄存器读数（不写任何东西）。"""
+    from app.act.channels.ec_gpd import EcChannel
+    ch = EcChannel(cfg, log)
+    detail = ch.probe()
+    print('通道状态：%s' % detail.get('state'))
+    print('说明：%s' % detail.get('reason'))
+    if not ch.alive:
+        ch.close()
         return 2
-    names, err = acpi.enumerate_names()
-    if err:
-        print('[失败] 枚举出错：%s' % err)
-        return 2
-    print('命名空间对象数：%d' % len(names))
-    hits = [n for n in names if any(m in n.upper() for m in EC_METHOD_CANDIDATES)]
-    print('疑似 EC 方法（%d 个）：' % len(hits))
-    for h in hits[:60]:
-        print('   ', h)
-    print('全部方法名（前 120 个）：')
-    for n in names[:120]:
-        print('   ', n)
-    acpi.close()
+    ch.tick()
+    derived = ch.read()
+    print('\n--- 语义值 ---')
+    for key in ('fan_rpm', 'fan2_rpm', 'fan_duty_l', 'fan_duty_r', 'fan_ctl_byte',
+                'fan_mode_flag', 'fan_alert', 'pl1', 'pl2', 'pl1_setting', 'pl2_setting',
+                'pl4_setting', 'vrm_limit', 'mode', 'mode_index', 'silent_mode',
+                'battery_pct_ec', 'battery_temp_c', 'battery_temp_raw', 'battery_cycles',
+                'charge_limit_up', 'charge_limit_down', 'project_id', 'module_id',
+                'ec_power_source'):
+        if derived.get(key) is not None:
+            print('  %-18s = %s' % (key, derived[key]))
+    print('\n--- 原始寄存器读数（按名字，地址来自本机生成的表）---')
+    for group, values in sorted(ch.raw_values().items()):
+        print('  [%s]' % group)
+        for name, value in sorted(values.items()):
+            print('    %-44s = %3d  (0x%02X)' % (name, value, value))
+    print('\n共发送 %d 次 ECREAD 请求；错误=%s' % (ch.dev.reads, ch.dev.error))
+    ch.close()
     return 0
 
 
@@ -279,7 +286,8 @@ def main(argv=None):
     ap.add_argument('--no-tray', action='store_true', help='不加载托盘')
     ap.add_argument('--no-browser', action='store_true', help='启动后不自动打开面板')
     ap.add_argument('--port', type=int, default=None)
-    ap.add_argument('--probe-acpi', action='store_true', help='只读枚举 ACPI 命名空间后退出')
+    ap.add_argument('--ec-test', action='store_true',
+                    help='EC 只读自检：验证通道并打印寄存器读数后退出')
     ap.add_argument('--bench', nargs='?', const='compare', default=None,
                     choices=('current', 'compare'),
                     help='跑分：compare=四档逐一对比（默认），current=只测当前档位')
@@ -308,8 +316,8 @@ def main(argv=None):
     if args.anchor:
         return _anchor_loop()
 
-    if args.probe_acpi:
-        return cmd_probe_acpi(cfg, log)
+    if args.ec_test:
+        return cmd_ec_test(cfg, log)
 
     if args.bench:
         return cmd_bench(cfg, log, args.bench)

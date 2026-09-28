@@ -10,6 +10,7 @@ CAP_MODE_WRITE = 'mode.write'        # 切档（办公/均衡/狂暴）
 CAP_PL_READ = 'power_limit.read'     # 读 PL1/PL2/PL4
 CAP_PL_WRITE = 'power_limit.write'
 CAP_FAN_RPM = 'fan.rpm'              # 风扇实时转速
+CAP_FAN_MODE = 'fan.mode'            # 风扇模式（自动/强冷），OEM 枚举里的 Normal/Turbo/FanBoost
 CAP_FAN_CURVE = 'fan.curve'          # 风扇曲线读写
 CAP_TEMP_EC = 'ec.temp'              # EC 侧温度传感器
 CAP_BATTERY_LIMIT = 'battery.limit'
@@ -17,7 +18,7 @@ CAP_DGPU = 'gpu.mux'
 CAP_RGB = 'lighting.rgb'
 
 ALL_CAPS = (CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ, CAP_PL_WRITE,
-            CAP_FAN_RPM, CAP_FAN_CURVE, CAP_TEMP_EC, CAP_BATTERY_LIMIT,
+            CAP_FAN_RPM, CAP_FAN_MODE, CAP_FAN_CURVE, CAP_TEMP_EC, CAP_BATTERY_LIMIT,
             CAP_DGPU, CAP_RGB)
 
 CAP_LABELS = {
@@ -26,6 +27,7 @@ CAP_LABELS = {
     CAP_PL_READ: '读取功耗墙 PL1/PL2/PL4',
     CAP_PL_WRITE: '写入功耗墙',
     CAP_FAN_RPM: '风扇转速',
+    CAP_FAN_MODE: '风扇模式（自动/强冷）',
     CAP_FAN_CURVE: '风扇曲线',
     CAP_TEMP_EC: 'EC 温度传感器',
     CAP_BATTERY_LIMIT: '电池充电阈值',

@@ -8,6 +8,9 @@ const INTENTS = [
 ];
 const TIERS = { perf: '性能', mid: '流畅', bal: '均衡', eco: '省电' };
 const BOOST_TEXT = { 0: '禁用', 1: '启用', 2: '激进', 3: '高效', 4: '高效激进', 5: '保证频率' };
+// 风扇模式字节取值来自 OEM 自己的枚举（MyFanCTLByteFlag），这里只做中文注解
+const FAN_FLAG_TEXT = { Normal_Mode: '自动', Turbo_Mode: '强冷', FanBoost_Mode: '风扇加速',
+  User_Fan_Mode: '手动', User_Fan_HiMode: '手动高' };
 
 let META = { cap_labels: {}, mode_labels: {} };
 let lastState = null;
@@ -109,23 +112,49 @@ function hwRow(k, v, ok) {
 function renderHardware(s) {
   const caps = s.capabilities || {};
   const hw = s.hardware || {};
-  const modeOk = (caps['mode.read'] || {}).state === 'verified';
+  const verified = (cap) => (caps[cap] || {}).state === 'verified';
   const rows = [
-    hwRow('当前硬件档位', (META.mode_labels || {})[hw.mode] || hw.mode || '未知', modeOk),
-    hwRow('PL1 / PL2', hw.pl1 != null ? (hw.pl1 + 'W / ' + (hw.pl2 || '?') + 'W') : '未知',
-          (caps['power_limit.read'] || {}).state === 'verified'),
-    hwRow('风扇转速', hw.fan_rpm ? hw.fan_rpm : '未知', (caps['fan.rpm'] || {}).state === 'verified'),
-    hwRow('风扇强开', hw.fan_boost == null ? '未知' : (hw.fan_boost ? '开' : '关'),
-          hw.fan_boost != null),
+    hwRow('硬件档位', (META.mode_labels || {})[hw.mode] || '未确认', verified('mode.read')),
+    hwRow('风扇模式', FAN_FLAG_TEXT[hw.fan_mode_flag] || hw.fan_mode_flag || '未知',
+          verified('fan.rpm')),
+    hwRow('风扇转速', hw.fan_rpm ? (hw.fan_rpm + (hw.fan2_rpm ? ' / ' + hw.fan2_rpm : '') + ' RPM')
+          : '未知', verified('fan.rpm')),
+    hwRow('风扇占空比', hw.fan_duty_l != null ? (hw.fan_duty_l + '% / ' + (hw.fan_duty_r != null ? hw.fan_duty_r + '%' : '?'))
+          : '未知', hw.fan_duty_l != null),
+    hwRow('PL1 / PL2', hw.pl1 != null ? (hw.pl1 + 'W / ' + (hw.pl2 != null ? hw.pl2 + 'W' : '?'))
+          : '未知', verified('power_limit.read')),
+    hwRow('电池（EC）', hw.battery_pct_ec != null
+          ? (hw.battery_pct_ec + '% · ' + (hw.battery_temp_c != null ? hw.battery_temp_c + '°C' : '?')
+             + (hw.battery_cycles != null ? ' · ' + hw.battery_cycles + ' 次循环' : ''))
+          : '未知', hw.battery_pct_ec != null),
+    hwRow('充电阈值', hw.charge_limit_up != null
+          ? (hw.charge_limit_up + '% / 回落 ' + hw.charge_limit_down + '%') : '未知',
+          verified('battery.limit')),
+    hwRow('机型标识', hw.project_id != null ? ('ProjectID ' + hw.project_id
+          + (hw.module_id != null ? ' · Module ' + hw.module_id : '')) : '未知',
+          hw.project_id != null),
     hwRow('数据来源', hw.source || '无', !!hw.source),
   ];
   $('hw').innerHTML = rows.join('');
 
+  const canFan = (caps['fan.mode'] || {}).state === 'verified';
+  const available = Object.keys(s.fan_modes || {});
+  const flags = ['Normal_Mode', 'Turbo_Mode', 'FanBoost_Mode'].filter((f) => available.indexOf(f) >= 0);
+  const fanButtons = canFan ? flags.map((f) => `
+    <button data-fan="${f}" class="${hw.fan_mode_flag === f ? 'primary' : ''}">${esc(FAN_FLAG_TEXT[f] || f)}</button>`).join('') : '';
   const canWrite = (caps['mode.write'] || {}).state === 'verified';
   const modes = ['office', 'balance', 'turbo'];
-  $('hw-buttons').innerHTML = modes.map((m) => `
+  $('hw-buttons').innerHTML = fanButtons
+    + modes.map((m) => `
     <button data-mode="${m}" ${canWrite ? '' : 'disabled'}>${esc((META.mode_labels || {})[m] || m)}</button>`).join('')
     + `<button class="ghost" id="btn-refresh-hw">重新探测通道</button>`;
+  document.querySelectorAll('#hw-buttons button[data-fan]').forEach((b) => {
+    b.onclick = async () => {
+      try { const r = await api('/api/fan-mode', { flag: b.dataset.fan }); toast(r.detail || '已下发'); }
+      catch (e) { toast('下发失败：' + e.message, true); }
+      poll();
+    };
+  });
   document.querySelectorAll('#hw-buttons button[data-mode]').forEach((b) => {
     b.onclick = async () => {
       try { const r = await api('/api/mode', { mode: b.dataset.mode }); toast(r.detail || '已下发'); }
@@ -141,17 +170,21 @@ function renderHardware(s) {
   const ecCh = (s.channels || []).find((c) => c.name === 'ec') || {};
   const mqCh = (s.channels || []).find((c) => c.name === 'mqtt') || {};
   const why = (c) => (c.detail || {}).reason || '未探测';
-  $('hw-hint').textContent = canWrite ? ''
-    : ('硬件档位暂不可写。EC 直连：' + why(ecCh) + '；GCUBridge：' + why(mqCh));
-  $('hw-hint').classList.toggle('err', !canWrite);
+  const hints = [];
+  if (!canWrite) hints.push('硬件档位不可写：' + ((ecCh.detail || {}).write_reason || why(ecCh)));
+  if (!canFan) hints.push('风扇模式不可写：' + ((ecCh.detail || {}).fan_mode_reason || why(ecCh)));
+  $('hw-hint').textContent = hints.join('；');
+  $('hw-hint').classList.toggle('err', !canWrite && !canFan);
 }
 
 function renderCaps(s) {
   const caps = s.capabilities || {};
   const labels = META.cap_labels || {};
   const shown = ['mode.read', 'mode.write', 'power_limit.read', 'power_limit.write',
-                 'fan.rpm', 'fan.curve', 'battery.limit', 'gpu.mux', 'lighting.rgb'];
-  const stateText = { verified: '可用', unknown: '待验证', blocked: '需管理员', unsupported: '不支持' };
+                 'fan.rpm', 'fan.mode', 'fan.curve', 'ec.temp', 'battery.limit',
+                 'gpu.mux', 'lighting.rgb'];
+  const stateText = { verified: '可用', unknown: '待验证', blocked: '受限',
+                      missing: '缺本机配置', unsupported: '不支持' };
   $('caps').innerHTML = shown.map((cap) => {
     const c = caps[cap] || { state: 'unsupported', channel: '-' };
     return `<div class="cap"><span>${esc(labels[cap] || cap)}</span>
