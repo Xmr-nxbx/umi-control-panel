@@ -16,12 +16,13 @@ OUT = os.path.join(ROOT, 'scripts')
 BATS = {}
 
 BATS['启动面板.bat'] = r"""@echo off
-rem 启动 Umi Control Panel。用最小化窗口跑（不用 pythonw，它会被安全软件静默查杀）。
+rem 启动 Umi Control Panel（守护模式：进程崩了会自动拉起，面板里点停止才真的退出）。
+rem 用最小化窗口跑，不用 pythonw——它会被安全软件静默查杀。
 cd /d "%~dp0.."
 if exist "runtime\UmiPanel.exe" (
-  start "UmiPanel" /min "runtime\UmiPanel.exe" "main.py"
+  start "UmiPanel" /min "runtime\UmiPanel.exe" "main.py" --supervise
 ) else (
-  start "UmiPanel" /min "runtime\python.exe" "main.py"
+  start "UmiPanel" /min "runtime\python.exe" "main.py" --supervise
 )
 echo 正在启动，面板地址 http://127.0.0.1:8747/
 timeout /t 3 >nul
@@ -52,11 +53,11 @@ pause
 """
 
 BATS['安装开机自启.bat'] = r"""@echo off
-rem 登录自启（HKCU Run，不需要管理员）。启动后不自动弹浏览器。
+rem 登录自启（HKCU Run，不需要管理员），并启用守护模式自动重启。启动后不自动弹浏览器。
 cd /d "%~dp0.."
 set "EXE=%CD%\runtime\UmiPanel.exe"
 if not exist "%EXE%" set "EXE=%CD%\runtime\python.exe"
-reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v UmiControlPanel /t REG_SZ /d "\"%EXE%\" \"%CD%\main.py\" --no-browser" /f
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v UmiControlPanel /t REG_SZ /d "\"%EXE%\" \"%CD%\main.py\" --supervise --no-browser" /f
 if errorlevel 1 (
   echo 写入失败：可能被安全软件或注册表 ACL 拦截，请改用 PowerShell 手动添加
   exit /b 1
@@ -94,6 +95,44 @@ if exist "runtime\UmiPanel.exe" (
 )
 echo 结果已写入 tools\out\acpi-namespace.txt
 echo 请把该文件内容给我，用于确定 EC 读写方法的完整路径（本脚本只枚举，不读写 EC）
+pause
+"""
+
+
+BATS['启用造物者档控制.bat'] = r"""@echo off
+setlocal
+rem 恢复 OEM 的 GCUBridge 服务（它是硬件档位 MQTT 命令链路的宿主）。
+rem 之前 OpenRevo 的 takeover 把它停用了（Start=4），所以实体按键链路的后台是断的。
+rem 本脚本只做两件事：设为自动启动 + 启动服务；不装任何东西，不动 Creator Center 的界面。
+cd /d "%~dp0.."
+net session >nul 2>&1
+if errorlevel 1 (
+  echo 需要管理员权限，正在提权重启本脚本...
+  powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+  exit /b
+)
+sc config GCUBridge start= auto
+if errorlevel 1 echo 设置自启失败（服务可能不存在）
+net start GCUBridge
+if errorlevel 1 echo 启动服务失败
+echo.
+echo 若面板仍显示兜底通道不可用，请确认 data\mqtt_identity.json 存在（抄 mqtt_identity.example.json）
+sc query GCUBridge | find /i "RUNNING" >nul && echo GCUBridge 已在运行，刷新面板即可
+pause
+"""
+
+BATS['停用造物者档控制.bat'] = r"""@echo off
+setlocal
+cd /d "%~dp0.."
+net session >nul 2>&1
+if errorlevel 1 (
+  echo 需要管理员权限，正在提权重启本脚本...
+  powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+  exit /b
+)
+net stop GCUBridge
+sc config GCUBridge start= disabled
+echo 已停用（回到 OpenRevo takeover 之后的状态；EC 直连不受影响）
 pause
 """
 

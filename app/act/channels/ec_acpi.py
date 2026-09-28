@@ -1,15 +1,18 @@
-"""EC 直连通道（主通道）：走微软文档化的 ACPI 求值接口。
+r"""EC 直连通道（主通道）：走 OEM 的 UWACPIDriver 设备 `\\.\ACPIDriver`。
 
-为什么要自己实现：上一轮有人对第三方内核驱动 UWACPIDriver.sys 穷举 IOCTL，
-直接把机器干蓝屏了。静态分析表明该驱动只是把用户态请求转成
-IOCTL_ACPI_ASYNC_EVAL_METHOD 转交给 ACPI.sys，由 BIOS 里的 AML 方法真正读写 EC。
-所以我们直接对 \\\\.\\ACPI 使用同一套文档化结构（ACPI_EVALUATE_INPUT / ACPI_OUTBUFFER），
-不给任何第三方驱动发未确认的缓冲。
+本机实测（tools/acpi_probe.py 的输出）：
+  * `\\.\ACPI` 不存在（CreateFile err=2 系统找不到指定的文件），
+    所以微软文档化的 ACPI 求值接口在用户态没有入口 —— 上一版判断错了，这里纠正；
+  * `\\.\ACPIDriver` 普通用户即可 GENERIC_READ|GENERIC_WRITE 打开（DACL 向所有人开着）；
+  * 驱动代码段里硬编码了 `AeiC`/`AeoB` 签名与 `ECRR`/`ECRW`/`SMRW` 三个方法名
+    （AeiC 4 处、AeoB 4 处、方法名各 1 处），说明 EC 方法名由驱动内部填，
+    用户态只交请求负载；结合"IoControlCode=0 也返回 SUCCESS"的现象，
+    它大概率不按 IOCTL 码分发。
 
-安全边界（不可协商）：
-  1. 只做只读枚举（IOCTL_ACPI_ENUM_DEVICES）与只读求值；
-  2. 写 EC 需要 config.hardware.ec.allow_write 打开，且方法在白名单内；
-  3. 绝不穷举、绝不循环重试探测；失败就停手并把原因回报到面板。
+安全边界（违反就是上次蓝屏的成因）：
+  1. 绝不做穷举/循环探测；本文件的请求只允许"单次、完整缓冲、只读(ECRR)"；
+  2. 写 EC（ECRW）默认关闭，需 config.hardware.ec.allow_write 且由用户逐项确认；
+  3. 失败即停手，把原始字节回报出来供离线分析，不再发第二个请求。
 """
 import ctypes
 import ctypes.wintypes as wt
@@ -17,30 +20,32 @@ import ctypes.wintypes as wt
 from app.act.channels.base import (Channel, CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ,
                                    CAP_FAN_RPM, CAP_TEMP_EC)
 
-FILE_DEVICE_ACPI = 0x00000032
 METHOD_BUFFERED = 0
+FILE_DEVICE_UNKNOWN = 0x22
 
 
 def _ctl_code(dev, func, method, access):
     return (dev << 16) | (access << 14) | (func << 2) | method
 
 
-IOCTL_ACPI_ASYNC_EVAL_METHOD = _ctl_code(FILE_DEVICE_ACPI, 0x001, METHOD_BUFFERED, 3)
-IOCTL_ACPI_ENUM_DEVICES = _ctl_code(FILE_DEVICE_ACPI, 0x00F, METHOD_BUFFERED, 1)
+# 语义上最贴切的码；驱动若不分发码，这个值也无害（一次尝试，失败即停）
+IOCTL_EVAL_ASYNC = _ctl_code(0x32, 0x001, METHOD_BUFFERED, 3)          # 0x32C004
+IOCTL_GENERIC_BUFFERED = _ctl_code(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, 3)
 
-SIG_INPUT = b'AeiC'        # ACPI_EVAL_INPUT_STRUCT_SIG
-SIG_OUTPUT = b'AeoB'       # ACPI_EVAL_OUTPUT_BUFFER_SIG
+SIG_IN = b'AeiC'        # ACPI_EVAL_INPUT_STRUCT_SIG
+SIG_OUT = b'AeoB'       # ACPI_EVAL_OUTPUT_BUFFER_SIG
+DEVICE = '\\\\.\\ACPIDriver'
+ACPI_DEVICE = '\\\\.\\ACPI'
+
+READ_METHOD = 'ECRR'
+WRITE_METHODS = ('ECRW', 'SMRW')           # 只登记，不主动使用
+IN_BUF_TOTAL = 0x28                        # 驱动侧观察到的入参总长（40）
 
 GENERIC_READ = 0x80000000
 GENERIC_WRITE = 0x40000000
-OPEN_EXISTING = 3
 FILE_SHARE_ALL = 3
-INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
-
-NAME_TYPE_METHOD = 2
-
-# 静态分析（open-revo.exe 的 .rdata）得到的候选方法名；实测成功才算 verified
-EC_METHOD_CANDIDATES = ('ECRR', 'ECRW', 'SMRW')
+OPEN_EXISTING = 3
+INVALID = ctypes.c_void_p(-1).value
 
 k32 = ctypes.WinDLL('kernel32', use_last_error=True)
 k32.CreateFileW.restype = wt.HANDLE
@@ -52,184 +57,177 @@ k32.DeviceIoControl.argtypes = [wt.HANDLE, wt.DWORD, ctypes.c_void_p, wt.DWORD,
                                 ctypes.c_void_p]
 k32.CloseHandle.restype = wt.BOOL
 k32.CloseHandle.argtypes = [wt.HANDLE]
+k32.FormatMessageW.restype = wt.DWORD
 
 
 def _u32(n):
     return int(n & 0xFFFFFFFF).to_bytes(4, 'little')
 
 
-def build_eval_input(name, in_bytes=b'', out_len=256, full_path=None):
-    """按 ACPI_EVALUATE_INPUT 布局拼请求缓冲。"""
-    head = bytearray(SIG_INPUT)
-    if full_path:
-        encoded = full_path.encode('utf-16-le') + b'\x00\x00'
-        head += _u32(len(encoded)) + encoded
-    else:
-        head += name.encode('ascii')               # NamePath[1]：4 字符单名
-    head += _u32(len(in_bytes or b''))
-    head += _u32(out_len)
-    return bytes(head) + (in_bytes or b'')
+def error_text(err):
+    if not err:
+        return ''
+    buf = ctypes.create_unicode_buffer(256)
+    k32.FormatMessageW(0x1000 | 0x200, None, err, 0, buf, 256, None)
+    return buf.value.strip()
 
 
-def parse_eval_output(raw):
-    """解析 ACPI_OUTBUFFER：签名 / 版本 / 参数个数 / 各参数 (长度 + 数据)。"""
-    if not raw or len(raw) < 12 or raw[:4] != SIG_OUTPUT:
-        return None
-    version = int.from_bytes(raw[4:8], 'little')
-    count = int.from_bytes(raw[8:12], 'little')
-    off, args = 12, []
-    for _ in range(count):
-        if off + 4 > len(raw):
-            break
-        size = int.from_bytes(raw[off:off + 4], 'little')
-        off += 4
-        if size and off + size <= len(raw):
-            args.append(raw[off:off + size])
-            off += size
-    return {'version': version, 'args': args}
+class EcDevice:
+    """`\\.`\ACPIDriver` 句柄 + 一次一发请求的封装（内置单次熔断）。"""
 
-
-class AcpiHandle:
     def __init__(self):
         self.h = None
-        self.error = None
+        self.device = None
+        self.open_error = None
+        self.attempts = 0            # 熔断用：本进程只允许极少量请求
+        self.last_raw = b''
+        self.last_ioctl = None
 
     def open(self):
         if self.h:
             return True
-        handle = k32.CreateFileW('\\\\.\\ACPI', GENERIC_READ | GENERIC_WRITE,
-                                 FILE_SHARE_ALL, None, OPEN_EXISTING, 0, None)
-        if not handle or ctypes.cast(handle, ctypes.c_void_p).value == INVALID_HANDLE_VALUE:
-            self.error = '打开 \\\\.\\ACPI 失败 err=%s（通常需要管理员）' % \
-                         ctypes.windll.kernel32.GetLastError()
-            return False
-        self.h = handle
-        return True
+        for name in (DEVICE, ACPI_DEVICE):
+            handle = k32.CreateFileW(name, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_ALL,
+                                     None, OPEN_EXISTING, 0, None)
+            err = ctypes.get_last_error()
+            value = ctypes.cast(handle, ctypes.c_void_p).value if handle else None
+            if value not in (None, 0, INVALID):
+                self.h, self.device = handle, name
+                self.open_error = None
+                return True
+            self.open_error = '%s 打开失败 err=%s %s' % (name, err, error_text(err))
+        return False
 
     def close(self):
         if self.h:
             k32.CloseHandle(self.h)
             self.h = None
+            self.device = None
 
-    def ioctl(self, code, inbuf, out_len):
+    def request_read(self, addr, length=1, ioctl=IOCTL_EVAL_ASYNC, max_attempts=1):
+        """单次只读 EC 请求。超出 max_attempts 直接拒绝，防止演变成穷举。"""
+        if self.attempts >= max_attempts:
+            return None, '已达到本次会话的请求上限（%d 次），按安全规则停手' % max_attempts
         if not self.open():
-            return None, self.error
-        in_ptr = ctypes.create_string_buffer(inbuf, len(inbuf)) if inbuf else None
-        out = ctypes.create_string_buffer(max(out_len, 1))
+            return None, self.open_error
+        self.attempts += 1
+        self.last_ioctl = ioctl
+        body = build_read_input(addr, length)
+        in_buf = ctypes.create_string_buffer(body, len(body))
+        out_len = 512
+        out_buf = ctypes.create_string_buffer(out_len)
         got = wt.DWORD(0)
-        ok = k32.DeviceIoControl(self.h, code, in_ptr, len(inbuf or b''), out,
-                                 len(out), ctypes.byref(got), None)
+        ok = k32.DeviceIoControl(self.h, ioctl, in_buf, len(body), out_buf, out_len,
+                                 ctypes.byref(got), None)
+        err = ctypes.get_last_error()
         if not ok:
-            return None, 'DeviceIoControl(0x%08X) 失败 err=%s' % (
-                code, ctypes.windll.kernel32.GetLastError())
-        return out.raw[:got.value], None
+            self.last_raw = b''
+            return None, 'DeviceIoControl(0x%08X) 失败 err=%s %s' % (ioctl, err, error_text(err))
+        self.last_raw = out_buf.raw[:got.value]
+        return parse_output(self.last_raw), None
 
-    def enumerate_names(self, name_type=NAME_TYPE_METHOD, level=0xFFFFFFFF):
-        """纯只读枚举 ACPI 命名空间。level 默认全深度。"""
-        body = SIG_INPUT + _u32(name_type) + _u32(level)
-        raw, err = self.ioctl(IOCTL_ACPI_ENUM_DEVICES, body, 256 * 1024)
-        if raw is None:
-            return [], err
-        names, off = [], 4
-        while off + 4 <= len(raw):
-            size = int.from_bytes(raw[off:off + 4], 'little')
-            off += 4
-            if size == 0 or off + size > len(raw):
-                break
-            chunk = raw[off:off + size]
-            off += size
-            try:
-                text = chunk.decode('utf-16-le').strip('\x00')
-            except UnicodeDecodeError:
-                continue
-            if text:
-                names.append(text)
-        return names, None
 
-    def evaluate(self, method, in_bytes=b'', out_len=128, full_path=None):
-        buf = build_eval_input(method, in_bytes, out_len, full_path=full_path)
-        raw, err = self.ioctl(IOCTL_ACPI_ASYNC_EVAL_METHOD, buf, out_len + 128)
-        if raw is None:
-            return None, err
-        return parse_eval_output(raw), None
+def build_read_input(addr, length=1, data_len=IN_BUF_TOTAL):
+    """按驱动侧观察到的布局拼只读请求：签名 + 方法名 + 入参长 + 出参长 + [状态, 数据长, 数据]。
+
+    入参负载是 16 位状态 + 16 位长度 + 数据区，凑够驱动期望的总长（0x28）。
+    """
+    payload = bytearray()
+    payload += (0).to_bytes(2, 'little')            # word 状态（输入侧填 0）
+    payload += (length & 0xFFFF).to_bytes(2, 'little')
+    payload += (addr & 0xFFFF).to_bytes(2, 'little')  # 首字给 EC 地址
+    payload += bytes(max(0, data_len - 8))
+    head = bytearray(SIG_IN) + READ_METHOD.encode('ascii')
+    head += _u32(len(payload))                       # InBufferLength
+    head += _u32(256)                                # OutBufferLength
+    return bytes(head) + bytes(payload)
+
+
+def parse_output(raw):
+    """解析 ACPI_OUTBUFFER：'AeoB' + 版本 + 参数个数 + 各参数(长度+数据)。"""
+    info = {'sig': raw[:4].hex(' ') if len(raw) >= 4 else '', 'size': len(raw),
+            'ok': False, 'status': None, 'data': b'', 'args': []}
+    if len(raw) < 12:
+        return info
+    info['version'] = int.from_bytes(raw[4:8], 'little')
+    info['arg_count'] = int.from_bytes(raw[8:12], 'little')
+    off = 12
+    args = []
+    for _ in range(max(info['arg_count'], 1)):
+        if off + 4 > len(raw):
+            break
+        size = int.from_bytes(raw[off:off + 4], 'little')
+        off += 4
+        chunk = raw[off:off + size]
+        off += size
+        args.append(chunk)
+    info['args'] = args
+    if raw[:4] == SIG_OUT and args:
+        head = args[0]
+        if len(head) >= 4:
+            info['status'] = int.from_bytes(head[:2], 'little')
+            info['data'] = head[4:] if len(head) > 4 else b''
+        else:
+            info['data'] = head
+        info['ok'] = True
+    elif raw[:4] == SIG_OUT:
+        info['ok'] = True
+    return info
 
 
 class EcChannel(Channel):
     name = 'ec'
-    label = 'EC 直连（ACPI AML）'
+    label = 'EC 直连（UWACPIDriver）'
 
     def __init__(self, cfg, log):
         super().__init__(cfg, log)
         self.enabled = bool(cfg.get('hardware', 'ec', 'enabled', default=True))
         self.allow_write = bool(cfg.get('hardware', 'ec', 'allow_write', default=False))
-        self.acpi = AcpiHandle()
-        self.methods = {}
+        self.dev = EcDevice()
         self.verified_read = False
         for cap in (CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ, CAP_FAN_RPM, CAP_TEMP_EC):
             self.caps[cap] = 'unsupported'
-        self.detail = {'enabled': self.enabled, 'allow_write': self.allow_write}
+        self.detail = {'enabled': self.enabled, 'allow_write': self.allow_write,
+                       'device': None, 'state': 'unknown'}
 
     def probe(self):
-        """只枚举命名空间，不读写 EC。"""
+        """只开句柄 + 记录能力状态；不在这个函数里发 EC 请求。"""
         if not self.enabled:
-            self.detail['reason'] = '配置中已关闭 EC 通道'
-            self.detail['state'] = 'unsupported'
+            self.detail.update(reason='配置中已关闭 EC 通道', state='unsupported')
             return self.status()
-        if not self.acpi.open():
-            self.detail['reason'] = self.acpi.error
-            self.detail['state'] = 'blocked'
-            self.detail['hint'] = '打开 \\\\.\\ACPI 设备需要管理员权限（用 scripts\\ACPI只读探测.bat 提权跑一次）'
+        if not self.dev.open():
+            self.detail.update(reason=self.dev.open_error, state='blocked')
             self.caps[CAP_MODE_READ] = 'blocked'
             return self.status()
-        names, err = self.acpi.enumerate_names()
-        if err:
-            self.detail['reason'] = err
-            self.detail['state'] = 'blocked'
-            self.detail['hint'] = '枚举 ACPI 命名空间需要管理员权限'
-            self.caps[CAP_MODE_READ] = 'blocked'
-            return self.status()
-        self.detail['method_count'] = len(names)
-        for path in names:
-            leaf = path.replace('\\', ' ').split()[-1] if path else ''
-            if leaf in EC_METHOD_CANDIDATES:
-                self.methods.setdefault(leaf, path)
-        self.detail['methods'] = sorted(self.methods.values())[:12]
-        if 'ECRR' in self.methods:
-            self.alive = True
-            self.caps[CAP_MODE_READ] = 'unknown'
-            self.detail['state'] = 'unknown'
-            self.detail['reason'] = '已定位 ECRR，待单次只读验证后才算可用'
-        else:
-            self.caps[CAP_MODE_READ] = 'unsupported'
-            self.detail['state'] = 'unsupported'
-            self.detail['reason'] = ('ACPI 命名空间里未找到 ECRR/ECRW（共 %d 个对象，'
-                                     '本机型可能用了别的方法名）' % len(names))
+        self.alive = True
+        self.detail['device'] = self.dev.device
+        self.detail['state'] = 'unknown'
+        self.detail['reason'] = ('设备已打开（%s），等待单次只读验证后才能读档位/转速'
+                                 % self.dev.device)
+        self.caps[CAP_MODE_READ] = 'unknown'
         self.caps[CAP_MODE_WRITE] = 'unsupported' if not self.allow_write else 'unknown'
         return self.status()
 
     def read_ec(self, addr, length=1):
-        """单次 EC 读；失败即返回原因，调用方不得循环重试。"""
-        path = self.methods.get('ECRR')
-        if not path:
-            return None, 'ECRR 方法未定位，禁止盲试'
-        payload = _u32(addr) + _u32(length)
-        full = path if path.startswith('\\') else None
-        parsed, err = self.acpi.evaluate('ECRR', payload, 64, full_path=full)
+        """单次只读；调用方不得循环重试（EcDevice 内部也有熔断）。"""
+        parsed, err = self.dev.request_read(addr, length)
         if parsed is None:
             return None, err
-        if not parsed['args']:
-            return None, '回包无数据参数（AeoB 结构为空），格式需重新校准'
+        if not parsed['ok']:
+            return None, ('回包签名不是 AeoB（前 4 字节=%s，长度 %d），'
+                          '请求布局需离线校准，不再重试' % (parsed['sig'], parsed['size']))
         self.verified_read = True
         self.caps[CAP_MODE_READ] = 'verified'
-        return parsed['args'][0], None
+        self.detail['state'] = 'verified'
+        self.detail['reason'] = '单次只读 ECRR 已成功，EC 读通道可用'
+        return parsed['data'], None
 
     def set_mode(self, mode):
-        return False, 'EC 写档未开放：需先完成只读验证，再在配置中显式允许写入'
+        return False, 'EC 写档未开放：需先完成只读验证，再由用户逐项允许写入'
 
     def read(self):
-        return {'methods': sorted(self.methods.keys()),
-                'verified_read': self.verified_read,
-                'allow_write': self.allow_write}
+        return {'device': self.dev.device, 'opened': bool(self.dev.h),
+                'verified_read': self.verified_read, 'allow_write': self.allow_write}
 
     def close(self):
-        self.acpi.close()
+        self.dev.close()

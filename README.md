@@ -119,27 +119,46 @@ scripts/                    setup_runtime.ps1、make_bats.py（bat 生成器）�
 
 **⚠️ 本项目不允许对任何内核驱动做穷举/暴力 IOCTL 探测。** 上一轮开发中，
 对 `\\.\ACPIDriver` 暴力发送 7000+ 组 IOCTL 的行为导致过一次蓝屏（DRIVER_POWER_STATE_FAILURE）。
-因此：
+因此本项目的通道结论以实测为准（`tools\acpi_probe.py`，只开句柄、不发任何请求）：
 
-- EC 交互只走 **微软文档化接口**：`IOCTL_ACPI_ASYNC_EVAL_METHOD`（0x32C004）+
-  `ACPI_EVALUATE_INPUT`/`ACPI_OUTBUFFER`（签名 `AeiC`/`AeoB`）。
-  静态分析显示 OEM 驱动 UWACPIDriver.sys 本身也只是把请求转成这个 IOCTL 交给 ACPI.sys，
-  由 BIOS 的 AML 方法真正读写 EC——我们直接调同一层，绕开第三方驱动的私有 IOCTL。
-- 只读枚举（`IOCTL_ACPI_ENUM_DEVICES`）先行，定位 BIOS 里的 EC 方法完整路径。
-- 拿到路径后**第一次实测只发单次、完整缓冲的 ECRR 读**；失败即停手回报，绝不循环重试。
-- 写 EC（档位/PL1/风扇）需要 `config.hardware.ec.allow_write = true` 才可能生效。
+| 目标 | 普通权限实测 | 结论 |
+| :--- | :--- | :--- |
+| `\\.\ACPI` | **打不开**，err=2（系统找不到指定的文件） | ACPI.sys 在本机没有用户态设备名，微软文档化的 AML 求值接口在用户态无入口——**推翻了我最初"绕开 OEM 驱动"的设想** |
+| `\\.\ACPIDriver`（UWACPIDriver） | **能打开，且 GENERIC_READ\|GENERIC_WRITE** | 它的 DACL 向所有用户开放，是当前唯一可用的 EC 门 |
 
-已知的候选方法名（来自 open-revo 二进制 `.rdata` 的静态分析）：`ECRR`（读）、`ECRW`（写）、`SMRW`。
-请求缓冲要点：`AeiC` + 方法名 + 入参长度 + 出参长度 + 数据；响应校验头是 `AeoB`。
+驱动镜像离线静态分析（`tools\driver_ioctl_scan.py` + 二进制标记搜索，只读磁盘文件）：
+`ECRR` / `ECRW` / `SMRW` 三个方法名与 `AeiC` / `AeoB` 签名都硬编码在驱动的**代码段**里
+（AeiC 4 处、AeoB 4 处、方法名各 1 处），而代码段里找不到任何 `cmp reg, imm32` 形态的
+IOCTL 常量——结合旧日志里"IoControlCode=0 也返回 SUCCESS"的现象，
+它很可能不看 IOCTL 码、只按缓冲内容分发，方法名由驱动内部填。
 
-## 7. 已知问题 / 待办
+由此定下的规矩（不可协商）：
 
-- [ ] EC 通道需要管理员：`\\.\ACPI` 非管理员打不开 → 用 `scripts\ACPI只读探测.bat` 提权跑一次，把 `tools\out\acpi-namespace.txt` 贴回来定位方法路径
-- [ ] 风扇转速/曲线：只能靠 EC 读，未验证前面板显示「不可控」
+1. EC 探测只允许**离线分析磁盘镜像**与**单次只读实测**两条路，禁止任何穷举/循环探测；
+2. `tools\ec_read_test.py` 在进程内写死最多 1 次请求，且只用读方法 `ECRR`；
+   失败即停手，把原始回包字节落盘供离线分析，不换码、不改缓冲长度瞎试；
+3. 写 EC（`ECRW`）默认关闭，需 `config.hardware.ec.allow_write = true` 且由用户逐项确认；
+4. 兜底通道的 broker 凭据不入仓库（见第 2 节的 `data/mqtt_identity.json`）。
+
+## 7. 运行方式（目标是"不用盯着"）
+
+- 开机自启：`HKCU\...\Run\UmiControlPanel` → `UmiPanel.exe main.py --supervise --no-browser`；
+- 守护模式 `--supervise`：子进程异常退出会自动拉起（实测强杀后 6 秒恢复）；
+  面板里点「停止面板服务」属于正常退出（code=0），守护**不会**复活它；
+  10 分钟内异常退出超过 5 次则停止自动重启，避免启动即崩时空转刷屏；
+- 单实例用内核命名互斥 `Global\UmiControlPanel`，进程死了由系统回收，
+  不存在"残留锁导致再也起不来"——这正是 open-revo 栽过的坑；
+- 端口被占自动顺延 10 个并把实际端口写进 `data/port`；配置损坏则改名备份后用默认值继续跑。
+
+## 8. 已知问题 / 待办
+
+- [ ] EC 单次只读实测：等用户授权后再跑（见第 6 节规矩 2）
+- [ ] 风扇转速 / 风扇曲线：拿到 EC 只读通道后才能验证，当前面板如实显示「不可控」
+- [ ] 硬件档位写入：只读通过后逐档确认（办公 / 均衡 / 狂暴）
 - [ ] 电池保养三档（长效/平衡/健康）：命令未逆向成功，**故意不做**，不编造
-- [ ] 兜底通道需要恢复 GCUBridge 服务（当前 Stopped/Disabled），恢复前该卡片区始终灰
-- [ ] 托盘图标在真实桌面上的人工确认（沙箱内无法截图验证）
-- [ ] 实体「造物者模式」按键：按键直连 EC 不走键盘通道，事件源需靠 EC 读或 MQTT 兜底捕获
+- [ ] 兜底通道：需恢复 GCUBridge 服务（`scripts\启用造物者档控制.bat`，会弹 UAC）
+- [ ] 托盘图标的桌面可见性需本机确认（沙箱内截不到图）
+- [ ] 实体「造物者模式」按键：按键直连 EC 不走键盘通道，事件源要靠 EC 读或 MQTT 兜底
 
 ## 8. 协议与许可参考
 

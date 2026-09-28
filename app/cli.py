@@ -7,6 +7,7 @@
   * 任何启动期致命异常都落到 data/fatal-*.log，窗口不闪退。
 """
 import argparse
+import collections
 import os
 import sys
 import threading
@@ -53,6 +54,41 @@ def cmd_probe_acpi(cfg, log):
         print('   ', n)
     acpi.close()
     return 0
+
+
+def _supervise(pass_through):
+    """守护模式：子进程异常退出就自动拉起，用户主动停止则不复活。
+
+    针对 open-revo 的教训——它一次僵死之后重启再也没起来，用户只能手动折腾。
+    这里区分「正常退出（面板里点了停止 / --stop）」和「崩了/被杀」：
+    只有后者才重启，且 10 分钟窗口内最多重启 5 次，避免启动即崩时刷屏空转。
+    """
+    import subprocess
+    ensure_data_dir()
+    log = Log('umi-supervisor')
+    root = os.path.dirname(os.path.abspath(sys.argv[0]))
+    child_args = [sys.executable, os.path.join(root, 'main.py')] + list(pass_through)
+    window = collections.deque(maxlen=8)
+    restarts = 0
+    backoff = 3.0
+    log.info('[守护] 启动被管进程：%s' % ' '.join(child_args[-2:]))
+    while True:
+        proc = subprocess.Popen(child_args, cwd=root, creationflags=0x08000000)
+        code = proc.wait()
+        now = time.time()
+        window.append(now)
+        if code == 0:
+            log.info('[守护] 子进程正常退出（code=0），不再拉起')
+            return 0
+        recent = sum(1 for t in window if now - t < 600.0)
+        if recent > 5:
+            log.error('[守护] 10 分钟内异常退出 %d 次，停止自动重启以免空转；'
+                      '请查看 data/fatal-*.log 与 umi-control-panel.log' % recent)
+            return 1
+        restarts += 1
+        wait = min(backoff * (2 ** min(restarts, 3)), 30.0)
+        log.warn('[守护] 子进程异常退出 code=%s，%.0f 秒后第 %d 次重启' % (code, wait, restarts))
+        time.sleep(wait)
 
 
 def _anchor_loop():
@@ -125,7 +161,18 @@ def main(argv=None):
     ap.add_argument('--one-shot', action='store_true', help='打印一次状态 JSON 后退出')
     ap.add_argument('--stop', action='store_true', help='请求正在运行的实例优雅退出')
     ap.add_argument('--anchor', action='store_true', help=argparse.SUPPRESS)
-    args = ap.parse_args(argv)
+    ap.add_argument('--supervise', action='store_true',
+                    help='守护模式：子进程崩溃自动重启（开机自启推荐用这个）')
+    args, extra = ap.parse_known_args(argv)
+
+    if args.supervise:
+        passthrough = []
+        if args.no_tray:
+            passthrough.append('--no-tray')
+        if args.no_browser:
+            passthrough.append('--no-browser')
+        passthrough.extend(extra)
+        return _supervise(passthrough)
 
     ensure_data_dir()
     cfg, cfg_error, cfg_broken = Config.load()
