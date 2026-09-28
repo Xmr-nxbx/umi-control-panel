@@ -226,6 +226,7 @@ class EcChannel:
         self.values = {}
         self.changes = []
         self._watch_prev = {}
+        self._expect = {}
         self._last_fast = 0.0
         self._last_slow = 0.0
         self._last_reprobe = 0.0
@@ -354,11 +355,14 @@ class EcChannel:
             self._watch_prev[name] = value
             if old is None or old == value:
                 continue
+            # 自己写的值会被下一次轮询看到，别把它当成「外部触发」报出来
+            if self._expect.pop(name, None) == value:
+                continue
             entry = {'ts': round(time.time(), 1), 'name': name, 'old': old, 'new': value}
             self.changes.append(entry)
             del self.changes[:-WATCH_HISTORY]
             if self.log:
-                self.log.info('[EC变化] %s: %s → %s（外部触发，非本面板所写则说明有实体按键/其它软件在改）'
+                self.log.info('[EC变化] %s: %s → %s（不是本面板写的：实体按键或其它软件在改）'
                               % (name, old, value))
 
     def recent_changes(self, n=12):
@@ -504,6 +508,7 @@ class EcChannel:
             return False, '未知风扇模式：%s（可用：%s）' % (
                 flag_name, '/'.join(sorted(table)) or '无')
         value = int(table[flag_name])
+        self._expect['ADDR_MAFAN_CONTROL_BYTE'] = value
         before = self._read_named('ADDR_MAFAN_CONTROL_BYTE')
         result = self.dev.write(int(addr), value)
         if result is None:
@@ -525,6 +530,7 @@ class EcChannel:
         addr = self.addr(name)
         if addr is None:
             return False, '寄存器表里没有 %s' % name
+        self._expect[name] = int(value) & 0xFF
         result = self.dev.write(int(addr), int(value))
         if result is None:
             return False, '写入失败：%s' % self.dev.error

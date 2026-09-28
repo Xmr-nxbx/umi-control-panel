@@ -37,6 +37,7 @@ class Daemon:
         self._last_applied_tier = None
         self._external_hits = 0
         self.wanted_hw_mode = None
+        self._last_fan_ts = 0.0
         self.started_at = time.time()
         self.snap = {'cpu_pct': None, 'gpu_pct': None, 'cpu_temp': None}
         self.capabilities = self.power.probe()
@@ -108,6 +109,7 @@ class Daemon:
             self._apply(tier, now)
 
         self._hardware_follow(tier, snap, now)
+        self._fan_follow(tier, now)
         self._state_store(snap, decision, tier, now)
 
     def _bench_tick(self, snap, now):
@@ -170,6 +172,34 @@ class Daemon:
         if state.get('mode') and self.wanted_hw_mode:
             hw.guard_sleep_downshift(state['mode'], snap.get('idle_s') or 0.0,
                                      self.wanted_hw_mode)
+
+    def _fan_follow(self, tier, now):
+        """风扇模式跟随档位：省电/均衡/流畅用自动，性能档加强散热。
+
+        只写语义已确认的那个字节，取值只允许 OEM 枚举里的名字；
+        带冷却窗口，避免档位抖动时反复改硬件。
+        """
+        if not self.cfg.get('hardware', 'ec', 'fan_follow_tier', default=False):
+            return
+        if self.hw.capability_map().get('fan.mode', {}).get('state') != 'verified':
+            return
+        mapping = self.cfg.get('hardware', 'ec', 'fan_map', default={}) or {}
+        want = mapping.get(tier)
+        if not want or want not in self.hw.fan_modes():
+            return
+        cooldown = float(self.cfg.get('hardware', 'ec', 'fan_cooldown_s', default=20.0))
+        if now - self._last_fan_ts < cooldown:
+            return
+        snap = self.hw.snapshot()
+        if snap.get('fan_mode_flag') == want:
+            return
+        self._last_fan_ts = now
+        ok, detail = self.hw.set_fan_mode(want)
+        if ok:
+            self.log.info('[风扇] 跟随%s档 → %s（%s）' % (
+                TIER_LABELS.get(tier, tier), want, detail))
+        else:
+            self.log.warn('[风扇] 跟随失败：%s' % detail)
 
     # ---------- 对外状态 ----------
     def _state_store(self, snap, decision, tier, now):

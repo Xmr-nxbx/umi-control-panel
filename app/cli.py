@@ -389,7 +389,8 @@ def main(argv=None):
                 daemon.set_intent(intent)
 
             tray = Tray(cfg, log, open_panel, set_intent,
-                        lambda: quit_evt.set(), lambda m: daemon.set_mode_now(m))
+                        lambda: quit_evt.set(), lambda m: daemon.set_mode_now(m),
+                        on_fan=lambda f: daemon.set_fan_mode(f))
             tray._intent = cfg.get('intent')
             tray.start()
             state['tray'] = tray
@@ -443,12 +444,25 @@ def _current_port(cfg):
 def _sync_tray(daemon, tray, quit_evt):
     last = None
     while not quit_evt.is_set():
-        st = daemon.state()
-        key = (st.get('tier'), st.get('intent'))
-        if key != last:
-            tray.update_state(st.get('tier') or 'bal',
-                              '%s档 · %s' % (st.get('tier_label') or '?',
-                                             st.get('intent') or 'auto'),
-                              intent=st.get('intent'))
-            last = key
+        try:
+            last = _sync_tray_once(daemon, tray, last)
+        except Exception as exc:                           # noqa: BLE001
+            daemon.log.error('[托盘同步] 异常（不影响面板）：%r' % (exc,))
         quit_evt.wait(2.0)
+
+
+def _sync_tray_once(daemon, tray, last):
+    st = daemon.state()
+    hw = st.get('hardware') or {}
+    sensor = st.get('sensor') or {}
+    fan = hw.get('fan_mode_flag')
+    key = (st.get('tier'), st.get('intent'), fan)
+    if key == last:
+        return last
+    rpm = ('%s RPM' % hw['fan_rpm']) if hw.get('fan_rpm') else '无EC'
+    mhz = (' · %sMHz' % sensor['cpu_mhz']) if sensor.get('cpu_mhz') else ''
+    tray.update_state(st.get('tier') or 'bal',
+                      '%s档 · %s · %s%s' % (st.get('tier_label') or '?',
+                                            st.get('intent') or 'auto', rpm, mhz),
+                      intent=st.get('intent'), fan=fan)
+    return key

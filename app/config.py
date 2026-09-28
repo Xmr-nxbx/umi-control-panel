@@ -68,8 +68,15 @@ DEFAULTS = {
                   'wegame.exe', 'leagueoflegends.exe', 'overwatch.exe', 'apex.exe'],
     },
     'hardware': {
-        # EC 直连（主通道）：只读默认开，写档需要用户逐项开启
-        'ec': {'enabled': True, 'allow_write': False},
+        # EC 直连（主通道）：只读默认开，写操作需要显式开启
+        # allow_write 只放开「语义已确认」的写入（目前是风扇模式字节）；
+        # 档位/PL 这类语义未确认的寄存器在代码层面硬拦，配置开了也不写。
+        'ec': {'enabled': True, 'allow_write': False,
+               # 风扇模式跟随调度档位：空闲安静、性能档加强散热。
+               # 取值必须来自 OEM 枚举 MyFanCTLByteFlag，别的名字一律不下发。
+               'fan_follow_tier': True, 'fan_cooldown_s': 10.0,
+               'fan_map': {'eco': 'Normal_Mode', 'bal': 'Normal_Mode',
+                           'mid': 'Normal_Mode', 'perf': 'Turbo_Mode'}},
         # OEM GCUBridge MQTT（兜底通道）：服务活着才启用
         # 身份（clientId/username/password）不入库，放 data/mqtt_identity.json（已 gitignore）
         'mqtt': {'enabled': True, 'host': '127.0.0.1', 'port': 13688,

@@ -12,6 +12,14 @@ from app.policy.scheduler import TIER_LABELS
 
 u32 = ctypes.windll.user32
 k32 = ctypes.windll.kernel32
+s32 = ctypes.windll.shell32          # Shell_NotifyIconW 在 shell32，不在 user32
+
+# LRESULT/LPARAM 在 x64 上是 64 位。不声明 argtypes 的话 ctypes 按 c_int 传参，
+# DefWindowProcW 遇到大 lparam 会抛 OverflowError——异常发生在窗口回调里，
+# 只会打到 stderr，表现就是「右键菜单没反应」这种查不出原因的毛病。
+LRESULT = ctypes.c_ssize_t
+u32.DefWindowProcW.restype = LRESULT
+u32.DefWindowProcW.argtypes = [wt.HWND, ctypes.c_uint, wt.WPARAM, wt.LPARAM]
 
 NIM_ADD = 0
 NIM_MODIFY = 1
@@ -30,6 +38,7 @@ TPM_RIGHTBUTTON = 0x0002
 MF_STRING = 0x0000
 MF_SEPARATOR = 0x0010
 MF_CHECKED = 0x0008
+MF_GRAYED = 0x0001
 LR_LOADFROMFILE = 0x0010
 IMAGE_ICON = 1
 
@@ -40,6 +49,14 @@ MENU_BALANCE = 0x1011
 MENU_OFFICE = 0x1012
 MENU_AUTO = 0x1013
 MENU_QUIT = 0x1999
+MENU_FAN_NORMAL = 0x1020
+MENU_FAN_TURBO = 0x1021
+MENU_FAN_BOOST = 0x1022
+
+# 风扇模式取值必须是 OEM 枚举 MyFanCTLByteFlag 里的名字，别的不下发
+FAN_ITEMS = ((MENU_FAN_NORMAL, 'Normal_Mode', '风扇：自动'),
+             (MENU_FAN_TURBO, 'Turbo_Mode', '风扇：强冷'),
+             (MENU_FAN_BOOST, 'FanBoost_Mode', '风扇：加速'))
 
 TIER_COLORS = {'perf': (255, 93, 108), 'mid': (255, 182, 72),
                'bal': (53, 224, 216), 'eco': (74, 222, 128)}
@@ -84,13 +101,15 @@ def _make_ico_bytes(size, rgb, dim):
 
 
 class Tray:
-    def __init__(self, cfg, log, on_open, on_intent, on_quit, on_mode):
+    def __init__(self, cfg, log, on_open, on_intent, on_quit, on_mode, on_fan=None):
         self.cfg = cfg
         self.log = log
         self.on_open = on_open
         self.on_intent = on_intent
         self.on_quit = on_quit
         self.on_mode = on_mode
+        self.on_fan = on_fan
+        self._fan = None
         self.hwnd = None
         self.icon = None
         self._thread = None
@@ -102,15 +121,14 @@ class Tray:
         self._thread.start()
 
     def _register_and_create(self):
-        wc = ctypes.wintypes.WNDCLASSW if hasattr(ctypes, 'wintypes') else None
         WNDCLASS = type('WNDCLASS', (ctypes.Structure,), {'_fields_': [
             ('style', ctypes.c_uint), ('lpfnWndProc', ctypes.c_void_p),
             ('cbClsExtra', ctypes.c_int), ('cbWndExtra', ctypes.c_int),
-            ('hInstance', wt.HINSTANCE), ('hIcon', wt.HICON),
-            ('hCursor', wt.HCURSOR), ('hbrBackground', wt.HBRUSH),
+            ('hInstance', ctypes.c_void_p), ('hIcon', ctypes.c_void_p),
+            ('hCursor', ctypes.c_void_p), ('hbrBackground', ctypes.c_void_p),
             ('lpszMenuName', wt.LPCWSTR), ('lpszClassName', wt.LPCWSTR)]})
 
-        @ctypes.WINFUNCTYPE(ctypes.c_long, wt.HWND, ctypes.c_uint,
+        @ctypes.WINFUNCTYPE(LRESULT, wt.HWND, ctypes.c_uint,
                             wt.WPARAM, wt.LPARAM)
         def wnd_proc(hwnd, msg, wparam, lparam):
             return self._wnd_proc(hwnd, msg, wparam, lparam)
@@ -163,15 +181,17 @@ class Tray:
         tip = 'Umi 控制台 · %s' % label
         data.szTip = tip[:63]
         flag = NIM_ADD if not getattr(self, '_added', False) else NIM_MODIFY
-        if not u32.Shell_NotifyIconW(flag, ctypes.byref(data)):
+        if not s32.Shell_NotifyIconW(flag, ctypes.byref(data)):
             self.log.error('托盘图标添加失败')
             return
         self._added = True
         self.current_tip = tip
 
-    def update_state(self, tier, label, intent=None):
+    def update_state(self, tier, label, intent=None, fan=None):
         if intent:
             self._intent = intent
+        if fan:
+            self._fan = fan
         if not self.hwnd:
             return
         if label != self.current_tip:
@@ -185,6 +205,12 @@ class Tray:
                           (MENU_BALANCE, '均衡'), (MENU_TURBO, '狂暴')):
             checked = MF_CHECKED if self._intent == name else 0
             u32.AppendMenuW(hmenu, MF_STRING | checked, mid, name)
+        u32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
+        for mid, flag, text in FAN_ITEMS:
+            state = MF_STRING | (MF_CHECKED if self._fan == flag else 0)
+            if self.on_fan is None:
+                state |= MF_GRAYED
+            u32.AppendMenuW(hmenu, state, mid, text)
         u32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
         u32.AppendMenuW(hmenu, MF_STRING, MENU_QUIT, '退出（还原电源设置）')
         pt = wt.POINT()
@@ -205,6 +231,10 @@ class Tray:
                       MENU_BALANCE: 'balance', MENU_TURBO: 'turbo'}[cmd]
             self._intent = intent
             self.on_intent(intent)
+        elif cmd in dict((mid, flag) for mid, flag, _ in FAN_ITEMS):
+            flag = dict((mid, flag) for mid, flag, _ in FAN_ITEMS)[cmd]
+            if self.on_fan is not None:
+                self.on_fan(flag)
 
     def _wnd_proc(self, hwnd, msg, wparam, lparam):
         if msg == WM_TRAY:
@@ -222,13 +252,21 @@ class Tray:
         return u32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     def _run(self):
-        if not self._register_and_create():
-            return
-        msg = _MSG()
-        while u32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-            u32.TranslateMessage(ctypes.byref(msg))
-            u32.DispatchMessageW(ctypes.byref(msg))
-        self.remove()
+        # 线程里抛出的异常不会冒泡到主线程，只会打到 stderr——进程隐藏跑的时候
+        # 就等于「悄无声息地坏掉」。托盘图标曾经就是这样没了：一行无效代码抛
+        # AttributeError，日志里什么都没有。所以这里必须自己兜住并写日志。
+        try:
+            if not self._register_and_create():
+                return
+            msg = _MSG()
+            while u32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                u32.TranslateMessage(ctypes.byref(msg))
+                u32.DispatchMessageW(ctypes.byref(msg))
+            self.remove()
+        except Exception as exc:                           # noqa: BLE001
+            import traceback
+            self.log.error('[托盘] 线程异常退出：%r | %s' % (
+                exc, traceback.format_exc().replace('\n', ' / ')))
 
     def remove(self):
         if getattr(self, '_added', False) and self.hwnd:
@@ -236,5 +274,5 @@ class Tray:
             data.cbSize = ctypes.sizeof(data)
             data.hWnd = self.hwnd
             data.uID = 1
-            u32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(data))
+            s32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(data))
             self._added = False
