@@ -40,6 +40,8 @@ ACPI_DEVICE = '\\\\.\\ACPI'
 READ_METHOD = 'ECRR'
 WRITE_METHODS = ('ECRW', 'SMRW')           # 只登记，不主动使用
 IN_BUF_TOTAL = 0x28                        # 驱动侧观察到的入参总长（40）
+STRUCT_VERSION = 1                         # 观察值：总长后面那个字段是 1
+FIELD_TOTAL_LEN = IN_BUF_TOTAL             # +8  入参总长（含头部，不是负载长度）
 
 GENERIC_READ = 0x80000000
 GENERIC_WRITE = 0x40000000
@@ -73,7 +75,7 @@ def error_text(err):
 
 
 class EcDevice:
-    """`\\.`\ACPIDriver` 句柄 + 一次一发请求的封装（内置单次熔断）。"""
+    r"""OEM 驱动设备句柄 + 一次一发请求的封装（内置单次熔断）。"""
 
     def __init__(self):
         self.h = None
@@ -81,6 +83,7 @@ class EcDevice:
         self.open_error = None
         self.attempts = 0            # 熔断用：本进程只允许极少量请求
         self.last_raw = b''
+        self.last_input = b''
         self.last_ioctl = None
 
     def open(self):
@@ -113,6 +116,7 @@ class EcDevice:
         self.attempts += 1
         self.last_ioctl = ioctl
         body = build_read_input(addr, length)
+        self.last_input = body
         in_buf = ctypes.create_string_buffer(body, len(body))
         out_len = 512
         out_buf = ctypes.create_string_buffer(out_len)
@@ -128,19 +132,24 @@ class EcDevice:
 
 
 def build_read_input(addr, length=1, data_len=IN_BUF_TOTAL):
-    """按驱动侧观察到的布局拼只读请求：签名 + 方法名 + 入参长 + 出参长 + [状态, 数据长, 数据]。
+    """拼只读请求：签名 + 方法名 + 总长(0x28) + 版本(1) + [状态, 数据长, 数据...]。
 
-    入参负载是 16 位状态 + 16 位长度 + 数据区，凑够驱动期望的总长（0x28）。
+    字段位置来自对 open-revo 用户态栈的静态观察（+0x90:'AeiC' +0x94:'ECRR'
+    +0x98:0x28 总长 +0x9C:1，随后 +0xA0 是 word 状态、+0xA2 是 word 数据长、+0xA4 起是数据）。
+    上一版把总长写成了负载长度、把版本写成了出参长度，驱动原样回显不解析。
     """
+    head = bytearray()
+    head += SIG_IN + READ_METHOD.encode('ascii')
+    head += _u32(FIELD_TOTAL_LEN)              # 总长（含头部）
+    head += _u32(STRUCT_VERSION)               # 结构版本
     payload = bytearray()
     payload += (0).to_bytes(2, 'little')            # word 状态（输入侧填 0）
     payload += (length & 0xFFFF).to_bytes(2, 'little')
-    payload += (addr & 0xFFFF).to_bytes(2, 'little')  # 首字给 EC 地址
-    payload += bytes(max(0, data_len - 8))
-    head = bytearray(SIG_IN) + READ_METHOD.encode('ascii')
-    head += _u32(len(payload))                       # InBufferLength
-    head += _u32(256)                                # OutBufferLength
-    return bytes(head) + bytes(payload)
+    payload += (addr & 0xFFFF).to_bytes(2, 'little')
+    body = bytes(head) + bytes(payload)
+    if len(body) < data_len:
+        body += bytes(data_len - len(body))
+    return body
 
 
 def parse_output(raw):

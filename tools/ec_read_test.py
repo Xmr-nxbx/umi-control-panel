@@ -57,20 +57,27 @@ def main():
         lines.append('按安全规则停手：不换码、不重试、不改缓冲长度瞎试。')
         lines.append('下一步应回到离线分析（把驱动镜像交给我做定向反汇编）。')
     else:
-        lines.append('[有回包] IOCTL=0x%08X，返回 %d 字节' % (IOCTL_EVAL_ASYNC, parsed['size']))
-        lines.append('  签名=%r 版本=%s 参数个数=%s 状态=%s' % (
+        echoed = dev.last_raw.startswith(dev.last_input[:len(dev.last_input) - 1]) or \
+            dev.last_raw[:len(dev.last_input)] == dev.last_input
+        nonzero = sum(1 for b in dev.last_raw if b)
+        lines.append('[有回包] IOCTL=0x%08X，返回 %d 字节，非零字节 %d 个' % (
+            IOCTL_EVAL_ASYNC, parsed['size'], nonzero))
+        lines.append('  签名=%r 版本=%s 参数个数=%s 状态=%s ok=%s' % (
             parsed['sig'], parsed.get('version'), parsed.get('arg_count'),
-            parsed.get('status')))
-        lines.append('  ok=%s' % parsed['ok'])
+            parsed.get('status'), parsed['ok']))
+        lines.append('  判读：输出缓冲与我发进去的请求%s' % ('**一模一样（驱动原样回显 = 没识别请求）**'
+                                                     if echoed else '不同（可能真的写了数据，见下）'))
         lines.append('  原始回包：')
         lines.append(hexdump(dev.last_raw))
-        if parsed['args']:
-            for n, arg in enumerate(parsed['args']):
+        if parsed['args'] and not echoed:
+            for n, arg in enumerate(parsed['args'][:4]):
                 lines.append('  参数%d（%d 字节）：' % (n, len(arg)))
                 lines.append(hexdump(arg))
-        if not parsed['ok']:
+        if echoed or not parsed['ok']:
             lines.append('')
-            lines.append('判读：签名不是 AeoB → 请求布局仍需离线校准；已用完本次配额，不再发。')
+            lines.append('本轮结论：请求布局未被驱动接受，已用完本次配额（1 次），不再发第二个。')
+            lines.append('需要修正的字段：+8 应为入参总长(0x28)、+0xC 应为结构版本(1)，'
+                         '负载从 +0x10 起为 [word 状态][word 数据长][数据]。')
     return _finish(lines)
 
 
