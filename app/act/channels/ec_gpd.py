@@ -79,6 +79,19 @@ SLOW_GROUPS = (
                         'ADDR_BATTERY_CHARGE_LIMIT_UP', 'ADDR_BATTERY_CHARGE_LIMIT_DOWN')),
 )
 
+# 变化监听：只盯语义寄存器（风扇转速/占空比/温度这类每秒都在动的不进监听，否则刷爆日志）。
+# 用途：实体「造物者模式」按键直连 EC，不走键盘通道，靠这个监听抓事件源；
+# 也是找出「档位到底写在哪个寄存器」的零风险办法——按键前后对比即可。
+WATCH_REGS = ('ADDR_MAFAN_CONTROL_BYTE', 'ADDR_MyFanCCI_Mode_Index', 'ADDR_TRIGGER_BYTE',
+              'ADDR_TRIGGER_BYTE2', 'ADDR_STAUTS_BYTE', 'ADDR_SILENTMODE_STATUS_BYTE',
+              'ADDR_COMPLEX_POWER_STATUS', 'ADDR_PL1_SETTING_VALUE', 'ADDR_PL2_SETTING_VALUE',
+              'ADDR_PL4_SETTING_VALUE', 'ADDR_CPU_VRM_CURRENT_LIMIT_BYTE',
+              'ADDR_CPU_VRM_MAXI_CURRENT_LIMIT_BYTE', 'ecPowSource',
+              'ADDR_BATTERY_CHARGE_LIMIT_UP', 'ADDR_BATTERY_CHARGE_LIMIT_DOWN',
+              'ADDR_FAN_ALERT_BYTE', 'ADDR_BATTERY_ALERT_BYTE', 'ADDR_SUPPORT_BYTE1',
+              'ADDR_SUPPORT_BYTE2', 'ADDR_AP_OEM_BYTE', 'ADDR_BIOS_OEM_BYTE')
+WATCH_HISTORY = 60
+
 
 def load_map(path=None):
     path = path or data_path(MAP_NAME)
@@ -211,6 +224,8 @@ class EcChannel:
         self.map = None
         self.mode_values = {}
         self.values = {}
+        self.changes = []
+        self._watch_prev = {}
         self._last_fast = 0.0
         self._last_slow = 0.0
         self._last_reprobe = 0.0
@@ -322,7 +337,32 @@ class EcChannel:
                     got[name] = value
             if got:
                 self.values[group] = got
+        self._watch()
         self._derive()
+
+    def _watch(self):
+        """盯语义寄存器的变化：实体按键、外部软件改档都会在这里现形。"""
+        for name in WATCH_REGS:
+            addr = self.addr(name)
+            if addr is None:
+                continue
+            value = self.dev.read(int(addr))
+            if value is None:
+                continue
+            value &= 0xFF
+            old = self._watch_prev.get(name)
+            self._watch_prev[name] = value
+            if old is None or old == value:
+                continue
+            entry = {'ts': round(time.time(), 1), 'name': name, 'old': old, 'new': value}
+            self.changes.append(entry)
+            del self.changes[:-WATCH_HISTORY]
+            if self.log:
+                self.log.info('[EC变化] %s: %s → %s（外部触发，非本面板所写则说明有实体按键/其它软件在改）'
+                              % (name, old, value))
+
+    def recent_changes(self, n=12):
+        return list(self.changes[-n:])
 
     # ---------- 语义换算 ----------
     @staticmethod
@@ -498,7 +538,8 @@ class EcChannel:
                        'validated': self._validated, 'fail_streak': self.dev.fail_streak,
                        'error': self.dev.error, 'allow_write': self.allow_write,
                        'registers': len(self.registers),
-                       'fan_modes': sorted(self.fan_modes())})
+                       'fan_modes': sorted(self.fan_modes()),
+                       'changes': self.recent_changes()})
         return {'name': self.name, 'label': self.label, 'alive': self.alive,
                 'caps': dict(self.caps), 'detail': detail}
 
