@@ -12,6 +12,8 @@ from app.paths import data_path
 CONFIG_NAME = 'config.json'
 
 DEFAULTS = {
+    # 档位调校版本：改 tiers 默认值时把它 +1，老配置会自动换用新档位（见 _migrate）
+    'tier_tuning': 3,
     'server': {
         'bind': '127.0.0.1',
         'port': 8747,
@@ -40,15 +42,23 @@ DEFAULTS = {
         'allow_perf_on_battery': True,
         'sleep_guard_idle_s': 60.0,
     },
+    # 四档必须在「实际频率」上拉开差距，否则用户体感不到。本机 2026-09-29 实测结论：
+    #   * 睿频开关（PERFBOOSTMODE）在这台机器上不管用：省电档写了 boost=0，
+    #     满载仍跑到 4577 MHz，四档跑分成绩几乎一样（99～101 分）；
+    #   * 最低处理器状态只影响空闲频率，满载时看不出区别；
+    #   * 唯一真正能压住频率的是「最大处理器状态」：99% 就禁用睿频，
+    #     85% ≈ 锁 1.96GHz（标称 2304 MHz）。
+    # 所以省电档用 max 上限做主闸，其余档位靠最低频率/EPP 改善响应速度。
+    # boost 取值：0=禁用 1=启用 2=激进 3=高效启用 4=高效激进 5=保证频率激进
     'tiers': {
         'perf': {'scheme': 'high_perf', 'min_ac': 100, 'max_ac': 100,
                  'min_dc': 60, 'max_dc': 100, 'cool': 0, 'boost': 2, 'epp': 0},
         'mid':  {'scheme': 'balanced', 'min_ac': 50, 'max_ac': 100,
                  'min_dc': 30, 'max_dc': 100, 'cool': 0, 'boost': 2, 'epp': 25},
-        'bal':  {'scheme': 'balanced', 'min_ac': 25, 'max_ac': 100,
+        'bal':  {'scheme': 'balanced', 'min_ac': 20, 'max_ac': 100,
                  'min_dc': 15, 'max_dc': 100, 'cool': 0, 'boost': 1, 'epp': 50},
-        'eco':  {'scheme': 'balanced', 'min_ac': 5, 'max_ac': 100,
-                 'min_dc': 5, 'max_dc': 100, 'cool': 0, 'boost': 1, 'epp': 85},
+        'eco':  {'scheme': 'balanced', 'min_ac': 5, 'max_ac': 85,
+                 'min_dc': 5, 'max_dc': 70, 'cool': 1, 'boost': 0, 'epp': 85},
     },
     'apps': {
         'performance': ['code.exe', 'chrome.exe', 'edge.exe', 'taskmgr.exe'],
@@ -84,12 +94,28 @@ SCHEME_LABELS = {'balanced': '平衡', 'high_perf': '高性能', 'power_saver': 
 
 
 def _deep_merge(dst, src):
+    """把已保存的配置盖到默认值上。
+
+    标量必须覆盖，否则用户在面板上选的意图重启后就丢了（这个 bug 真实存在过）。
+    """
     for k, v in src.items():
         if isinstance(v, dict) and isinstance(dst.get(k), dict):
             _deep_merge(dst[k], v)
-        elif k not in dst:
+        else:
             dst[k] = json.loads(json.dumps(v))
     return dst
+
+
+def _migrate(cfg):
+    """档位参数是「调出来的」，老配置里存的旧值会把新调校整个盖掉。
+
+    用 tier_tuning 版本号判定：版本落后（含从没存过这个键）就整块换成当前默认档位，
+    用户自己改过的其它键（意图、阈值、白名单）一律保留。
+    """
+    if cfg.raw_tier_tuning != DEFAULTS['tier_tuning']:
+        cfg.data['tiers'] = json.loads(json.dumps(DEFAULTS['tiers']))
+        cfg.data['tier_tuning'] = DEFAULTS['tier_tuning']
+    return cfg
 
 
 def _strip_unknown(cfg):
@@ -127,6 +153,7 @@ def _apply_local_identity(cfg):
 class Config:
     def __init__(self, data=None, path=None):
         self.data = _deep_merge(json.loads(json.dumps(DEFAULTS)), data or {})
+        self.raw_tier_tuning = (data or {}).get('tier_tuning') if isinstance(data, dict) else None
         self.path = path
         self.bad_file = None
 
@@ -179,4 +206,5 @@ class Config:
                 return cls(path=path), str(exc), broken
         cfg = cls(raw if isinstance(raw, dict) else None, path=path)
         _strip_unknown(cfg.data)
+        _migrate(cfg)
         return _apply_local_identity(cfg), None, None

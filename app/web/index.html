@@ -16,6 +16,7 @@
   <div class="head-right">
     <div class="tier-box">
       <div class="tier-now" id="tier-now">--</div>
+      <div class="tier-clock" id="tier-clock">-- MHz</div>
       <div class="tier-reason" id="tier-reason">等待数据…</div>
     </div>
     <div class="pills" id="pills"></div>
@@ -44,6 +45,21 @@
   <section class="card span-2">
     <h2>能力矩阵</h2>
     <div class="caps" id="caps"></div>
+  </section>
+
+  <section class="card span-2">
+    <h2>跑分对比 <span class="tag">内置负载，不下载任何软件</span></h2>
+    <div class="btn-row">
+      <button id="btn-bench-current">测当前档位</button>
+      <button id="btn-bench-compare" class="primary">四档逐一对比（约 1.5 分钟）</button>
+    </div>
+    <div class="bench-run" id="bench-run" hidden>
+      <div class="bar"><div class="fill" id="bench-fill"></div></div>
+      <span id="bench-step">准备中…</span>
+    </div>
+    <div id="bench-table"></div>
+    <div class="verdict" id="bench-verdict" hidden></div>
+    <p class="hint" id="bench-hint"></p>
   </section>
 
   <section class="card span-2">

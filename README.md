@@ -25,12 +25,37 @@
 
 | 能力 | 状态 | 说明 |
 | :--- | :--- | :--- |
-| 五档自适应调度（powercfg 方案 / EPP / turbo / min-max） | **可用** | 非管理员即可写，已在本机实测生效并注册表回读校验 |
+| 四档调度写 powercfg（方案 / EPP / turbo / min-max） | **写得进去，但本机不控频率** | 见下方「实测结论」。写入与注册表回读都正常，问题在固件层 |
+| 实际 CPU 频率显示（PDH `% Processor Performance`） | **可用** | 面板右上角实时显示，档位到底有没有效果一眼可见 |
+| 内置跑分对比（单线程 / 多线程 / 短任务延迟 / 内存） | **可用** | `main.py --bench compare` 或面板「跑分对比」卡，纯标准库，不下载任何软件 |
 | 息屏掉档拦截、驻留期、亮屏缓冲 | **可用** | 纯软件层，见 `app/policy/scheduler.py`，19 条决策表测试覆盖 |
 | CPU 温度 / 占用、GPU 温度/功耗/占用、内存、空闲、前台进程 | **可用** | PDH 热区 + nvidia-smi + Win32 API，**零内核驱动** |
-| 硬件档位读写（EC） | **需管理员** | `\\.\ACPI` 打不开（err=2）。跑一次 `scripts\ACPI只读探测.bat` 即可定位方法路径 |
+| 硬件档位读写（EC） | **未打通** | `\\.\ACPIDriver` 普通用户可开句柄，但请求布局还没逆向确认（见第 6 节，禁止穷举） |
 | 风扇转速 / 风扇曲线 | **未验证** | 只有 EC 通道能提供；不做任何驱动穷举（见第 6 节） |
 | OEM MQTT 兜底通道 | **对端已停** | GCUBridge 服务当前 `Stopped / Disabled`（被 OpenRevo takeover 干的），需要恢复服务才可用 |
+
+### 实测结论：为什么「切了档却体会不出来」
+
+2026-09-29 在这台 GM5MG0Y 上逐项验证（`tools/tier_effect_test.py`，全程只改用户态电源属性）：
+
+| 设置 | 单线程频率 | 全核频率 | 单线程跑分 |
+| :--- | :--- | :--- | :--- |
+| 最大处理器状态 100% | 4222 MHz | 3332 MHz | 3.47 Mops/s |
+| 最大处理器状态 50% | 4273 MHz | 3329 MHz | 3.70 Mops/s |
+| **30% + 禁用睿频 + EPP=100 + 最低频率 5%** | 4283 MHz | 3316 MHz | 3.68 Mops/s |
+
+四档跑分（`tools/out/bench-compare.txt`）同样：省电 100.1 分、均衡 100.0、流畅 101.3、性能 103.4，
+频率区间 4246～4359 MHz，**只差 2.6%**。
+
+结论：**这台机器的 CPU 频率由 BIOS/EC 接管，Windows 电源计划那一层压不住**
+（睿频开关写进去、回读也对，但硬件不理）。所以：
+
+- 光靠 powercfg 做不出 Creator Center 那种「模式」差异，这不是调度逻辑的问题；
+- 要真正换挡，必须打通 EC（PL1/PL2、风扇）或恢复 OEM GCUBridge 通道；
+- 面板不会假装有效：跑分卡片会现场算出这个结论并红字标注（`app/bench.py::power_verdict`）。
+
+唯一能量出来的小差别是**短任务延迟**（降频后来一下活）：性能档 247 ms vs 省电档 269 ms，
+约 8%——这正是「亮屏回来点东西卡一下」的量纲，也是软件层还能优化的部分。
 
 > 兜底通道的 broker 身份（clientId / 用户名 / 口令）**不进仓库**：
 > 需要时把 `mqtt_identity.example.json` 复制成 `data/mqtt_identity.json` 填写即可，
@@ -58,6 +83,8 @@ scripts\停止面板.bat
 | 命令 | 作用 |
 | :--- | :--- |
 | `runtime\python.exe main.py` | 常驻：面板 + 托盘 + 调度循环 |
+| `main.py --bench compare` | 四档逐一对比跑分（约 2 分钟），面板在跑就交给面板执行 |
+| `main.py --bench current` | 只测当前档位，约 15 秒 |
 | `main.py --one-shot` | 采一次快照打 JSON，自检用，不改电源设置 |
 | `main.py --stop` | 让运行中的实例优雅退出 |
 | `main.py --probe-acpi` | **只读**枚举 ACPI 命名空间（需管理员），用于 EC 逆向 |
@@ -72,8 +99,10 @@ app/
   config.py                 默认值 + 深合并 + 原子落盘；坏配置改名备份后照常启动
   singleton.py              内核命名互斥（不用锁文件，进程死了系统回收）
   policy/scheduler.py       四档自适应状态机（纯判定，可注入假时钟做单测）
+  bench.py                  内置跑分：单线程/多进程多线程/短任务延迟/内存 + 相对基准指数
   sense/system.py           负载/空闲/内存/电源/前台进程（ctypes，无驱动）
   sense/thermal.py          CPU 热区温度（PDH）
+  sense/clock.py            CPU 实际频率（PDH % Processor Performance × 标称频率）
   sense/gpu.py              GPU 遥测（nvidia-smi）
   act/power.py              powercfg 方案 + EPP + turbo + min/max，注册表回读校验
   act/hardware.py           通道总管：能力协商、切档、息屏掉档守护

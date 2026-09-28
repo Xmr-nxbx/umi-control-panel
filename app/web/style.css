@@ -37,6 +37,7 @@ header {
 .head-right { display: flex; align-items: center; gap: 20px; }
 .tier-box { text-align: right; }
 .tier-now { font-size: 22px; font-weight: 700; color: var(--cyan); line-height: 1.1; }
+.tier-clock { font-size: 12px; color: var(--amber); font-variant-numeric: tabular-nums; }
 .tier-reason { font-size: 12px; color: var(--dim); max-width: 340px; }
 
 .pills { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; max-width: 300px; }
@@ -110,6 +111,32 @@ button.ghost { background: transparent; }
 }
 .hint { font-size: 12px; color: var(--dim); margin: 10px 0 0; }
 .hint.err { color: var(--red); }
+
+.tag {
+  font-size: 10px; letter-spacing: 0; text-transform: none; color: var(--dim);
+  border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; margin-left: 8px;
+}
+
+.bench-run { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+.bench-run .bar { flex: 1; height: 7px; border-radius: 4px; background: #202838; overflow: hidden; }
+.bench-run .fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--cyan), #4a9df8); transition: width .4s; }
+.bench-run span { font-size: 12px; color: var(--dim); min-width: 220px; text-align: right; }
+
+table.bench { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }
+table.bench th, table.bench td { padding: 7px 8px; text-align: left; border-bottom: 1px solid var(--line); }
+table.bench th { font-size: 11px; color: var(--dim); font-weight: 600; }
+table.bench th small { color: var(--dim); font-weight: 400; }
+table.bench td { font-variant-numeric: tabular-nums; }
+table.bench td.score { color: var(--cyan); font-weight: 700; }
+table.bench tr.now td { background: #123038; }
+table.bench em { font-style: normal; font-size: 11px; color: var(--amber); }
+
+.verdict {
+  margin-top: 12px; padding: 10px 12px; border-radius: 8px;
+  border: 1px solid var(--line); font-size: 13px; color: var(--dim);
+}
+.verdict.ok { border-color: #1f4d33; background: #12241b; color: #c9f5d8; }
+.verdict.bad { border-color: #55262c; background: #20141a; color: #ffc2c8; }
 
 footer {
   display: flex; justify-content: space-between; padding: 14px 26px;

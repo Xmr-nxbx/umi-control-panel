@@ -84,6 +84,8 @@ def make_handler(daemon, cfg, on_shutdown):
                                  'caps': daemon.hw.capability_map()})
             elif path == '/api/ec/probe':
                 self._send(200, daemon.hw.ec.probe())
+            elif path == '/api/bench':
+                self._send(200, daemon.bench_view())
             elif path == '/api/ping':
                 self._send(200, {'pong': True})
             else:
@@ -105,6 +107,9 @@ def make_handler(daemon, cfg, on_shutdown):
                 action = str(body.get('action', ''))
                 extra = body.get('extra') if isinstance(body.get('extra'), dict) else None
                 ok, detail = daemon.hw.send_action(action, extra)
+                self._send(200 if ok else 409, {'ok': ok, 'detail': detail})
+            elif path == '/api/bench':
+                ok, detail = daemon.start_bench(str(body.get('mode', 'current')))
                 self._send(200 if ok else 409, {'ok': ok, 'detail': detail})
             elif path == '/api/sleep-guard':
                 daemon.cfg.set('scheduler', 'sleep_guard_idle_s', float(body.get('idle_s', 60)))

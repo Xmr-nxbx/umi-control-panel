@@ -5,13 +5,18 @@ import time
 from app.act.channels.base import CAP_LABELS, MODE_LABELS
 from app.act.hardware import Hardware
 from app.act.power import PowerExecutor, active_scheme
+from app.bench import Bench, best_of_each_tier, power_verdict, save_record, set_baseline
 from app.config import SCHEME_LABELS, SCHEMES
 from app.policy.scheduler import TIER_LABELS, Scheduler
+from app.sense.clock import ClockSense
 from app.sense.gpu import GpuSense
 from app.sense.system import SystemSense
 from app.sense.thermal import Thermal
 
 APPLY_COOLDOWN_S = 3.0
+BENCH_SETTLE_S = 5.0
+BENCH_COOLDOWN_S = 8.0
+COMPARE_TIERS = ('eco', 'bal', 'mid', 'perf')
 
 
 class Daemon:
@@ -20,6 +25,7 @@ class Daemon:
         self.log = log
         self.sense = SystemSense()
         self.thermal = Thermal()
+        self.clock = ClockSense()
         self.gpu = GpuSense()
         self.power = PowerExecutor(log)
         self.hw = Hardware(cfg, log)
@@ -34,6 +40,11 @@ class Daemon:
         self.started_at = time.time()
         self.snap = {'cpu_pct': None, 'gpu_pct': None, 'cpu_temp': None}
         self.capabilities = self.power.probe()
+        self.capabilities['cpu_name'] = self.clock.cpu_name
+        self.capabilities['cpu_base_mhz'] = self.clock.base_mhz
+        self.bench = {'running': False, 'mode': None, 'tier': None, 'label': None,
+                      'step': '', 'pct': 0, 'results': [], 'error': None,
+                      'started_at': None, 'finished_at': None}
 
     # ---------- 生命周期 ----------
     def start(self):
@@ -41,10 +52,11 @@ class Daemon:
         self.hw.start()
         self._thread = threading.Thread(target=self._run, name='daemon', daemon=True)
         self._thread.start()
-        self.log.info('[启动] 调度=%s 意图=%s 活动方案=%s EPP支持=%s' % (
+        self.log.info('[启动] 调度=%s 意图=%s 活动方案=%s EPP支持=%s 频率采集=%s' % (
             '开' if self.cfg.get('scheduler', 'enabled') else '关',
             self.cfg.get('intent'), self.capabilities.get('active_scheme', '')[:8],
-            self.capabilities.get('epp_supported')))
+            self.capabilities.get('epp_supported'),
+            '可用' if self.clock.available else '不可用'))
 
     def stop(self, restore=None):
         self._stop.set()
@@ -54,6 +66,7 @@ class Daemon:
         if restore:
             self.power.restore(self.cfg['tiers'])
         self.thermal.close()
+        self.clock.close()
         self.log.info('[停止] 已退出')
 
     def _run(self):
@@ -74,10 +87,15 @@ class Daemon:
         temp, zones = self.thermal.read()
         snap['cpu_temp'] = temp
         snap['thermal_zones'] = zones
+        snap['cpu_mhz'] = self.clock.read()
         g = self.gpu.read(min_interval=1.0) or {}
         snap['gpu_pct'] = g.get('util_pct')
         snap['gpu'] = g
         self.snap = snap
+
+        if self.bench.get('running'):
+            self._bench_tick(snap, now)
+            return
 
         intent = self.cfg.get('intent') or 'auto'
         if not self.cfg.get('scheduler', 'enabled', default=True) and intent == 'auto':
@@ -92,6 +110,13 @@ class Daemon:
         self._hardware_follow(tier, snap, now)
         self._state_store(snap, decision, tier, now)
 
+    def _bench_tick(self, snap, now):
+        """跑分期间冻结调度与看门狗，否则测量结果就是调度器自己的噪声。"""
+        tier = self.bench.get('tier') or self.sched.tier
+        self._state_store(snap, {'reason': '跑分中（锁定 %s 档）' % TIER_LABELS.get(tier, tier),
+                                 'throttle': self.sched.throttle,
+                                 'dwell_left': 0.0, 'resume_left': 0.0}, tier, now)
+
     def _cooldown_passed(self, now):
         return (self._last_applied_tier is not None
                 and now - self._last_apply_ts > 60.0)
@@ -99,9 +124,10 @@ class Daemon:
     def _apply(self, tier, now):
         profile = dict(self.cfg['tiers'].get(tier) or self.cfg['tiers']['bal'])
         if self.sched.throttle:
-            profile = dict(profile)
-            profile['max'] = min(profile.get('max', 100), 85)
-            profile['max_dc'] = min(profile.get('max_dc', 100), 85)
+            # 温度保护：把频率上限压到 85%（约 1.96GHz），先降温再说性能
+            for key in ('max_ac', 'max_dc', 'max'):
+                if profile.get(key) is not None:
+                    profile[key] = min(int(profile[key]), 85)
         with self._apply_lock:
             result = self.power.apply(tier, profile)
             self._last_apply_ts = time.time()
@@ -164,6 +190,7 @@ class Daemon:
                 'cpu_pct': snap.get('cpu_pct'),
                 'gpu_pct': snap.get('gpu_pct'),
                 'cpu_temp': snap.get('cpu_temp'),
+                'cpu_mhz': snap.get('cpu_mhz'),
                 'gpu': snap.get('gpu'),
                 'mem': snap.get('mem'),
                 'power': snap.get('power'),
@@ -177,6 +204,8 @@ class Daemon:
             'external_hits': self._external_hits,
             'guard_hits': self.hw.guard_hits,
             'admin': self.is_admin(),
+            'bench': {k: self.bench.get(k) for k in
+                      ('running', 'mode', 'tier', 'label', 'step', 'pct', 'error')},
             'meta': {'cap_labels': CAP_LABELS, 'mode_labels': MODE_LABELS,
                      'tier_labels': TIER_LABELS},
         }
@@ -221,3 +250,88 @@ class Daemon:
 
     def logs(self, n=100):
         return self.log.tail(n)
+
+    # ---------- 跑分 ----------
+    def start_bench(self, mode='current'):
+        """mode: current=只测当前档位；compare=逐档测一遍并给出对比表。"""
+        if self.bench.get('running'):
+            return False, '跑分正在进行中'
+        if mode == 'compare':
+            tiers = [t for t in COMPARE_TIERS if t in self.cfg['tiers']]
+        else:
+            mode = 'current'
+            tiers = [self.sched.tier]
+        self.bench = {
+            'running': True, 'mode': mode, 'tiers': tiers, 'tier': tiers[0],
+            'label': TIER_LABELS.get(tiers[0], tiers[0]), 'step': '准备中…', 'pct': 0,
+            'results': [], 'error': None, 'started_at': time.time(), 'finished_at': None,
+            'restore_tier': self.sched.tier, 'restore_intent': self.cfg.get('intent'),
+        }
+        threading.Thread(target=self._bench_run, name='bench', daemon=True).start()
+        self.log.info('[跑分] 开始（%s，档位 %s）' % (mode, '→'.join(tiers)))
+        return True, 'ok'
+
+    def _bench_progress(self, step, pct):
+        self.bench['step'] = step
+        self.bench['pct'] = pct
+
+    def _bench_run(self):
+        thermal, clock = Thermal(), ClockSense()
+        bench = Bench(log=self.log, thermal=thermal, clock=clock)
+        results = []
+        run_id = int(self.bench.get('started_at') or time.time())
+        try:
+            n = len(self.bench['tiers'])
+            for i, tier in enumerate(self.bench['tiers']):
+                label = TIER_LABELS.get(tier, tier)
+                profile = dict(self.cfg['tiers'].get(tier) or {})
+                self.bench.update({'tier': tier, 'label': label})
+                self._bench_progress('应用中…', int(i * 100.0 / n))
+                self.sched.set_tier(tier, '跑分锁定（%s）' % label, time.time(), forced=True)
+                self._apply(tier, time.time())
+                self._bench_progress('稳定中…', int((i + 0.2) * 100.0 / n))
+                time.sleep(BENCH_SETTLE_S)
+                base_pct = int((i + 0.25) * 100.0 / n)
+                span = int(70.0 / n)
+                record = bench.run(
+                    label=label, tier=tier,
+                    extra={'run_id': run_id,
+                           'profile': {k: profile.get(k) for k in
+                                       ('scheme', 'min_ac', 'max_ac', 'boost', 'cool', 'epp')},
+                           'throttled': self.sched.throttle},
+                    progress=lambda msg, pct: self._bench_progress(
+                        msg, base_pct + int(pct * span / 100.0)))
+                save_record(record)
+                results.append(record)
+                self.bench['results'] = list(results)
+                if i + 1 < n:
+                    self._bench_progress('测完，降温 %ds…' % BENCH_COOLDOWN_S,
+                                         int((i + 1) * 100.0 / n))
+                    time.sleep(BENCH_COOLDOWN_S)
+            if self.bench['mode'] == 'compare':
+                anchor = next((r for r in results if r.get('tier') == 'bal'), results[0])
+                set_baseline(anchor)
+                self.log.info('[跑分] 基准设为 %s 档：单线程 %s Mops/s，多线程 %s Mops/s' % (
+                    anchor.get('label'), anchor.get('single_mops'), anchor.get('multi_mops')))
+        except Exception as exc:                            # noqa: BLE001
+            self.bench['error'] = repr(exc)
+            self.log.error('[跑分] 失败：%r' % (exc,))
+        finally:
+            thermal.close()
+            clock.close()
+            self._bench_restore()
+            self.bench.update({'running': False, 'step': '完成', 'pct': 100,
+                               'finished_at': time.time()})
+            self.log.info('[跑分] 结束，已回到 %s 档' % TIER_LABELS.get(
+                self.bench.get('restore_tier'), self.bench.get('restore_tier')))
+
+    def _bench_restore(self):
+        tier = self.bench.get('restore_tier') or 'bal'
+        self.sched.set_tier(tier, '跑分结束恢复', time.time(), forced=True)
+        self._apply(tier, time.time())
+
+    def bench_view(self):
+        view = best_of_each_tier()
+        view['job'] = self.bench
+        view['verdict'] = power_verdict()
+        return view

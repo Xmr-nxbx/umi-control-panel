@@ -56,6 +56,128 @@ def cmd_probe_acpi(cfg, log):
     return 0
 
 
+def _http_json(port, path, body=None, timeout=10):
+    import json
+    import urllib.request
+    data = json.dumps(body).encode('utf-8') if body is not None else None
+    req = urllib.request.Request('http://127.0.0.1:%d%s' % (port, path), data=data,
+                                 headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode('utf-8', 'replace'))
+
+
+def _print_bench_table(view):
+    rows = view.get('tiers') or []
+    base = view.get('baseline') or {}
+    print('\n基准（=100 分）：单线程 %s Mops/s，多线程 %s Mops/s，短任务 %s ms，内存 %s MB/s' % (
+        base.get('single_mops'), base.get('multi_mops'), base.get('burst_ms'),
+        base.get('mem_mb_s')))
+    print('%-6s %-7s %-9s %-9s %-9s %-9s %-8s %-6s' % (
+        '档位', '总分', '单线程', '多线程', '短任务ms', '内存MB/s', '频率MHz', '最高温'))
+    for row in rows:
+        r = row.get('record') or {}
+        s = row.get('score') or {}
+        print('%-6s %-7s %-9s %-9s %-9s %-9s %-8s %-6s' % (
+            row.get('label') or row.get('tier'),
+            s.get('overall') if s.get('overall') is not None else '-',
+            r.get('single_mops'), r.get('multi_mops'), r.get('burst_ms'), r.get('mem_mb_s'),
+            r.get('clock_mhz') or '-', r.get('temp_after_c') or '-'))
+    verdict = view.get('verdict')
+    if verdict:
+        print('\n[结论] %s' % verdict.get('reason'))
+
+
+def cmd_bench(cfg, log, mode):
+    """跑分对比。面板在跑就交给面板（避免两个进程抢电源设置），否则本机独立跑。"""
+    port = _current_port(cfg)
+    if _port_open('127.0.0.1', port):
+        print('检测到面板在运行（端口 %d），由它执行跑分。' % port)
+        try:
+            _http_json(port, '/api/bench', {'mode': mode})
+        except Exception as exc:                           # noqa: BLE001
+            print('[失败] 无法启动跑分：%s' % exc)
+            return 1
+        last = ''
+        while True:
+            time.sleep(2.0)
+            try:
+                view = _http_json(port, '/api/bench')
+            except Exception as exc:                       # noqa: BLE001
+                print('[失败] 读取跑分状态失败：%s' % exc)
+                return 1
+            job = view.get('job') or {}
+            line = '%s %s%% %s' % (job.get('label') or '', job.get('pct') or 0,
+                                   job.get('step') or '')
+            if line != last:
+                print('  ' + line)
+                last = line
+            if not job.get('running'):
+                if job.get('error'):
+                    print('[失败] %s' % job['error'])
+                    return 1
+                _print_bench_table(view)
+                return 0
+    return cmd_bench_local(cfg, log, mode)
+
+
+def cmd_bench_local(cfg, log, mode):
+    from app.act.power import PowerExecutor
+    from app.bench import Bench, best_of_each_tier, power_verdict, save_record, set_baseline
+    from app.daemon import BENCH_COOLDOWN_S, BENCH_SETTLE_S, COMPARE_TIERS
+    from app.policy.scheduler import TIER_LABELS
+    from app.sense.clock import ClockSense
+    from app.sense.thermal import Thermal
+
+    tiers = list(COMPARE_TIERS) if mode == 'compare' else [None]
+    power = PowerExecutor(log)
+    thermal, clock = Thermal(), ClockSense()
+    bench = Bench(log=log, thermal=thermal, clock=clock)
+    power.capture_baseline(['balanced', 'high_perf'])
+    before = power.external_scheme()
+    results = []
+    run_id = int(time.time())
+    try:
+        for i, tier in enumerate(tiers):
+            if tier:
+                label = TIER_LABELS.get(tier, tier)
+                print('[%d/%d] 应用 %s 档并稳定 %ds…' % (i + 1, len(tiers), label, BENCH_SETTLE_S))
+                power.apply(tier, cfg['tiers'][tier])
+                time.sleep(BENCH_SETTLE_S)
+            else:
+                label = '当前设置'
+                print('[%d/%d] 保持当前电源设置，稳定 %ds…' % (i + 1, len(tiers), BENCH_SETTLE_S))
+                time.sleep(BENCH_SETTLE_S)
+            record = bench.run(label=label, tier=tier or 'current',
+                               progress=lambda m, p: print('    %3d%% %s' % (p, m)))
+            record['profile'] = dict(cfg['tiers'].get(tier) or {})
+            record['run_id'] = run_id
+            save_record(record)
+            results.append(record)
+            print('    → 单线程 %s Mops/s，多线程 %s Mops/s，短任务 %s ms，内存 %s MB/s，'
+                  '频率 %s MHz，最高 %s°C'
+                  % (record['single_mops'], record['multi_mops'], record['burst_ms'],
+                     record['mem_mb_s'], record.get('clock_mhz'), record.get('temp_after_c')))
+            if i + 1 < len(tiers):
+                print('    降温 %ds…' % BENCH_COOLDOWN_S)
+                time.sleep(BENCH_COOLDOWN_S)
+        if mode == 'compare':
+            anchor = next((r for r in results if r.get('tier') == 'bal'), results[0])
+            set_baseline(anchor)
+    finally:
+        thermal.close()
+        clock.close()
+        power.restore(cfg['tiers'])
+        if before:
+            import subprocess
+            subprocess.run(['powercfg', '/setactive', before], capture_output=True,
+                           creationflags=0x08000000)
+        print('已还原电源设置（方案 %s）' % (before or '未知'))
+    view = best_of_each_tier()
+    view['verdict'] = power_verdict()
+    _print_bench_table(view)
+    return 0
+
+
 def _supervise(pass_through):
     """守护模式：子进程异常退出就自动拉起，用户主动停止则不复活。
 
@@ -158,6 +280,9 @@ def main(argv=None):
     ap.add_argument('--no-browser', action='store_true', help='启动后不自动打开面板')
     ap.add_argument('--port', type=int, default=None)
     ap.add_argument('--probe-acpi', action='store_true', help='只读枚举 ACPI 命名空间后退出')
+    ap.add_argument('--bench', nargs='?', const='compare', default=None,
+                    choices=('current', 'compare'),
+                    help='跑分：compare=四档逐一对比（默认），current=只测当前档位')
     ap.add_argument('--one-shot', action='store_true', help='打印一次状态 JSON 后退出')
     ap.add_argument('--stop', action='store_true', help='请求正在运行的实例优雅退出')
     ap.add_argument('--anchor', action='store_true', help=argparse.SUPPRESS)
@@ -185,6 +310,9 @@ def main(argv=None):
 
     if args.probe_acpi:
         return cmd_probe_acpi(cfg, log)
+
+    if args.bench:
+        return cmd_bench(cfg, log, args.bench)
 
     if args.stop:
         import urllib.request

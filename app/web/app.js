@@ -7,6 +7,7 @@ const INTENTS = [
   { id: 'turbo', name: '狂暴', desc: '锁定性能档，功耗拉满' },
 ];
 const TIERS = { perf: '性能', mid: '流畅', bal: '均衡', eco: '省电' };
+const BOOST_TEXT = { 0: '禁用', 1: '启用', 2: '激进', 3: '高效', 4: '高效激进', 5: '保证频率' };
 
 let META = { cap_labels: {}, mode_labels: {} };
 let lastState = null;
@@ -80,8 +81,11 @@ function renderMeters(s) {
   const g = x.gpu || {};
   const mem = x.mem || {};
   const pw = x.power || {};
+  const baseMhz = (s.power_caps || {}).cpu_base_mhz;
   const cells = [
     meter('CPU 占用', x.cpu_pct, '%', x.cpu_pct),
+    meter('CPU 频率', x.cpu_mhz, ' MHz',
+          x.cpu_mhz && baseMhz ? Math.min(100, x.cpu_mhz / (baseMhz * 2) * 100) : null),
     meter('GPU 占用', x.gpu_pct, '%', x.gpu_pct),
     meter('CPU 温度', x.cpu_temp, '°C', x.cpu_temp, x.cpu_temp > 90),
     meter('GPU 温度', g.temp_c, '°C', g.temp_c, g.temp_c > 85),
@@ -157,6 +161,8 @@ function renderCaps(s) {
 
 function renderTier(s) {
   $('tier-now').textContent = s ? (TIERS[s.tier] || s.tier) : '--';
+  const x = (s && s.sensor) || {};
+  $('tier-clock').textContent = x.cpu_mhz ? (x.cpu_mhz + ' MHz') : '-- MHz';
   $('tier-reason').textContent = s ? (s.reason || '') : '等待数据…';
   $('live-dot').className = 'dot' + (s && Date.now() / 1000 - s.ts < 8 ? ' on' : '');
   $('foot-status').textContent = s
@@ -174,9 +180,75 @@ async function poll() {
     META = Object.assign(META, s.meta || {});
     renderTier(s); renderPills(s); renderIntents(); renderMeters(s);
     renderHardware(s); renderCaps(s);
+    if ((s.bench || {}).running || (s.bench || {}).step === '完成') loadBench();
   } catch (e) {
     $('foot-status').textContent = '取数失败：' + e.message;
   }
+}
+
+function renderBench(v) {
+  const job = (v && v.job) || {};
+  const verdict = (v && v.verdict) || null;
+  const vEl = $('bench-verdict');
+  if (verdict && verdict.reason) {
+    vEl.hidden = false;
+    vEl.className = 'verdict ' + (verdict.effective ? 'ok' : 'bad');
+    vEl.textContent = (verdict.effective ? '实测结论：' : '实测警告：') + verdict.reason;
+  } else {
+    vEl.hidden = true;
+  }
+  const running = !!job.running;
+  $('bench-run').hidden = !running;
+  $('btn-bench-current').disabled = running;
+  $('btn-bench-compare').disabled = running;
+  if (running) {
+    $('bench-fill').style.width = (job.pct || 0) + '%';
+    $('bench-step').textContent = `${job.label || ''} ${job.step || ''}`;
+  }
+  const rows = (v && v.tiers) || [];
+  const base = (v && v.baseline) || {};
+  if (!rows.length) {
+    $('bench-table').innerHTML = '';
+    $('bench-hint').textContent = '还没有跑分记录。点「四档逐一对比」，面板会依次锁到省电/均衡/流畅/性能档各测一次，'
+      + '给出以均衡档为 100 的指数——差距一眼就能看出来。';
+    return;
+  }
+  const now = lastState ? lastState.tier : null;
+  const cell = (v, unit) => (v == null ? '—' : esc(v) + (unit || ''));
+  $('bench-table').innerHTML = `<table class="bench"><thead><tr>
+      <th>档位</th><th>总分</th><th>单线程<br><small>Mops/s</small></th>
+      <th>多线程<br><small>Mops/s</small></th><th>短任务<br><small>ms</small></th>
+      <th>内存<br><small>MB/s</small></th>
+      <th>实测频率</th><th>最高温</th><th>睿频</th><th>电源方案</th></tr></thead><tbody>
+    ${rows.map((r) => {
+      const rec = r.record || {}; const sc = r.score || {}; const pf = rec.profile || {};
+      return `<tr class="${rec.tier === now ? 'now' : ''}">
+        <td>${esc(r.label || r.tier)}${rec.tier === now ? ' <em>当前</em>' : ''}</td>
+        <td class="score">${cell(sc.overall)}</td>
+        <td>${cell(rec.single_mops)}</td><td>${cell(rec.multi_mops)}</td>
+        <td>${cell(rec.burst_ms)}</td>
+        <td>${cell(rec.mem_mb_s)}</td><td>${cell(rec.clock_mhz, ' MHz')}</td>
+        <td>${cell(rec.temp_after_c, '°C')}</td>
+        <td>${esc(BOOST_TEXT[pf.boost] || '—')}</td><td>${esc(pf.scheme || '—')}</td></tr>`;
+    }).join('')}</tbody></table>`;
+  $('bench-hint').textContent = `基准（=100 分）：单线程 ${base.single_mops} Mops/s、多线程 ${base.multi_mops} Mops/s、短任务 ${base.burst_ms} ms。`
+    + '总分越高越快；「短任务」是降频后来一下活的耗时，直接对应亮屏回来点东西卡不卡。';
+}
+
+async function loadBench() {
+  try { renderBench(await api('/api/bench')); } catch (e) { /* 服务未就绪时静默 */ }
+}
+
+async function startBench(mode) {
+  const tip = mode === 'compare'
+    ? '对比跑分会依次锁到省电/均衡/流畅/性能档，每档满载几秒，全程约 1.5 分钟，风扇会明显转起来；结束后自动回到当前档位。现在开始？'
+    : '会在当前档位上满载约 6 秒。现在开始？';
+  if (!confirm(tip)) return;
+  try {
+    await api('/api/bench', { mode });
+    toast(mode === 'compare' ? '开始四档对比跑分' : '开始跑分');
+  } catch (e) { toast('跑分启动失败：' + e.message, true); }
+  loadBench();
 }
 
 async function loadLogs() {
@@ -190,6 +262,8 @@ async function loadLogs() {
 }
 
 $('btn-refresh-logs').onclick = loadLogs;
+$('btn-bench-current').onclick = () => startBench('current');
+$('btn-bench-compare').onclick = () => startBench('compare');
 $('btn-stop').onclick = async () => {
   if (!confirm('确定停止面板服务？停止后自适应调度与掉档守护都会失效。')) return;
   try { await api('/api/shutdown', {}); toast('服务已停止'); }
@@ -199,5 +273,6 @@ $('btn-stop').onclick = async () => {
 renderIntents();
 poll();
 loadLogs();
+loadBench();
 setInterval(poll, 2000);
 setInterval(loadLogs, 10000);

@@ -100,23 +100,30 @@ class PowerExecutor:
         return self.baseline
 
     def apply(self, tier_name, profile):
-        """profile: {scheme, min, max, min_dc, max_dc, cool, boost, epp}"""
+        """profile: {scheme, min_ac, max_ac, min_dc, max_dc, cool, boost, epp}"""
         guid = SCHEMES.get(profile.get('scheme'), SCHEMES['balanced'])
         self.capture_baseline([profile.get('scheme')])
+        p = dict(profile)
+        # 档位表用的是 min_ac/max_ac（交直流分开写），执行层统一成 min/max。
+        # 这里曾经漏了映射，导致交流侧的频率上下限一次都没真正写进系统。
+        if p.get('min') is None:
+            p['min'] = p.get('min_ac')
+        if p.get('max') is None:
+            p['max'] = p.get('max_ac')
+        plan = []
+        for key in ('min', 'max', 'cool', 'boost', 'epp'):
+            plan.append((key, p.get(key), False))
+            plan.append((key + '_dc', p.get(key + '_dc', p.get(key)), True))
         writes, failed = [], []
-        plan = [
-            ('min', profile.get('min'), False), ('max', profile.get('max'), False),
-            ('cool', profile.get('cool'), False), ('boost', profile.get('boost'), False),
-            ('epp', profile.get('epp'), False),
-            ('min_dc', profile.get('min_dc'), True), ('max_dc', profile.get('max_dc'), True),
-            ('epp_dc', profile.get('epp'), True),
-        ]
         for key, value, is_dc in plan:
             if value is None:
                 continue
             sg = SETTINGS['epp' if key.startswith('epp') else key.replace('_dc', '')]
-            if sg == EPP and not self.epp_supported:
-                continue
+            if sg == EPP:
+                if self.epp_supported is None:
+                    self.probe()
+                if not self.epp_supported:
+                    continue
             cur = read_setting(guid, sg, dc=is_dc)
             if cur == int(value):
                 continue
@@ -129,6 +136,8 @@ class PowerExecutor:
             if not _run(['powercfg', '/setactive', guid])[0] == 0:
                 failed.append('scheme')
         readback = {k: read_setting(guid, SETTINGS[k]) for k in ('min', 'max', 'cool', 'boost', 'epp')}
+        readback['min_dc'] = read_setting(guid, MIN_STATE, dc=True)
+        readback['max_dc'] = read_setting(guid, MAX_STATE, dc=True)
         self.applied = {'tier': tier_name, 'scheme': guid, 'writes': writes,
                         'failed': failed, 'readback': readback,
                         'scheme_switched': changed_scheme, 'ts': time.time()}
