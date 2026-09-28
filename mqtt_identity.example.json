@@ -1,0 +1,6 @@
+{
+  "_comment": "把这个文件复制为 data/mqtt_identity.json 后填写。data/ 已在 .gitignore 里，凭据不会进仓库。只有打算启用 OEM GCUBridge 兜底通道时才需要。",
+  "client_id": "",
+  "username": "",
+  "password": ""
+}

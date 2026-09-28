@@ -1,0 +1,21 @@
+# 运行时与产物
+/runtime/
+/dist/
+__pycache__/
+*.pyc
+
+# 状态与日志（用户机器上的可变数据，不入库）
+/data/
+*.log
+/logs/
+
+# 逆向过程中的原始产物（体积大、含厂商私有映射，禁止公开分发）
+/tools/out/
+*.dmp
+*.raw
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

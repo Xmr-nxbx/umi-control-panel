@@ -1,0 +1,10 @@
+# bat 必须按字节原样存管：中文 cmd 按代码页 936 解析批处理，
+# 一旦转成 UTF-8 或换行被改，双击就闪退。所以不做任何 text 转换。
+*.bat  binary
+*.ps1  text eol=crlf
+*.py   text eol=lf
+*.js   text eol=lf
+*.html text eol=lf
+*.css  text eol=lf
+*.json text eol=lf
+*.md   text eol=lf

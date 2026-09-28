@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Umi Control Panel · 机械革命 Umi Pro 3</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="dot" id="live-dot"></span>
+    <h1>UMI CONTROL PANEL</h1>
+    <span class="sub">GM5MG0Y · i7-10875H + RTX 3060</span>
+  </div>
+  <div class="head-right">
+    <div class="tier-box">
+      <div class="tier-now" id="tier-now">--</div>
+      <div class="tier-reason" id="tier-reason">等待数据…</div>
+    </div>
+    <div class="pills" id="pills"></div>
+  </div>
+</header>
+
+<main>
+  <section class="card span-2">
+    <h2>控制意图</h2>
+    <div class="intents" id="intents"></div>
+    <p class="hint" id="intent-hint"></p>
+  </section>
+
+  <section class="card">
+    <h2>实时遥测</h2>
+    <div class="meters" id="meters"></div>
+  </section>
+
+  <section class="card">
+    <h2>硬件档位</h2>
+    <div class="hw-rows" id="hw"></div>
+    <div class="btn-row" id="hw-buttons"></div>
+    <p class="hint" id="hw-hint"></p>
+  </section>
+
+  <section class="card span-2">
+    <h2>能力矩阵</h2>
+    <div class="caps" id="caps"></div>
+  </section>
+
+  <section class="card span-2">
+    <h2>运行日志</h2>
+    <pre class="logs" id="logs">加载中…</pre>
+    <div class="btn-row">
+      <button class="ghost" id="btn-refresh-logs">刷新日志</button>
+      <button class="danger" id="btn-stop">停止面板服务</button>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <span id="foot-status">--</span>
+  <span class="foot-right">每 2 秒自动刷新 · 仅监听 127.0.0.1</span>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

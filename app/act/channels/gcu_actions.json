@@ -1,0 +1,40 @@
+{
+  "_comment": "命令白名单：只允许发送在本机 GCUService 逆向字符串中确认存在的 Action。查不到的一律不发，避免把没验证过的命令打进 EC。",
+  "topics": {
+    "fan_control": "Fan/Control",
+    "setting_control": "Setting/Control",
+    "display_control": "Display/Control",
+    "keyboard_ctrl": "Keyboard/Ctrl",
+    "lightbar_control": "MyRgbLightbar/Control",
+    "battery_control": "BatteryProtection/Control"
+  },
+  "actions": {
+    "OPERATING_OFFICE_MODE": {"topic": "fan_control", "cap": "mode.write", "label": "办公档"},
+    "OPERATING_GAMING_MODE": {"topic": "fan_control", "cap": "mode.write", "label": "造物者/游戏档"},
+    "OPERATING_TURBO_MODE": {"topic": "fan_control", "cap": "mode.write", "label": "狂暴档"},
+    "FAN_BOOST_ON": {"topic": "fan_control", "cap": "fan.boost", "label": "风扇强开"},
+    "FAN_BOOST_OFF": {"topic": "fan_control", "cap": "fan.boost", "label": "风扇强开关掉"},
+    "GETSTATUS": {"topic": "setting_control", "cap": "status.read", "label": "拉取设备状态"},
+    "WINKEY_LOCK": {"topic": "setting_control", "cap": "winkey", "label": "锁定 Win 键"},
+    "WINKEY_UNLOCK": {"topic": "setting_control", "cap": "winkey", "label": "解锁 Win 键"},
+    "OSD_HIDDEN_ON": {"topic": "setting_control", "cap": "osd", "label": "隐藏 OSD"},
+    "OSD_HIDDEN_OFF": {"topic": "setting_control", "cap": "osd", "label": "显示 OSD"},
+    "DGPU_DIRECT_CONNECT_TOGGLE_ON": {"topic": "setting_control", "cap": "gpu.mux", "label": "独显直连开"},
+    "DGPU_DIRECT_CONNECT_TOGGLE_OFF": {"topic": "setting_control", "cap": "gpu.mux", "label": "独显直连关"},
+    "DISPLAY_FEATURE_STATUS_ON": {"topic": "display_control", "cap": "color.mgmt", "label": "色彩管理开"},
+    "DISPLAY_FEATURE_STATUS_OFF": {"topic": "display_control", "cap": "color.mgmt", "label": "色彩管理关"},
+    "DISPLAY_STANDARD_MODE": {"topic": "display_control", "cap": "display.mode", "label": "显示-标准"},
+    "DISPLAY_GAMING_MODE": {"topic": "display_control", "cap": "display.mode", "label": "显示-游戏"},
+    "DISPLAY_VIDEO_MODE": {"topic": "display_control", "cap": "display.mode", "label": "显示-视频"},
+    "DISPLAY_READ_MODE": {"topic": "display_control", "cap": "display.mode", "label": "显示-阅读"},
+    "DISPLAY_CUSTOMIZED_MODE": {"topic": "display_control", "cap": "display.mode", "label": "显示-自定义"},
+    "FN_WITH1_HOTKEY_TOGGLE_ON": {"topic": "setting_control", "cap": "fn.hotkey", "label": "Fn+F1 快捷键开"},
+    "FN_WITH1_HOTKEY_TOGGLE_OFF": {"topic": "setting_control", "cap": "fn.hotkey", "label": "Fn+F1 快捷键关"}
+  },
+  "status_fields": {
+    "Tray/Status": {"OperatingMode": "mode.read", "FanBoostEnable": "fan.boost"},
+    "Fan/Status": {"OperatingMode": "mode.read", "CPU_PL1": "power_limit.read", "CPU_PL2": "power_limit.read"},
+    "Keyboard/Status": {"powerStatus": "lighting.rgb", "brightNess": "lighting.rgb"},
+    "HidLightbar/Status": {"powerStatus": "lighting.rgb", "brightNess": "lighting.rgb"}
+  }
+}
