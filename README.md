@@ -81,6 +81,7 @@ scripts\启动面板.bat
 scripts\安装开机自启.bat
 
 :: 自检 / 跑分 / 停止（停止会还原改过的电源设置）
+scripts\一键体检.bat
 scripts\EC只读自检.bat
 scripts\跑分对比.bat
 scripts\面板状态.bat
@@ -96,6 +97,7 @@ scripts\停止面板.bat
 | `main.py --bench current` | 只测当前档位，约 15 秒 |
 | `main.py --one-shot` | 采一次快照打 JSON，自检用，不改电源设置 |
 | `main.py --stop` | 让运行中的实例优雅退出 |
+| `main.py --health` | 一键体检：自启/运行时/面板/传感器/EC 通道逐项检查 |
 | `main.py --ec-test` | EC **只读**自检：验证通道并打印寄存器读数（普通权限即可） |
 
 ## 4. 架构
@@ -120,9 +122,9 @@ app/
   act/channels/gcu_actions.json  只允许发送已在本机逆向字符串中确认存在的 Action
   server/httpd.py           标准库 ThreadingHTTPServer + REST + 静态白名单
   web/                      index.html / app.js / style.css（无构建步骤）
-  tray/tray.py              Shell_NotifyIcon 托盘，图标颜色随档位变化（代码自绘 ICO）
+  tray/tray.py              Shell_NotifyIcon 托盘，图标随档位变色，右键可切意图与风扇模式
 tests/test_scheduler.py     19 个调度决策场景
-scripts/                    setup_runtime.ps1、make_bats.py（bat 生成器）、10 个入口 bat（GBK+CRLF）
+scripts/                    setup_runtime.ps1、make_bats.py（bat 生成器）、12 个入口 bat（GBK+CRLF）
 tools/                      全部离线只读的逆向与验证工具，产物落 tools/out（已 gitignore）
   gen_ec_map.py             从本机 Creator Center 生成 data/ec_map.local.json（不入仓库）
   oem_constant_dump.ps1     反射导出 OEM 程序集的常量与枚举（IOCTL 码、寄存器名、模式取值）
@@ -132,7 +134,9 @@ tools/                      全部离线只读的逆向与验证工具，产物�
   ioctl_layout_probe.py     在驱动镜像里定位 IOCTL 常量、按 .pdata 还原函数边界、解 cmp 立即数
   ec_gpd_read_test.py       单次只读验证（带电量自校验）
   ec_write_test.py          可逆写验证（风扇模式 + 85°C 温度保险 + 自动还原）
-  ec_pl_test.py             功耗墙写入的可逆实验（写→全核跑分→还原）
+  ec_pl_test.py             功耗墙写入的可逆实验（写→全核跑分→还原，结论：不生效）
+  ec_mode_probe.py          快照全表 125 个寄存器 → 写一个候选 → 差分 → 还原
+  ec_watch.py               只读监听语义寄存器变化，用于抓实体按键的落点
   tier_effect_test.py       逐项验证 Windows 电源旋钮在本机是否有效（结论：无效）
   freq_probe.py             PDH 频率计数器可用性探测
 ```

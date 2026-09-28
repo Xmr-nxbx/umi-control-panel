@@ -185,6 +185,108 @@ def cmd_bench_local(cfg, log, mode):
     return 0
 
 
+def cmd_health(cfg, log):
+    """一键体检：把「装好了没、跑起来没、硬件通道通不通」一次性查清并给出结论。"""
+    rows = []
+
+    def check(name, ok, detail='', optional=False):
+        # optional=True 的项不通过只提示、不算失败：兜底通道本来就是可选的
+        rows.append((name, bool(ok), detail, optional))
+
+    # 1) 开机自启
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r'Software\Microsoft\Windows\CurrentVersion\Run') as key:
+            value = winreg.QueryValueEx(key, 'UmiControlPanel')[0]
+        check('开机自启', True, str(value)[:90])
+    except OSError as exc:
+        check('开机自启', False, '未安装（运行 scripts\\安装开机自启.bat）：%s' % exc)
+
+    # 2) 运行时
+    from app.paths import RUNTIME_DIR
+    exe = os.path.join(RUNTIME_DIR, 'UmiPanel.exe')
+    check('便携运行时', os.path.exists(exe),
+          exe if os.path.exists(exe) else '缺 runtime\\UmiPanel.exe，请跑 scripts\\setup_runtime.ps1')
+
+    # 3) 面板是否在跑
+    port = _current_port(cfg)
+    running = _port_open('127.0.0.1', port)
+    state = None
+    if running:
+        try:
+            state = _http_json(port, '/api/state', timeout=8)
+        except Exception as exc:                           # noqa: BLE001
+            check('面板服务', False, '端口 %d 开着但取不到状态：%s' % (port, exc))
+    if state:
+        check('面板服务', True, 'http://127.0.0.1:%d/ 已运行 %s 分钟' % (
+            port, round((state.get('uptime_s') or 0) / 60.0, 1)))
+        sensor = state.get('sensor') or {}
+        check('调度档位', state.get('tier') is not None,
+              '%s（意图 %s，%s）' % (state.get('tier_label'), state.get('intent'),
+                                     state.get('reason')))
+        check('CPU 温度', sensor.get('cpu_temp') is not None,
+              '%s°C' % sensor.get('cpu_temp'))
+        check('CPU 实际频率', sensor.get('cpu_mhz') is not None,
+              '%s MHz' % sensor.get('cpu_mhz'))
+        gpu = sensor.get('gpu') or {}
+        check('GPU 遥测', bool(gpu), '%s %s°C %sW' % (gpu.get('name') or '', gpu.get('temp_c'),
+                                                      gpu.get('power_w')) if gpu else 'nvidia-smi 无输出')
+        hw = state.get('hardware') or {}
+        check('EC 通道', (hw.get('source') == 'ec') or hw.get('fan_rpm') is not None,
+              '风扇 %s RPM，模式 %s，电池 %s%%' % (hw.get('fan_rpm'), hw.get('fan_mode_flag'),
+                                                   hw.get('battery_pct_ec')))
+        channels = {c.get('name'): c for c in (state.get('channels') or [])}
+        ec = channels.get('ec') or {}
+        check('EC 只读验证', (ec.get('detail') or {}).get('validated') is True,
+              (ec.get('detail') or {}).get('reason', ''))
+        check('托盘图标', True, '进程内已挂载（肉眼确认请看任务栏右下角）')
+        mqtt = channels.get('mqtt') or {}
+        check('OEM 兜底通道', bool(mqtt.get('alive')),
+              '已连接' if mqtt.get('alive') else
+              'GCUBridge 服务未运行（可选：EC 直连已通；要恢复得用管理员跑 '
+              '启用造物者档控制.bat）', optional=True)
+    else:
+        from app.daemon import Daemon
+        daemon = Daemon(cfg, log)
+        daemon.tick()
+        time.sleep(1.2)
+        daemon.tick()
+        snap = daemon.snap
+        check('面板服务', False, '没有在跑（双击 scripts\\启动面板.bat）；以下为一次性自检结果')
+        check('CPU 温度', snap.get('cpu_temp') is not None, '%s°C' % snap.get('cpu_temp'))
+        check('CPU 实际频率', snap.get('cpu_mhz') is not None, '%s MHz' % snap.get('cpu_mhz'))
+        check('EC 通道', daemon.hw.ec.alive, daemon.hw.ec.detail.get('reason', ''))
+        daemon.stop(restore=False)
+
+    # 4) EC 寄存器表
+    from app.paths import data_path
+    map_path = data_path('ec_map.local.json')
+    check('EC 寄存器表', os.path.exists(map_path),
+          map_path if os.path.exists(map_path) else '缺失，运行 scripts\\生成EC寄存器表.bat')
+
+    print('\n===== Umi Control Panel 体检 =====')
+    bad = 0
+    for name, ok, detail, optional in rows:
+        tag = '通过' if ok else ('可选未启用' if optional else '未通过')
+        print('  [%s] %-12s %s' % (tag, name, detail))
+        if not ok and not optional:
+            bad += 1
+    print('\n结论：%s' % ('全部通过，可以放着不管。' if not bad
+                          else '%d 项未通过，按上面的提示处理。' % bad))
+    out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools', 'out')
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, 'health.txt'), 'w', encoding='utf-8') as f:
+            f.write('%s\n' % time.strftime('%Y-%m-%d %H:%M:%S'))
+            for name, ok, detail, optional in rows:
+                f.write('[%s] %s: %s\n' % ('OK' if ok else ('SKIP' if optional else 'NG'),
+                                           name, detail))
+    except OSError:
+        pass
+    return 0 if not bad else 1
+
+
 def _supervise(pass_through):
     """守护模式：子进程异常退出就自动拉起，用户主动停止则不复活。
 
@@ -288,6 +390,8 @@ def main(argv=None):
     ap.add_argument('--port', type=int, default=None)
     ap.add_argument('--ec-test', action='store_true',
                     help='EC 只读自检：验证通道并打印寄存器读数后退出')
+    ap.add_argument('--health', action='store_true',
+                    help='一键体检：自启/运行时/面板/传感器/EC 通道逐项检查后退出')
     ap.add_argument('--bench', nargs='?', const='compare', default=None,
                     choices=('current', 'compare'),
                     help='跑分：compare=四档逐一对比（默认），current=只测当前档位')
@@ -318,6 +422,9 @@ def main(argv=None):
 
     if args.ec_test:
         return cmd_ec_test(cfg, log)
+
+    if args.health:
+        return cmd_health(cfg, log)
 
     if args.bench:
         return cmd_bench(cfg, log, args.bench)
