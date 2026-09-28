@@ -375,7 +375,8 @@ def power_verdict():
                   % (round(best_gain if best_gain is not None else spread, 1), freq_txt))
     else:
         reason = ('实测性能档只比省电档快 %s%%（%s），说明 BIOS/EC 接管了频率，'
-                  'powercfg 那一层压不住——要真正换挡必须打通 EC 通道。'
+                  'powercfg 那一层压不住。EC 通道本身已经打通（风扇可控），'
+                  '但功耗墙的落点寄存器还没确认——确认前不猜测写入。'
                   % (round(best_gain if best_gain is not None else (spread or 0), 1), freq_txt))
     return {'effective': effective, 'perf_gain_pct': round(best_gain, 1) if best_gain is not None else None,
             'clock_spread_pct': round(spread, 1) if spread is not None else None,

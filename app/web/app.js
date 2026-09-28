@@ -104,24 +104,36 @@ function renderMeters(s) {
   $('meters').innerHTML = cells.join('');
 }
 
-function hwRow(k, v, ok) {
+// 第二个风扇（GPU 侧）空闲时会停，读数只有几十 RPM，直接写「停转」比写「60 RPM」清楚
+function fmtRpm(v) {
+  if (v == null) return '?';
+  return v < 200 ? '停转' : (v + ' RPM');
+}
+
+function hwRow(k, v, ok) {  // 文案一律由调用方给：ok 只决定灰不灰。以前这里硬写「不可控」，
+  // 结果 EC 明明在线、只是档位语义没确认，也被显示成「不可控」。
   return `<div class="hw-row"><span class="k">${esc(k)}</span>
-    <span class="v${ok ? '' : ' na'}">${ok ? esc(v) : '不可控'}</span></div>`;
+    <span class="v${ok ? '' : ' na'}">${esc(v)}</span></div>`;
 }
 
 function renderHardware(s) {
   const caps = s.capabilities || {};
   const hw = s.hardware || {};
   const verified = (cap) => (caps[cap] || {}).state === 'verified';
+  const ecAlive = (((s.channels || []).find((c) => c.name === 'ec') || {}).alive) === true;
+  // EC 通了但档位寄存器语义没确认 → 说「未确认」，不要说「不可控」（那是通道死了的意思）
+  const modeText = hw.mode ? ((META.mode_labels || {})[hw.mode] || hw.mode)
+    : (ecAlive ? '未确认' : '不可控');
+  const plNote = hw.pl1_setting ? '' : '（出厂默认）';
   const rows = [
-    hwRow('硬件档位', (META.mode_labels || {})[hw.mode] || '未确认', verified('mode.read')),
+    hwRow('硬件档位', modeText, !!hw.mode),
     hwRow('风扇模式', FAN_FLAG_TEXT[hw.fan_mode_flag] || hw.fan_mode_flag || '未知',
           verified('fan.rpm')),
-    hwRow('风扇转速', hw.fan_rpm ? (hw.fan_rpm + (hw.fan2_rpm ? ' / ' + hw.fan2_rpm : '') + ' RPM')
-          : '未知', verified('fan.rpm')),
+    hwRow('风扇转速', hw.fan_rpm != null
+          ? (fmtRpm(hw.fan_rpm) + ' / ' + fmtRpm(hw.fan2_rpm)) : '未知', verified('fan.rpm')),
     hwRow('风扇占空比', hw.fan_duty_l != null ? (hw.fan_duty_l + '% / ' + (hw.fan_duty_r != null ? hw.fan_duty_r + '%' : '?'))
           : '未知', hw.fan_duty_l != null),
-    hwRow('PL1 / PL2', hw.pl1 != null ? (hw.pl1 + 'W / ' + (hw.pl2 != null ? hw.pl2 + 'W' : '?'))
+    hwRow('PL1 / PL2' + plNote, hw.pl1 != null ? (hw.pl1 + 'W / ' + (hw.pl2 != null ? hw.pl2 + 'W' : '?'))
           : '未知', verified('power_limit.read')),
     hwRow('电池（EC）', hw.battery_pct_ec != null
           ? (hw.battery_pct_ec + '% · ' + (hw.battery_temp_c != null ? hw.battery_temp_c + '°C' : '?')
