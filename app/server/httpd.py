@@ -94,7 +94,9 @@ def make_handler(daemon, cfg, on_shutdown):
             elif path == '/api/bench':
                 self._send(200, daemon.bench_view())
             elif path == '/api/ping':
-                self._send(200, {'pong': True})
+                # 守护进程靠这个判活：不光看 HTTP 有没有回，还要看调度节拍多久没走
+                self._send(200, {'pong': True, 'tick_age_s': daemon.tick_age_s(),
+                                 'uptime_s': daemon.state().get('uptime_s')})
             else:
                 self._send(404, {'error': 'not found'})
 

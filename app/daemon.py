@@ -47,6 +47,7 @@ class Daemon:
         self._fan_lock_log_ts = 0.0
         self._logged_tier = None
         self.started_at = time.time()
+        self._last_tick_ts = self.started_at
         self.snap = {'cpu_pct': None, 'gpu_pct': None, 'cpu_temp': None}
         self.capabilities = self.power.probe()
         self.capabilities['cpu_name'] = self.clock.cpu_name
@@ -87,11 +88,16 @@ class Daemon:
             began = time.time()
             try:
                 self.tick()
+                self._last_tick_ts = time.time()
             except Exception as exc:                       # noqa: BLE001
                 self.log.error('节拍异常：%r' % (exc,))
             wait = max(0.05, 1.0 - (time.time() - began))
             if self._stop.wait(wait):
                 return
+
+    def tick_age_s(self):
+        """调度节拍距今多久没走。守护进程用它区分「活着」和「只是没死」。"""
+        return round(max(0.0, time.time() - self._last_tick_ts), 1)
 
     # ---------- 单拍 ----------
     def tick(self):
@@ -259,6 +265,7 @@ class Daemon:
         self._state = {
             'ts': now,
             'uptime_s': round(now - self.started_at),
+            'tick_age_s': round(now - self._last_tick_ts, 1),
             'intent': self.cfg.get('intent'),
             'tier': tier,
             'tier_label': TIER_LABELS.get(tier),

@@ -138,6 +138,7 @@ app/
   tray/tray.py              Shell_NotifyIcon 托盘，图标随档位变色，右键可切意图与造物者三态
 tests/test_scheduler.py     21 个调度决策场景（含换挡防抖两条）
 tests/test_history.py       7 个历史缓冲场景（含假时钟与「坏文件不拖垮启动」）
+tests/test_supervise_guard.py 8 个守护卡死判定场景（含「健康时不许误杀」）
 scripts/                    setup_runtime.ps1、make_bats.py（bat 生成器）、14 个入口 bat（GBK+CRLF）
 tools/                      全部离线只读的逆向与验证工具，产物落 tools/out（已 gitignore）
   gen_ec_map.py             从本机 Creator Center 生成 data/ec_map.local.json（不入仓库）
@@ -295,6 +296,12 @@ tools/                      全部离线只读的逆向与验证工具，产物�
 - 守护模式 `--supervise`：子进程异常退出会自动拉起（实测强杀后 6 秒恢复）；
   面板里点「停止面板服务」属于正常退出（code=0），守护**不会**复活它；
   10 分钟内异常退出超过 5 次则停止自动重启，避免启动即崩时空转刷屏；
+- **卡死也算故障**：守护每 5 秒问一次 `/api/ping`，判据不是「端口通不通」而是
+  「调度节拍多久没走」（`tick_age_s`，超过 90 秒判卡死 → 杀掉重拉）。
+  这是针对 open-revo 那个死法设计的：它进程还在、界面无响应，从此再也起不来。
+  节拍判定同时覆盖两种情况——整个进程挂住（请求超时）和 HTTP 线程还活着但
+  调度线程被拖住（比如 EC 请求不返回）；后者光看端口是查不出来的。
+  8 条判定单测里专门有一条「连续 30 次正常应答不得误杀」。
 - 单实例用内核命名互斥 `Global\UmiControlPanel`，进程死了由系统回收，
   不存在"残留锁导致再也起不来"——这正是 open-revo 栽过的坑；
 - 端口被占自动顺延 10 个并把实际端口写进 `data/port`；配置损坏则改名备份后用默认值继续跑。

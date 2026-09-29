@@ -221,6 +221,10 @@ def cmd_health(cfg, log):
     if state:
         check('面板服务', True, 'http://127.0.0.1:%d/ 已运行 %s 分钟' % (
             port, round((state.get('uptime_s') or 0) / 60.0, 1)))
+        # 「进程活着」不等于「在干活」：节拍多久没走才是这里要看的
+        age = state.get('tick_age_s')
+        check('调度节拍', age is not None and age <= 30,
+              '%.1f 秒前走过一拍' % age if age is not None else '状态里没有 tick_age_s')
         sensor = state.get('sensor') or {}
         check('调度档位', state.get('tier') is not None,
               '%s（意图 %s，%s）' % (state.get('tier_label'), state.get('intent'),
@@ -287,12 +291,68 @@ def cmd_health(cfg, log):
     return 0 if not bad else 1
 
 
+PING_URL_S = 3.0
+STALL_AFTER_S = 90.0        # 连续这么久问不到「节拍还在走」→ 认定卡死
+STALL_POLL_S = 5.0
+
+
+def _child_healthy(port):
+    """问一次 /api/ping：要 HTTP 有回、**并且调度节拍真的在走**。
+
+    只看「端口能不能连」不够：托盘/HTTP 线程活着而 daemon 线程卡死时，
+    端口照样通，但面板已经不干活了 —— 这正是 open-revo 那种「再也起不来」。
+    """
+    try:
+        body = _http_json(port, '/api/ping', timeout=PING_URL_S)
+    except Exception:                                       # noqa: BLE001
+        return False, None
+    age = body.get('tick_age_s')
+    if age is None:
+        return True, None          # 老版本/刚启动还没跑拍：只当活着，不判死
+    return age <= STALL_AFTER_S, age
+
+
+def _watch_child(proc, log):
+    """盯子进程：返回 ('exit', code) 或 ('stalled', None)——后者由调用方杀掉重拉。"""
+    began = time.time()
+    port = None
+    last_ok = began
+    while True:
+        code = proc.poll()
+        if code is not None:
+            return 'exit', code
+        if os.path.exists(data_path('port')):
+            try:
+                with open(data_path('port'), encoding='utf-8') as f:
+                    port = int(f.read().strip())
+            except (OSError, ValueError):
+                pass
+        if port is None:
+            # 子进程还没写出端口：给它启动宽限，超了就当卡死
+            if time.time() - began > STALL_AFTER_S:
+                return 'stalled', None
+            time.sleep(STALL_POLL_S)
+            continue
+        ok, age = _child_healthy(port)
+        now = time.time()
+        if ok:
+            last_ok = now
+        elif now - last_ok > STALL_AFTER_S:
+            log.error('[守护] 子进程卡死（节拍 %.1f 秒没走 / 端口 %d 无响应），准备杀掉重拉'
+                      % (age if age is not None else -1, port))
+            return 'stalled', None
+        time.sleep(STALL_POLL_S)
+
+
 def _supervise(pass_through):
-    """守护模式：子进程异常退出就自动拉起，用户主动停止则不复活。
+    """守护模式：子进程异常退出**或卡死**都自动拉起，用户主动停止则不复活。
 
     针对 open-revo 的教训——它一次僵死之后重启再也没起来，用户只能手动折腾。
-    这里区分「正常退出（面板里点了停止 / --stop）」和「崩了/被杀」：
-    只有后者才重启，且 10 分钟窗口内最多重启 5 次，避免启动即崩时刷屏空转。
+    这里区分三种情况：
+      * 正常退出（面板里点了停止 / --stop，code=0）→ 不复活；
+      * 崩溃/被杀（code≠0）→ 重拉；
+      * 活着但卡死（HTTP 无响应，或 HTTP 有回但调度节拍 90 秒没走）→ 杀掉再重拉。
+    10 分钟窗口内最多重启 5 次，避免启动即崩时刷屏空转。
     """
     import subprocess
     ensure_data_dir()
@@ -305,7 +365,13 @@ def _supervise(pass_through):
     log.info('[守护] 启动被管进程：%s' % ' '.join(child_args[-2:]))
     while True:
         proc = subprocess.Popen(child_args, cwd=root, creationflags=0x08000000)
-        code = proc.wait()
+        kind, code = _watch_child(proc, log)
+        if kind == 'stalled':
+            try:
+                proc.kill()
+            except OSError as exc:
+                log.error('[守护] 杀掉卡死进程失败：%r' % (exc,))
+            code = 9001                             # 非 0 → 走下面的重拉逻辑
         now = time.time()
         window.append(now)
         if code == 0:
