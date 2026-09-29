@@ -34,16 +34,16 @@
 | 调度性格（安静 / 标准 / 性能） | **可用** | 三个按钮代替 12 个阈值数字；换档即时生效，重启后保持 |
 | 一键诊断 | **可用** | 面板「复制诊断信息」= 13 项体检结论 + 最近 40 行日志；剪贴板不可用时自动改成下载 |
 | EC 直连通道 | **已打通** | `\\.\ACPIDriver` + `IOCTL_GPD_ACPI_ECREAD/ECWRITE`，普通权限即可，见第 6 节 |
-| 造物者模式按键（风扇三态：自动 / 自定义曲线 / 强冷） | **可读 + 可写** | 就是实体键写的同一个字节；满载实测见 6.4。按键现在会真的切控制意图（强冷=锁定性能、自动=自适应），并在屏幕上方弹一条提示 |
+| 硬件模式（实体键那个字节） | **可读 + 可写** | 就是实体键写的同一个字节，也是本机硬件模式的总开关（PL1、风扇 PWM 表、TGP 都跟着它走，见 6.2/6.4）。按键现在会真的切控制意图（全亮=锁定性能、半亮=自适应、不亮=锁定省电），并在屏幕上方弹一条提示 |
 | 屏幕提示（OSD） | **可用** | 只在「人动手」时弹：网页/托盘点击、实体按键；自适应自己换档不弹（打扰）。画不出来自动退化成只记日志 |
-| 硬件功耗墙档位（办公/均衡/狂暴）寄存器 | **未确认** | 按键只动风扇、不碰功耗墙；面板如实显示「未确认」，不猜、不写 |
-| 风扇转速 / 占空比 | **可用** | 强冷实测 4123 RPM / 自动 3663 RPM / 自定义曲线 3019 RPM |
+| OEM 那套档位（office/balance/turbo） | **本机没有** | 机主确认 Creator Center 界面上不存在办公/均衡/狂暴；GCUBridge 报的 `OperatingMode` 取值也不在 OEM 枚举里，所以面板一律显示「未知」并附原始值，那三个假的档位按钮已撤掉（见 6.6） |
+| 风扇转速 / 占空比 | **可用** | 性能档实测 4123 RPM / 自适应 3663 RPM / 省电档 3019 RPM |
 | 电池电量 / 温度 / 循环 | **可用** | 电量与系统 API 互相印证（100% = 100%）、循环 83 次、电池温度 24.4°C |
 | 充电阈值 | **读到 0，语义未确认** | 早先记过 80%/75%，现在稳定读到 0，无法复现 —— 先当成「未设限」，不做写入 |
 | 各模式出厂 PL 默认值、机型 ID | **可用（只读）** | 办公 35W / 均衡 60W / 省电档 75W；ProjectID=15 |
-| 实时 PL1/PL2 写入 | **未生效** | 写进去会自清、性能无变化（见 6.2），确认握手时序前不重复试 |
+| 实时 PL1/PL2 写入 | **未生效，已找到原因** | 写进去会自清、性能无变化（见 6.2）；离线核对 OEM 代码后确认那一组寄存器是 MyFan3 一代机型的落点，本机是 CML 平台。改功耗墙走风扇字节，不裸写 PL |
 | 风扇曲线 | **未验证** | 只有 EC 通道能提供；不做任何驱动穷举（见第 6 节） |
-| OEM MQTT 兜底通道 | **对端已停** | GCUBridge 服务当前 `Stopped / Disabled`（被 OpenRevo takeover 干的），需要恢复服务才可用 |
+| OEM GCUBridge 通道（MQTT） | **已连通，只读在用** | 服务恢复后 `127.0.0.1:13688` 可连；一条 `GETSTATUS` 就拿到全部开关状态（Win 锁、触摸板、灯条、键盘背光、独显直连…，见 6.6）。**写通道待验证**：没做过可逆验证之前面板不点亮 |
 
 ### 实测结论：为什么「切了档却体会不出来」
 
@@ -104,9 +104,15 @@ CoreMark 有一条官方硬规矩：单次跑不满 10 秒不给分数。所以�
 **结论照实写进面板了（红色「实测警告」）**：性能档只比省电档快 5.9%，四档频率
 全挤在 4347～4429 MHz（跨度 1.9%），说明 **BIOS/EC 接管了频率，powercfg 那一层
 压不住**——档位分数在测量噪声里排不出稳定顺序，所以面板不再宣称「哪档更快」。
-EC 通道本身是通的（风扇可控、实体键可读），缺的是功耗墙落点寄存器；确认前不猜着写。
+
+> 2026-09-30 补：这段实验只证明了「powercfg 那一层没用」，它本身没错，但它当时
+> 得出的另一半结论（「性能墙落在 EC 的某个还没找到的功耗墙寄存器上」）已经被
+> 全表观察推翻——墙就是**风扇字节**这个硬件模式总开关，见 6.2 / 6.4 / 6.6。
 
 ### 2026-09-29 晚：模式词统一 + 屏幕提示（OSD）
+
+> 本节讲词表和 OSD 本身；实体键三态各自代表什么档，2026-09-30 按全表观察改正过，
+> 以本节下面那张表为准。
 
 机主反馈「网页一套词、弹窗一套词，对不上号」，现在**全项目只有一套模式名**：
 省电 / 均衡 / 流畅 / 性能。控制意图不再叫「办公 / 狂暴」，而是直接说锁哪一档：
@@ -125,15 +131,21 @@ EC 通道本身是通的（风扇可控、实体键可读），缺的是功耗�
 实体「造物者模式」键以前只改 EC 风扇字节、标题和意图都不动，机主以为按键坏了。
 现在三态会真的切意图，并且**只在人动手时弹屏幕提示**：
 
-| 按键落到 | 意图跟着变成 | OSD 大字 |
-| :--- | :--- | :--- |
-| Turbo_Mode（强冷） | 锁定性能 | 性能模式 |
-| Normal_Mode（自动） | 自适应 | 自适应模式 |
-| User_Fan_*（自定义曲线） | 不变（只接管风扇） | 风扇：自定义曲线 |
+| 按键灯 | 落到哪个字节 | 意图跟着变成 | OSD 大字 | 实际差别（实测） |
+| :--- | :--- | :--- | :--- | :--- |
+| 全亮 | `Turbo_Mode` | 锁定性能 | 性能模式 | PL1 75W、风扇强冷，满载最快也最吵 |
+| 半亮 | `Normal_Mode` | 自适应 | 自适应模式 | 风扇和功耗墙都交回 EC 自动 |
+| 不亮 | `User_Fan_HiMode` | 锁定省电 | 省电模式 | **PL1 砍到 10W**、风扇走自定义曲线，满载慢 23~26% |
+
+> 「不亮」这一态曾经被写成「只接管风扇、电源模式不变」，于是面板照旧显示自适应，
+> 机主看到的状态和机器实际跑的档对不上。2026-09-30 的全表观察证实它会连着把
+> `PL1_SETTING_VALUE` 从 75 改到 10，是**硬件模式**换档，不是单纯的风扇档（见 6.2）。
 
 自适应自己换档**一律不弹**——干活干到一半屏幕上跳东西比没提示更烦。
 OSD 是自绘的分层窗口（`app/tray/osd.py`，无第三方依赖），右下角出现、2.2 秒自动消失、
 不抢焦点也不进 Alt-Tab；`config.json` 里 `tray.osd` 设 `false` 可整体关掉。
+网页上的「风扇字节 → 模式名」也不在 JS 里另抄一份，而是由后端从
+`app/tray/fankey.py` 经 `/api/state` 的 `meta.fan_mode_words` 下发，两边不可能分叉。
 
 > 兜底通道的 broker 身份（clientId / 用户名 / 口令）**不进仓库**：
 > 需要时把 `mqtt_identity.example.json` 复制成 `data/mqtt_identity.json` 填写即可，
@@ -170,6 +182,10 @@ scripts\造物者三态实测.bat
 :: 结果存 tools\out\ec-watch-all.txt —— 这是唯一零风险拿到剩余语义的办法
 scripts\观察EC变化.bat        &rem 21 个语义寄存器，0.5s 一轮，抓按键这类瞬时事件
 scripts\观察EC全表.bat        &rem 125 项全表，2s 一轮，破灯效/阈值/曲线
+
+:: 找功能落点（更全）：一次同时抓 OEM 命令通道 + EC 全表，用来破键盘背光/灯条/
+:: Win 锁/触摸板/电池养护这些开关。会先停面板（避免抢 broker 身份），完事自动重启
+scripts\观察OEM通道.bat       &rem 产物：tools\out\mqtt-watch.txt + ec-watch-all.txt
 ```
 
 入口只有 `main.py`，四种模式：
@@ -201,6 +217,7 @@ app/
   sense/gpu.py              GPU 遥测（nvidia-smi）
   act/power.py              powercfg 方案 + EPP + turbo + min/max，注册表回读校验
   act/hardware.py           通道总管：能力协商、切档、息屏掉档守护
+  act/channels/base.py      通道基类 + 能力名 + 风扇字节→硬件模式映射（EC 与 UI 共用一处）
   act/channels/ec_gpd.py    主通道：EC 直连（\.\ACPIDriver + IOCTL_GPD_ACPI_ECREAD/ECWRITE）
   act/channels/mqtt_gcu.py  兜底通道：OEM GCUBridge MQTT + 命令白名单
   act/channels/gcu_actions.json  只允许发送已在本机逆向字符串中确认存在的 Action
@@ -212,12 +229,13 @@ app/
   tray/fankey.py            屏幕提示文案：全项目唯一一套模式词（省电/均衡/流畅/性能）
 tests/test_scheduler.py     25 个调度决策场景（含换挡防抖两条、温度趋势预判三条）
 tests/test_bench_score.py   11 个跑分算分场景（方向、归一化、zstd 解析、老成绩整批丢弃）
-tests/test_fankey.py        12 个屏幕提示场景（一套模式词、三态不张冠李戴、实体键映射到哪个意图）
+tests/test_fankey.py        14 个屏幕提示场景（一套模式词、三态不张冠李戴、实体键映射到哪个意图）
 tests/test_history.py       7 个历史缓冲场景（含假时钟与「坏文件不拖垮启动」）
 tests/test_supervise_guard.py 8 个守护卡死判定场景（含「健康时不许误杀」）
 tests/test_tray_session.py  6 个会话事件分发场景（不锁屏幕也能验证解锁那条路）
 tests/test_config_profile.py 6 个调度性格读写场景（盯「补丁漏进 config.json」那个 bug）
-scripts/                    setup_runtime.ps1、make_bats.py（bat 生成器）、16 个入口 bat（GBK+CRLF）
+tests/test_singleton_port.py 6 个单实例与端口场景（盯 2026-09-30 那个双实例并跑）
+scripts/                    setup_runtime.ps1、make_bats.py（bat 生成器）、17 个入口 bat（GBK+CRLF）
 tools/                      全部离线只读的逆向与验证工具，产物落 tools/out（已 gitignore）
   gen_ec_map.py             从本机 Creator Center 生成 data/ec_map.local.json（不入仓库）
   oem_constant_dump.ps1     反射导出 OEM 程序集的常量与枚举（IOCTL 码、寄存器名、模式取值）
@@ -230,6 +248,7 @@ tools/                      全部离线只读的逆向与验证工具，产物�
   ec_pl_test.py             功耗墙写入的可逆实验（写→全核跑分→还原，结论：不生效）
   ec_mode_probe.py          快照全表 125 个寄存器 → 写一个候选 → 差分 → 还原
   ec_watch.py               只读变化观察器：21 项语义寄存器（0.5s 一轮）或 125 项全表（2s 一轮）
+  mqtt_watch.py             GCUBridge 命令观察器：只订阅，最多发一条 GETSTATUS，掉线自动重连
   ec_mode_bench.py          造物者三态满载实测（正反序各一遍，写前存原值、测完还原、97°C 保险）
   tier_effect_test.py       逐项验证 Windows 电源旋钮在本机是否有效（结论：无效）
   freq_probe.py             PDH 频率计数器可用性探测
@@ -332,12 +351,12 @@ tools/                      全部离线只读的逆向与验证工具，产物�
 | 主/副风扇转速、左右占空比、风扇模式字节 | **可用**（实测 2093/2123 RPM、30%、Turbo_Mode） |
 | 电池电量、电池温度、循环次数 | **可用**（电量与系统 API 互相印证：100% = 100%，循环 83 次） |
 | 充电阈值 `ADDR_BATTERY_CHARGE_LIMIT_UP/DOWN` | **读到 0**：早先记过 80%/75%，现在两次实测都是 0 且无法复现。和 `ADDR_RGBKB_LEVEL_R`、`ADDR_MYFAN2_L1_PWM`、`ADDR_SINGLEKBL_ENABLE` 是同一类——**用户没设过就是 0**，所以「读到 0」不等于功能不可用，但也说明这些是 RAM 里的用户配置，写入语义没确认前一律不动 |
-| 各模式出厂 PL 默认值（办公 35W / 均衡 60W / 省电档 75W）、TCC offset | **可用**（只读） |
+| 各模式出厂 PL 默认值、TCC offset | **可用**（只读）：OEM 常量表里写着 35W / 60W / 75W 三档。但这三个数是**静态常量**，不代表本机当前在跑哪一档——实测硬件模式的 PL1 是 75W（性能）/ 10W（省电），10W 这个值在常量表里根本没有，所以别拿这张表当「当前档位」读 |
 | 机型标识 ProjectID=15、ModuleID=54 | **可用** |
-| 风扇模式写入（自动 / 强冷 / 加速） | **可用**，需 `allow_write=true` |
-| 造物者模式按键字节 `ADDR_MAFAN_CONTROL_BYTE` | **已确认**：实体键就是在这一个字节上循环 `Normal_Mode(0x00) → User_Fan_Mode(0x80) → Turbo_Mode(0x10)`，满载实测见下面 6.4 |
-| 硬件档位（办公/均衡/狂暴）落在哪个寄存器 | **未确认**：`tools/ec_watch.py` 实测按一次键**只有**风扇字节在动，`PL1/PL2/PL4_SETTING_VALUE`、`MyFanCCI_Mode_Index`、`SILENTMODE_STATUS_BYTE` 全部纹丝不动 —— 也就是说这台模具的实体键是风扇键，不是功耗墙键。功耗墙档位的落点仍然未知，面板如实显示「未确认」，不猜 |
-| 实时 PL1/PL2 写入 | **未生效**：写 `ADDR_PL1_SETTING_VALUE=35` 回读为 35 但 1 秒内自清 0，全核跑分与频率毫无变化（对照 20.71 → 21.22 Mops/s）。说明它是请求寄存器而非状态寄存器，或需要 TRIGGER/STATUS 握手时序 |
+| 硬件模式写入（自适应 / 性能 / 省电 / 风扇加速） | **可用**，需 `allow_write=true`。写的就是实体键那个字节，取值只允许 OEM 枚举 `MyFanCTLByteFlag` 里的名字，写完立刻回读校验 |
+| 造物者模式按键字节 `ADDR_MAFAN_CONTROL_BYTE` | **已确认，而且它就是硬件模式总开关**：2026-09-30 全表差分抓到，按一次键这个字节 `Turbo_Mode(0x10) ↔ User_Fan_HiMode(0xA0)` 的同时，`PL1_SETTING_VALUE` 75↔10、`MYFAN2_L1/L4_PWM`、`L2_PWM_DEFAULT_MYFAN3`、`DynamicBoost_MaxinumTGP`、`ConfigurableTGP_DynamicBoost_CTRL_BYTE` 整组跟着换。LED 对应关系由机主现场确认：**全亮=性能、半亮=自适应、不亮=省电** |
+| 硬件档位落在哪个寄存器 | **已确认（2026-09-30）**：不存在单独的「档位寄存器」，档位就是上面那个风扇字节，功耗墙是它的结果。早先那条「按键只动风扇、PL 纹丝不动」的记录是**在 GCUBridge 服务被停用的状态下测的**——那时按键只改了风扇字节，没人去套用整套配置；服务恢复后同一个键就变成了两态循环并带着功耗墙一起走（这一点是从两份日志的差异推出来的，不是直接观察到的因果） |
+| 实时 PL1/PL2 写入 | **未生效**：写 `ADDR_PL1_SETTING_VALUE=35` 回读为 35 但 1 秒内自清 0，全核跑分与频率毫无变化（对照 20.71 → 21.22 Mops/s）。离线核对 OEM 代码后有了原因：那一组 PL 寄存器（0x783-0x785）是 **MyFan3 一代机型**的落点，本机是 CML 平台，写了不认。要改功耗墙就走风扇字节（已验证）或 OEM 的 MQTT 通道，**不裸写 PL** |
 
 ### 6.3 规矩（不可协商）
 
@@ -352,33 +371,43 @@ tools/                      全部离线只读的逆向与验证工具，产物�
    全表模式（125 项）固定 2 秒一轮（≈62 次/秒），和 21 项 × 0.5 秒是同一个量级——
    实测这个速率跑了 4000+ 次读没有任何异常。不许为了快而把间隔调小。
 
-### 6.4 造物者模式按键三态实测（2026-09-29）
+### 6.4 造物者模式按键三态实测（2026-09-29 测，2026-09-30 补上原因）
 
-`tools/ec_watch.py` 抓到的事实：按一次实体键，**只有** `ADDR_MAFAN_CONTROL_BYTE` 在动，
-循环顺序 `Normal_Mode(0x00) → User_Fan_Mode(0x80) → Turbo_Mode(0x10) → 0x00`，
+`tools/ec_watch.py` 当时抓到：按一次实体键，`ADDR_MAFAN_CONTROL_BYTE` 在
+`Normal_Mode(0x00) → User_Fan_Mode(0x80) → Turbo_Mode(0x10)` 上循环，
 其它 20 个语义寄存器（含 PL1/PL2/PL4、`MyFanCCI_Mode_Index`）全程不变。
-所以这台模具的「造物者模式键」是风扇键，不是功耗墙键。
+
+**那次观察是在 GCUBridge 服务被停用的状态下做的，所以只看到了半件事。**
+2026-09-30 服务恢复后重跑全表（`logs/观察EC全表`），同一个键变成两态循环
+`Turbo_Mode(0x10) ↔ User_Fan_HiMode(0xA0)`，而且**功耗墙跟着一起走**：
+`PL1_SETTING_VALUE` 75↔10、`MYFAN2_L1_PWM` 3↔7、`MYFAN2_L4_PWM` 5↔15、
+`L2_PWM_DEFAULT_MYFAN3` 0↔255、`DynamicBoost_MaxinumTGP` 5↔15、
+`ConfigurableTGP_DynamicBoost_CTRL_BYTE` 3↔7、`AP_OEM_BYTE6` 4→0→7→3。
+也就是说这个字节是硬件模式的总开关，风扇曲线和功耗墙都是它的结果。
+下面那张表量到的差距，因此不只是「风扇转速不同」，而是整套硬件配置不同。
 
 那三态到底差多少？`tools/ec_mode_bench.py`：每态写入后稳定 8 秒，
 再全核满载 25 秒（16 个进程），旁路采频率 / 温度 / 转速，测完把原值写回并回读。
 
 | 状态 | 多线程吞吐 | 平均频率 | 风扇均速 | 满载最高温 |
 | :--- | :--- | :--- | :--- | :--- |
-| Normal_Mode（自动） | 19.71 / 19.97 Mops/s | 3096 / 3101 MHz | 3663 / 3603 RPM | 83.1 / 78.1 °C |
-| Turbo_Mode（强冷） | **21.51 / 21.04**（+9.1% / +5.4%） | 3461 / 3472 MHz | 4123 / 3766 RPM | 78.1 / 80.1 °C |
-| User_Fan_Mode（自定义曲线） | **15.15 / 14.68**（−23.1% / −26.5%） | 2319 / 2333 MHz | 3019 / 2687 RPM | 67.1 / 72.1 °C |
+| Normal_Mode（自适应，LED 半亮） | 19.71 / 19.97 Mops/s | 3096 / 3101 MHz | 3663 / 3603 RPM | 83.1 / 78.1 °C |
+| Turbo_Mode（性能，LED 全亮） | **21.51 / 21.04**（+9.1% / +5.4%） | 3461 / 3472 MHz | 4123 / 3766 RPM | 78.1 / 80.1 °C |
+| User_Fan（省电，LED 不亮） | **15.15 / 14.68**（−23.1% / −26.5%） | 2319 / 2333 MHz | 3019 / 2687 RPM | 67.1 / 72.1 °C |
 
 （两组数字是正序与反序各跑一遍：`ec_mode_bench.py` 与 `ec_mode_bench.py reverse`。
-同一态两次相差 ≤1.5%，说明差别来自档位本身，不是测量顺序或机器冷热。）
+同一态两次相差 ≤1.5%，说明差别来自档位本身，不是测量顺序或机器冷热。
+表里的 Mops/s 来自已退役的纯 Python 负载，绝对值不要和现在的 zstd/CoreMark 成绩比。）
 
 三条能直接用的结论：
 
-1. 只改风扇这一个字节就能拉开 6%～26% 的满载吞吐 —— 这台机器的性能墙在**散热**这一侧，
-   不在 Windows 电源计划那一侧（和 6.2、下面第 3 条互相印证）；
-2. `User_Fan_Mode` 在**没有配过自定义曲线**时是最保守的那一档：满载只有 2320 MHz 上下，
-   比自动档慢四分之一，而温度反而最低（67°C）—— 说明它是被功耗/电流限住，不是被温度限住。
-   面板的自动跟随因此永远不会选它，只有用户明确点「自定义曲线」按钮才会写进去；
-3. 强冷比自动快 5%～9%、转速高 160～460 RPM —— 代价是噪音。所以面板只在性能档写 Turbo，
+1. 只改这一个字节就能拉开 6%～26% 的满载吞吐 —— 这台机器的性能墙在 **EC 侧**，
+   不在 Windows 电源计划那一侧（和 6.2、第 2 节的实测互相印证）；
+2. 「省电」这一态慢四分之一的原因是**功耗墙被压到 10W**，不是风扇不够：
+   它的温度反而最低（67°C），频率却只有 2320 MHz 上下 —— 典型的被功率/电流限住。
+   所以面板的自动跟随永远不会选它，只有用户按实体键或明确点按钮才会进这一态，
+   而且一旦进来，面板就**不再自动覆盖**（`fan_user_owned()` + 900 秒优先窗口）；
+3. 性能比自适应快 5%～9%、转速高 160～460 RPM —— 代价是噪音。所以面板只在性能档写 Turbo，
    并且给了防抖与优先窗口，不会为了几个百分点每分钟把风扇拨来拨去。
 
 复现：`scripts\造物者三态实测.bat`（会先停面板、测完自动重启面板，全程约 7 分钟，风扇很吵）。
@@ -407,6 +436,76 @@ GUID 类——所以「查不到 B60BFB48」既不能证明它不在，也不能
 
 在那之前，不基于这条线索写任何代码。
 
+### 6.6 OEM GCUBridge 通道：已经连上，而且它比 EC 更好问话（2026-09-30）
+
+GCUBridge 服务恢复后（`scripts\启用造物者档控制.bat`），`127.0.0.1:13688` 这个
+本机 broker 就活了。`tools/mqtt_watch.py`（**只订阅，最多发一条 `GETSTATUS` 问状态，
+不发任何控制命令**）连上去问一句，OEM 自己就把所有开关的当前状态全报了出来：
+
+| 字段 | 当前值 | 说明 |
+| :--- | :--- | :--- |
+| `WinKey` | `WINKEY_STATUS_LOCK` | **Win 键此刻是锁着的** |
+| `TouchpadToggle` | `TOUCHPAD_TOGGLE_ON` | 触摸板开着 |
+| `LightBar` | `LIGHTBAR_STATUS_ON` | 灯条开着 |
+| `SingleColorKBBL` | `SINGLE_COLOR_KBBL_STATUS_ON` | 键盘背光是**单色**款，不是 RGB |
+| `UsbCharger` | `USB_CHARGER_STATUS_OFF` | USB 关机充电关着 |
+| `OSD` | `OSD_HIDDEN_OFF` | OEM 的屏幕提示是显示的 |
+| `FnKey` / `NumPad` | `FNKEY_UNLOCK` / `NUMPAD_UNLOCK` | 都没锁 |
+| `DiscreteGpuDirectConnectionSwitch` | `..._TOGGLE_ON`，`Support` | 独显直连说「支持且已开」 |
+| `DGpu` | `NV_CTRL_PANEL_AUTOSELECT` | 但这里又说「自动选择」——两者对不上，待观察 |
+| `AcRecoverySwitch_Support` | `NotSupport` | 插电恢复本机不支持 |
+| `DisplayMode` + 各组亮度/色温 | `DISPLAY_STANDARD_MODE`，标准/游戏/视频/阅读/自定义五组 | 显示模式是独立于性能档的一套东西 |
+
+为什么这条路比裸 EC 强：**报文体里的 Action 名和参数就是 OEM 自己的词汇**，
+不用猜寄存器；而且 `Tray/Status` 里的 `OperatingMode` 还能反过来校验我们的判断。
+
+同时暴露了一个我们此前编错的地方：`OperatingMode` 的取值以前被映射成
+`1→均衡、2→均衡、3→狂暴`，那是照抄别家的猜测，和 OEM 自己的枚举
+`OperatingMode{Office:0, Turbo:2}` 直接矛盾，而实测报的正是没定义的值。
+现在只认枚举里有的（0=Office、2=Turbo），其余一律 `unknown` 并把原始值暴露在通道状态里；
+`mode.write` 也从「连上就算可用」降级成**待验证**——按 6.3 的规矩，
+没做过「写 → 观察改了什么 → 还原」的可逆验证之前，面板不点亮这个开关
+（所以那三个假的「办公/均衡/狂暴」按钮已经从界面上撤掉了）。
+
+复现：`scripts\观察OEM通道.bat`（先停面板，240 秒里同时抓 MQTT 命令与 EC 全表，
+结束后自动重启面板）。**必须停面板**：MQTT 的规矩是同一个 clientId 只允许一条连接，
+后连上的会把先连上的顶掉；另外 GCUBridge 还会周期性检查「clientId 同名进程在不在」，
+不在就踢线（约 26 秒一次），所以观察器要独占这个身份。
+
+### 6.7 灯效、Win 锁、电池三档、触摸板：第二次观察问出了什么（2026-09-30 00:27）
+
+机主按清单点了一遍 Creator Center，两份报告在 `logs/观察2`（EC 全表）和
+`tools/out/mqtt-watch.txt`（OEM 命令）。**MQTT 那半只录到 00:28:32 就断了**——
+原因不是 broker，是我们自己：另一个脚本在观察途中又把面板拉了起来，
+两个实例抢同一个 clientId，观察器被顶掉线（这个 bug 见 7 节，已修）。
+所以下面标「待复核」的几条，是靠 EC 差分 + 已抓到的那 60 秒命令撑着的。
+
+| 功能 | 结论 | 证据 | 置信度 |
+| :--- | :--- | :--- | :--- |
+| 键盘背光 / 灯条 | **不在 EC 上**，走 GCUBridge 的 `Keyboard/Ctrl`：`{"function":"SetPower","light":"3","speed":"2"}`；状态从 `Keyboard/Status`、`HidLightbar/Status` 读（`solution=ITE`、`type=FourZone` / `MEZone_Lighbar`，`ACBrightness=3`、`DCBrightness=0`） | 机主点背光和灯条时 EC 全表一个字节都没动；`LIGHTBAR_CONTROL_BYTE`、`RGBKB_LEVEL_R/G/B`、`SINGLEKBL_ENABLE` 在灯亮着的时候全是 0 | **已确认**（阴性结论，两边都指向同一条路） |
+| 触摸板 | 本机是**实体开关**（触摸板上有一处物理拨动），`Setting/Status` 里的 `TouchpadToggle` 只是它的读数，不是软件开关 | 机主 2026-09-30 确认；观察期间没有任何命令与它对应 | 已确认（所以面板不做这个开关） |
+| Win 键锁定 | 候选：`ADDR_STAUTS_BYTE`（1896）1→0，且此后没再变 | 机主只点了一次 Win 锁（00:29:19），EC 就这一个字节翻了；同一时刻 `Setting/Status` 报 `WinKey=WINKEY_STATUS_LOCK` | 待复核（样本一次；OEM 侧有现成的 `WINKEY_LOCK/UNLOCK`，已在白名单里） |
+| 「平衡 / 健康 / 长效」三档 | 候选：`ADDR_AP_OEM_BYTE4`（1958）高半字节 0→1→2→0，低半字节 9 不动 | 机主连点三次电源模式（00:30:03 / 00:30:09 / 00:30:17），只有这个字节跟着走 | 待复核（命令名没抓到） |
+| 这三档是什么 | **不是性能档，是电池充电阈值三档**：open-revo 的说明写得很明白——「长效模式 (100%)、日常均衡 (80%)、工作站长寿养护 (60%)」 | 本机 Creator Center 没有办公/均衡/狂暴；`powercfg -list` 只有系统自带那一个「平衡」方案，所以它也不是 Windows 电源计划 | 待复核（阈值不在 EC 这张表里执行：`CHARGE_LIMIT_UP/DOWN` 全程 0） |
+
+另外这 60 秒里 OEM 自己交代了两件有用的事：
+
+- **`Fan/Status` 把边界写死了**：`CPU_PL1Minimum=10`、`CPU_PL1Maximum=120`、`CPU_PL4Maximum=165`、
+  `GPU_ConfigurableTGP` 80~115、`GPU_DynamicBoost` 5~15、`GPU_TargetTemperature` 75~87。
+  这正好和实体键「不亮」那态的 PL1=10 对上——10W 是 OEM 自己允许的下限，不是我们猜的。
+  以后任何写入都拿这组数当护栏。
+- **OEM 自己就是这么写功耗墙的**：`Fan/Control {"Action":"SET_OPERATING_MODE_DETAIL","PL1":"75","PL2":"75","PL4":"75"}`。
+  也就是说改 PL1 的正路是走 GCUBridge，而不是裸写 `PL1_SETTING_VALUE`
+  （后者实测写完自清零，见 6.2）。这条要做可逆验证之后才允许面板用。
+
+顺手排掉一条线索：机主给的官方主板驱动包（`01-Chipset`）是 **Intel Chipset Device Software**，
+74 个 INF + 27 个 CAT，除安装器外没有任何二进制，也不含 `INOU`/`EC`/`GPD`/`ACPIDriver` 字样，
+对 EC 语义没有帮助。顺着它的 `PCI\VEN_8086&DEV_06F9`（PCH 热子系统）查下去，
+本机**没有 Intel DPTF/ESIF 那一层**：没有 `INT3400` 热管理主控（只有 `INT3450` GPIO 控制器）、
+没有 `esif_lf.exe`、没有 DPTF 服务。所以「用 Intel 官方接口调功耗墙」这条路在这台机器上
+不存在，功耗与散热策略完全在 OEM 的 EC + GCUService 手里——这也解释了为什么
+powercfg 那一层压不住频率（2 节）。
+
 ## 7. 运行方式（目标是"不用盯着"）
 
 - 开机自启：`HKCU\...\Run\UmiControlPanel` → `UmiPanel.exe main.py --supervise --no-browser`；
@@ -420,37 +519,70 @@ GUID 类——所以「查不到 B60BFB48」既不能证明它不在，也不能
   调度线程被拖住（比如 EC 请求不返回）；后者光看端口是查不出来的。
   8 条判定单测里专门有一条「连续 30 次正常应答不得误杀」。
 - 单实例用内核命名互斥 `Global\UmiControlPanel`，进程死了由系统回收，
-  不存在"残留锁导致再也起不来"——这正是 open-revo 栽过的坑；
+  不存在"残留锁导致再也起不来"——这正是 open-revo 栽过的坑。
+  **但这个锁曾经形同虚设**：`ctypes.windll` 不会把 last error 抄进 ctypes 自己的
+  线程局部存储，`get_last_error()` 拿到的是残值，`ERROR_ALREADY_EXISTS` 永远判不出来。
+  2026-09-30 实测两个实例并排跑了十几分钟（改用 `WinDLL(..., use_last_error=True)` 修好，
+  `tests/test_singleton_port.py` 盯着）；
 - 端口被占自动顺延 10 个并把实际端口写进 `data/port`；配置损坏则改名备份后用默认值继续跑。
+  顺延那条路以前也走不到：`HTTPServer` 默认开 `SO_REUSEADDR`，而 **Windows 上它的语义是
+  「允许绑到别人正在监听的端口」**，所以第二个实例不报错、直接和第一个共用 8747，
+  请求随机落到谁身上。现在关掉了复用，端口被占就真的会顺延；
+  顺延结果**不再回写 config.json**（只写 `data/port`），否则几次快速重启后端口会一路漂到 8777。
 
 ## 8. 已知问题 / 待办
 
 - [x] EC 只读通道：已打通并自校验（电量与系统 API 一致），风扇/电池/PL 默认值/机型 ID 全部可读
-- [x] EC 写通道：布局已确认，风扇模式写入实测生效且可逆还原
-- [x] 实体「造物者模式」按键落点：确认就是 `MAFAN_CONTROL_BYTE` 三态循环，
-      并且量化了三态的真实差别（6.4）—— 这一档改变的是散热与满载吞吐
-- [x] 面板与按键不再抢方向盘：按键优先窗口 + 自定义曲线永不自动覆盖 + 换挡防抖
-- [x] 实体键真的会切模式：Turbo→锁定性能、Normal→自适应、自定义曲线→只接管风扇，
+- [x] EC 写通道：布局已确认，硬件模式字节写入实测生效且可逆还原
+- [x] 实体「造物者模式」按键落点：确认就是 `MAFAN_CONTROL_BYTE`，而且它是**硬件模式的总开关**
+      （PL1 75W↔10W、风扇 PWM 表、TGP 都跟着走，见 6.2/6.4），三态的真实差别已量化
+- [x] 面板与按键不再抢方向盘：按键优先窗口 + 用户档永不自动覆盖 + 换挡防抖
+- [x] 实体键真的会切模式：全亮→锁定性能、半亮→自适应、不亮→锁定省电，
       并按「只有人动手才弹」的规矩给屏幕提示（`app/tray/osd.py`，自适应换档一律不弹）
 - [x] 全项目一套模式词（省电/均衡/流畅/性能），意图叫「自适应 / 锁定某模式」，
-      办公/狂暴两个词删掉；词表只在 `scheduler.py` 定义，用例盯着不许分叉
+      办公/狂暴两个词删掉；词表只在 `scheduler.py` 定义，网页/托盘/弹窗都从这里取，用例盯着不许分叉
 - [x] 跑分负载换成开源工具（官方 zstd + 本机现编 CoreMark），进度条走到底并给 ETA，
       四档实测 167 秒跑完（结果见第 2 节：**powercfg 那一层压不住频率**，面板如实弹警告）
-- [ ] **功耗墙档位（办公/均衡/狂暴）落在哪个寄存器**：仍未确认。
-      按键不碰它，`PL*_SETTING_VALUE` 写入自清且无性能变化。
-      下一步：用 `scripts\观察EC全表.bat`（240 秒、125 项全表只读、2 秒一轮）
-      在 Creator Center 里逐项点一遍，看哪个寄存器跟着动 —— 只有本机现场能拿到这个证据
-- [ ] 键盘 RGB / 灯带：寄存器名已在表里（`ADDR_RGBKB_LEVEL_R/G/B`、`ADDR_LIGHTBAR_CONTROL_BYTE`、
-      `ADDR_SINGLEKBL_ENABLE/SUPPORTPOWER`），**语义未确认所以不写**，等上一条的观察结果
+- [x] GCUBridge 服务已恢复，MQTT 通道连上并用于只读（见 6.6）
+- [x] **灯效不在 EC 上**：机主点背光/灯条时全表纹丝不动，`LIGHTBAR_CONTROL_BYTE`、
+      `RGBKB_LEVEL_R/G/B`、`SINGLEKBL_ENABLE` 在灯亮着时全是 0；真实通路是
+      `Keyboard/Ctrl {"function":"SetPower","light":"3","speed":"2"}`（ITE / FourZone），见 6.7
+- [x] 触摸板是**实体拨动开关**，`TouchpadToggle` 只是读数——面板不做这个软件开关
+- [x] 官方主板驱动包（`01-Chipset`）查过了：Intel Chipset Device Software，纯 INF/CAT，
+      不含 EC 相关任何东西；顺带确认本机**没有 Intel DPTF/ESIF**，功耗墙只能走 OEM 那条路
+- [x] 双实例并跑的 bug：互斥锁因 `ctypes.windll` 拿不到 last error 而失效 +
+      `SO_REUSEADDR` 在 Windows 上允许二次绑端口，两个实例共用 8747 还互踢 MQTT 身份。
+      两处都已修，`tests/test_singleton_port.py` 6 条盯着（见 7 节）
+- [ ] **补一次 5 分钟观察**（`scripts\观察OEM通道.bat`，观察器现在掉线会自动重连）：
+      只点 Win 锁关/开、电池三档各切一次，把 `WINKEY_*` 和那三档的 Action 名抓下来，
+      好确认 `ADDR_STAUTS_BYTE`、`ADDR_AP_OEM_BYTE4` 这两个候选（见 6.7）
+- [ ] **MQTT 写通道的可逆验证**：`OPERATING_OFFICE_MODE / OPERATING_TURBO_MODE` 这些动作名
+      来自 OEM 自己的动作表，但本机还没做过「写 → 观察哪个寄存器/跑分变了 → 还原」。
+      验证之前 `mode.write` 保持「待验证」，面板不点亮那组按钮（6.3 第 2 条）
+- [ ] 改功耗墙的正路已经看到了：`Fan/Control {"Action":"SET_OPERATING_MODE_DETAIL","PL1","PL2","PL4"}`，
+      而且 `Fan/Status` 给出了 OEM 自己的边界（PL1 10~120W、PL4 ≤165W、TGP 80~115、
+      目标温度 75~87°C）。要做可逆验证 + 拿这组边界当护栏，验证前不进白名单
+- [ ] `OperatingMode` 的真实取值：`Tray/Status` 报的值不在 OEM 枚举 `{Office:0, Turbo:2}` 里，
+      现在一律按「未知」处理并把原始值暴露在通道状态里，等一次点击观察把它对上
+- [ ] 键盘背光 / 灯条 / USB 充电 / OSD / 独显直连：GCUBridge 已经报出**当前状态**
+      （`SingleColorKBBL`、`LightBar`、`UsbCharger`、`OSD`，见 6.6），
+      但「点一下会发哪条命令」只抓到了背光那一条（`Keyboard/Ctrl` + `SetPower`）。
+      拿到其余的命令名之后再决定要不要把这些开关搬进面板；
+      EC 侧那几个灯效寄存器已经排除，不存在「写它试试」的选项
 - [ ] 风扇曲线读写：`ADDR_MYFAN2_L1~L5_PWM` 与 `User_Fan_Level1~5(0x81~0x85)` 看着是一对，
-      但没实测过，暂不写
-- [ ] 电池保养三档（长效/平衡/健康）：`ADDR_BATTERY_CHARGE_LIMIT_UP/DOWN` 可读，
-      但两次实测都是 0（早先记过 80%/75%，无法复现），写入语义未确认，**故意不做**，不编造。
+      而且全表观察抓到按硬件模式时 `MYFAN2_L1/L4_PWM` 会跟着换（3↔7、5↔15），
+      但「写单个 PWM 会不会被 EC 覆盖」没实测过，暂不写
+- [ ] 电池保养三档（长效 100% / 平衡 80% / 健康 60%，档位含义取自 open-revo 的说明）：
+      EC 侧候选是 `ADDR_AP_OEM_BYTE4` 高半字节 0/1/2（跟着机主三次点击走，见 6.7），
+      但 `ADDR_BATTERY_CHARGE_LIMIT_UP/DOWN` 两次实测都是 0，说明阈值不在 EC 这张表里执行；
+      OEM 那边的路是 `BatteryProtection/Control` + `HealthProtectionStatus`（观察里抓到过
+      `{"Report":"GET"}` 这条读命令）。**故意不做写入**，命令名确认前不编造。
       面板只把读到的电量 / 电池温度 / 循环次数如实显示出来（这三项与系统 API 互相印证过）
 - [ ] **同方 WMI 接口（`B60BFB48-…`）在不在本机**：查不到也否不掉——普通权限连微软自己的
       GUID 类都看不见（见 6.5）。需要用管理员权限跑一次 `tools\wmi_guid_probe.ps1`（只读）。
-      在的话，性能档位/独显直连/键盘背光/触摸板锁/风扇全都有 OEM 背书的路，不用猜 EC
-- [ ] 兜底通道：需恢复 GCUBridge 服务（`scripts\启用造物者档控制.bat`，会弹 UAC）
+      优先级已经降低：GCUBridge 这条路通了之后，大部分功能都有 OEM 背书，不用赌 WMI
+- [ ] 独显直连（MUX）：`DiscreteGpuDirectConnectionSwitch_Status=ON / Support`，
+      但 `DGpu=NV_CTRL_PANEL_AUTOSELECT`，两个字段互相矛盾，等一次点击观察分辨
 - [ ] 托盘图标的桌面可见性需本机确认（沙箱内截不到图）
 
 ## 9. 协议与许可参考

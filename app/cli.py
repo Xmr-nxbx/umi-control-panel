@@ -552,10 +552,12 @@ def main(argv=None):
         inst.release()
         return 1
     state['srv'] = srv
+    # 实际端口只写 data/port（运行时真相）。不回写 config.json：顺延多半是上一次
+    # 的连接还没散干净，写进配置就成了永久漂移，几次重启后面板跑到 8777 去了。
     with open(data_path('port'), 'w') as f:
         f.write(str(port))
-    cfg.set('server', 'port', port)
-    cfg.save()
+    if port != want_port:
+        log.info('[面板] 端口 %s 被占，改用 %s' % (want_port, port))
 
     if args.one_shot:
         import json

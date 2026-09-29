@@ -30,7 +30,8 @@ import time
 
 from app.act.channels.base import (CAP_BATTERY_LIMIT, CAP_FAN_CURVE, CAP_FAN_MODE,
                                    CAP_FAN_RPM, CAP_MODE_READ, CAP_MODE_WRITE,
-                                   CAP_PL_READ, CAP_PL_WRITE, CAP_TEMP_EC, MODES)
+                                   CAP_PL_READ, CAP_PL_WRITE, CAP_TEMP_EC, MODES,
+                                   hw_mode_of_fan_flag)
 from app.paths import data_path
 from app.sense.system import power_status
 
@@ -89,16 +90,31 @@ WATCH_REGS = ('ADDR_MAFAN_CONTROL_BYTE', 'ADDR_MyFanCCI_Mode_Index', 'ADDR_TRIGG
               'ADDR_CPU_VRM_MAXI_CURRENT_LIMIT_BYTE', 'ecPowSource',
               'ADDR_BATTERY_CHARGE_LIMIT_UP', 'ADDR_BATTERY_CHARGE_LIMIT_DOWN',
               'ADDR_FAN_ALERT_BYTE', 'ADDR_BATTERY_ALERT_BYTE', 'ADDR_SUPPORT_BYTE1',
-              'ADDR_SUPPORT_BYTE2', 'ADDR_AP_OEM_BYTE', 'ADDR_BIOS_OEM_BYTE')
+              'ADDR_SUPPORT_BYTE2', 'ADDR_AP_OEM_BYTE', 'ADDR_AP_OEM_BYTE4',
+              'ADDR_BIOS_OEM_BYTE')
 WATCH_HISTORY = 60
-# 实体「造物者模式」按键就是在这个字节上循环：
-#   Normal_Mode(0x00) → User_Fan_Mode(0x80) → Turbo_Mode(0x10) → 回到 0x00
-# 2026-09-29 用 tools/ec_watch.py 实测：按一次键只有这一个字节变，
-# 其余 20 个语义寄存器（含 PL1/PL2/PL4、MyFanCCI_Mode_Index）纹丝不动。
+# 实体「造物者模式」按键就是在这个字节上循环，而且它是**硬件模式总开关**：
+#   全亮 Turbo_Mode(0x10) ↔ 不亮 User_Fan_HiMode(0xA0)，半亮 Normal_Mode(0x00)
+# 2026-09-30 全表差分（logs/观察EC全表）实测：按一次键，它变的同时
+#   PL1_SETTING_VALUE 75↔10、MYFAN2_L1/L4_PWM、DynamicBoost_MaxinumTGP、
+#   ConfigurableTGP_DynamicBoost_CTRL_BYTE、AP_OEM_BYTE6 整组跟着换。
+# （早前那次「按一次只有这一个字节变」是在 GCUBridge 停着的时候测的，别照抄。）
 FAN_KEY = 'ADDR_MAFAN_CONTROL_BYTE'
 # MyFanCTLByteFlag 里带这个位的全是「用户自己的曲线」：
 # User_Fan_Mode=0x80、User_Fan_HiMode=0xA0、User_Fan_Level1~5=0x81~0x85
 USER_FAN_BIT = 0x80
+# 还没确认、但已经有实测线索的两个字节（README 6.7）：
+#   ADDR_STAUTS_BYTE   Win 键锁定？2026-09-30 机主点了一次 Win 锁，它 1→0 且没再变回去，
+#                      同一时刻 Setting/Status 里 WinKey=WINKEY_STATUS_LOCK。样本只有一次，
+#                      等 MQTT 那边的 WINKEY_LOCK/UNLOCK 命令对上号才算确认。
+#   ADDR_AP_OEM_BYTE4  电池那三档（平衡/健康/长效）？高半字节 0x0?→0x1?→0x2?→0x0?
+#                      正好跟着机主连点三次电源模式走，低半字节 9 不动。
+#                      open-revo 说这三档是充电阈值（长效 100% / 均衡 80% / 养护 60%），
+#                      但 CHARGE_LIMIT_UP/DOWN 全程是 0，所以阈值不在 EC 这张表里执行。
+# 反过来，已经排除的：灯效不在 EC 上。LIGHTBAR_CONTROL_BYTE、RGBKB_LEVEL_R/G/B、
+# SINGLEKBL_ENABLE 在灯明明亮着的时候全是 0，机主点背光/灯条时全表也一个都没动；
+# 走的是 GCUBridge 的 Keyboard/Ctrl（{"function":"SetPower","light":"3","speed":"2"}，
+# 控制器 solution=ITE、type=FourZone）。触摸板是实体开关，不用软件管。
 
 
 def load_map(path=None):
@@ -317,8 +333,11 @@ class EcChannel:
             self.caps.update({
                 CAP_FAN_RPM: 'verified', CAP_PL_READ: 'verified', CAP_TEMP_EC: 'verified',
                 CAP_BATTERY_LIMIT: 'verified', CAP_FAN_CURVE: 'unknown',
-                # 档位寄存器还没确认（候选值互相矛盾），读得到不等于读懂了，先不声称支持
-                CAP_MODE_READ: 'unknown', CAP_MODE_WRITE: 'blocked', CAP_PL_WRITE: 'blocked',
+                # mode.read/write 说的是 OEM 那套 office/balance/turbo：EC 侧没有这个
+                # 概念（机主确认 Creator Center 界面上也没有），只有 GCUBridge 认。
+                # 本机真正的硬件模式走风扇字节，见 hw_mode_of_fan_flag / derived['hw_mode']。
+                CAP_MODE_READ: 'unsupported', CAP_MODE_WRITE: 'blocked',
+                CAP_PL_WRITE: 'blocked',
             })
             if fan_reg is None or not fan_enum:
                 self.caps[CAP_FAN_MODE] = 'missing'
@@ -334,8 +353,10 @@ class EcChannel:
                 'verified',
                 'EC 只读已验证：EC 电量 %d%% 与系统 %d%% 一致。写入开关 allow_write=%s'
                 % (ec_soc, sys_soc, 'true' if self.allow_write else 'false'))
-            self.detail['write_reason'] = ('档位/PL 写入的寄存器语义尚未确认，'
-                                           '确认前不发送这类写请求')
+            self.detail['write_reason'] = (
+                '直接写 PL1_SETTING_VALUE 实测不生效（tools/ec_pl_test.py：写完自清零，'
+                '那一组寄存器是 MyFan3 一代机型的落点）。本机功耗墙由风扇字节间接决定，'
+                '要改就写 fan.mode，不裸写功耗墙。')
         else:
             self.caps.update({CAP_FAN_RPM: 'unknown', CAP_PL_READ: 'unknown',
                               CAP_MODE_READ: 'unknown', CAP_TEMP_EC: 'unknown'})
@@ -476,9 +497,13 @@ class EcChannel:
         out['pl1'] = self._effective_pl(out, 1)
         out['pl2'] = self._effective_pl(out, 2)
         out['fan_boost'] = None if ctl is None else bool(ctl & 0x40)
-        # 档位（office/balance/turbo）故意不下结论：
-        # fan_ctl_byte 说 Turbo_Mode(0x10)、MyFanCCI_Mode_Index 说 0，两者含义不同，
-        # 在没有观察到「按键/切档 → 哪个寄存器跟着变」之前，任何映射都是编的。
+        # 硬件模式：2026-09-30 的全表差分给了答案 —— 风扇字节就是总开关，
+        # 按一次键它 0x10↔0xA0 的同时 PL1_SETTING_VALUE 75↔10、MYFAN2_L1/L4_PWM、
+        # DynamicBoost_MaxinumTGP 整组跟着换（README 6.2）。映射表在 channels.base，
+        # 取值用调度那套四档词，认不出来就是 None，面板照实写「未知」。
+        out['hw_mode'] = hw_mode_of_fan_flag(out['fan_mode_flag'])
+        # OEM 那套 office/balance/turbo 是 GCUBridge 的说法，本机 Creator Center
+        # 界面上没有这三档（机主 2026-09-30 确认），EC 侧也不声称能读它。
         out['mode'] = None
         self.derived = out
 

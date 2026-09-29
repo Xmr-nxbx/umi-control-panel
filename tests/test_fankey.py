@@ -3,10 +3,11 @@
 
     runtime\\python.exe tests\\test_fankey.py
 
-盯的是四件容易悄悄坏掉的事：
+盯的是五件容易悄悄坏掉的事：
   * 全项目只有一套模式词（省电/均衡/流畅/性能），弹窗不许另造说法；
   * 三态文案不能张冠李戴（把强冷说成自动，机主会以为按键坏了）；
-  * 实体键的三态映射到哪个控制意图（强冷→锁性能、自动→自适应、自定义曲线→不动电源）；
+  * 实体键的三态映射到哪个控制意图（全亮→锁性能、半亮→自适应、不亮→锁省电）；
+  * 风扇字节 → 硬件模式的映射表和 EC 通道共用一份，不许各存各的；
   * 认不出的取值照实说，不猜。
 弹不弹的规矩（人动手才弹）在 daemon 里，这里只管文案和映射。
 """
@@ -15,7 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.policy.scheduler import INTENT_NAMES                # noqa: E402
+from app.policy.scheduler import INTENT_NAMES, TIER_LABELS     # noqa: E402
 from app.tray import fankey                                 # noqa: E402
 
 CASES = []
@@ -28,26 +29,29 @@ def case(name):
     return deco
 
 
-@case('实体键强冷 → 性能模式，副标题说清风扇和电源都变了')
+@case('实体键全亮 → 性能模式，副标题说清功耗墙和风扇都变了')
 def _():
     title, sub = fankey.key_text('Turbo_Mode')
     assert title == '性能模式', title
-    assert '强冷' in sub and '锁定性能' in sub, sub
+    assert '强冷' in sub and '75W' in sub, sub
 
 
-@case('实体键自动 → 自适应模式，副标题说清交回自动')
+@case('实体键半亮 → 自适应模式，副标题说清交回自动')
 def _():
     title, sub = fankey.key_text('Normal_Mode')
     assert title == '自适应模式', title
     assert '自动' in sub, sub
 
 
-@case('User_Fan 全家族都算自定义曲线：只接管风扇，不动电源')
+@case('User_Fan 全家族 = 低功耗档：必须说省电模式和 10W，不许说「电源模式不变」')
 def _():
+    # 2026-09-30 全表差分抓到这一态 PL1_SETTING_VALUE 从 75 掉到 10，
+    # 以前文案写「只接管风扇、电源不变」是错的，机主看到面板还显示自适应。
     for flag in ('User_Fan_Mode', 'User_Fan_HiMode', 'User_Fan_Level3'):
         title, sub = fankey.key_text(flag)
-        assert title == '风扇：自定义曲线', (flag, title)
-        assert '电源模式不变' in sub, (flag, sub)
+        assert title == '省电模式', (flag, title)
+        assert '10W' in sub, (flag, sub)
+        assert '电源模式不变' not in sub, (flag, sub)
 
 
 @case('认不出的取值照实说，不猜')
@@ -84,14 +88,10 @@ def _():
     assert 'gaming' in sub, sub
 
 
-@case('风扇策略弹窗：网页/托盘手动改风扇时用同一套词')
+@case('风扇按钮弹窗：网页写的就是同一个字节，词必须和按键一致')
 def _():
-    title, sub = fankey.fan_text('Turbo_Mode')
-    assert title == '风扇：强冷', title
-    title, sub = fankey.fan_text('User_Fan_Mode')
-    assert title == '风扇：自定义曲线', title
-    title, sub = fankey.fan_text('Normal_Mode')
-    assert title == '风扇：自动', title
+    for flag in ('Turbo_Mode', 'Normal_Mode', 'FanBoost_Mode', 'User_Fan_Mode'):
+        assert fankey.fan_text(flag)[0] == fankey.key_text(flag)[0], flag
 
 
 @case('调度性格弹窗带上性格名和说明')
@@ -101,21 +101,48 @@ def _():
     assert sub == '升档慢、降档快，兼顾噪音', sub
 
 
-@case('实体键三态 → 控制意图：强冷锁性能、自动回自适应、自定义曲线不动电源')
+@case('实体键三态 → 控制意图：全亮锁性能、半亮回自适应、不亮锁省电')
 def _():
-    assert fankey.KEY_INTENT.get('Turbo_Mode') == 'turbo'
-    assert fankey.KEY_INTENT.get('Normal_Mode') == 'auto'
-    # 这两类不许改电源：自定义曲线只管风扇，认不出的取值不敢猜。
-    for flag in ('User_Fan_Mode', 'User_Fan_HiMode', 'FanBoost_Mode',
-                 'Turbo_Mode+FanBoost_Mode', None):
-        assert fankey.KEY_INTENT.get(flag) is None, flag
+    assert fankey.key_intent('Turbo_Mode') == 'turbo'
+    assert fankey.key_intent('Normal_Mode') == 'auto'
+    # 不亮那一态是完整的低功耗档（PL1 10W），意图必须跟着落到省电，
+    # 否则面板显示自适应、机器跑省电档，机主看到的和实际的对不上。
+    for flag in ('User_Fan_Mode', 'User_Fan_HiMode', 'User_Fan_Level3'):
+        assert fankey.key_intent(flag) == 'office', flag
+    # 认不出的取值不敢猜：只弹提示，不动电源。
+    for flag in ('FanBoost_Mode', 'Turbo_Mode+FanBoost_Mode', None):
+        assert fankey.key_intent(flag) is None, flag
+
+
+@case('风扇字节 → 硬件模式：映射表和 EC 通道共用一份')
+def _():
+    assert fankey.hw_mode('Turbo_Mode') == 'perf'
+    assert fankey.hw_mode('Normal_Mode') == 'auto'
+    assert fankey.hw_mode('User_Fan_HiMode') == 'eco'
+    assert fankey.hw_mode('FanBoost_Mode') is None
+    assert fankey.hw_mode(None) is None
+    # 硬件模式只许用调度那套四档词，不许冒出第二套说法
+    for flag in ('Turbo_Mode', 'Normal_Mode', 'User_Fan_HiMode'):
+        m = fankey.hw_mode(flag)
+        assert m == 'auto' or m in TIER_LABELS, (flag, m)
 
 
 @case('按键弹的标题和意图弹的标题必须是同一句话（两套词就白对齐了）')
 def _():
-    for flag, intent in fankey.KEY_INTENT.items():
+    pairs = [('Turbo_Mode', 'turbo'), ('Normal_Mode', 'auto'),
+             ('User_Fan_HiMode', 'office')]
+    for flag, intent in pairs:
+        assert fankey.key_intent(flag) == intent, (flag, intent)
         assert intent in INTENT_NAMES, (flag, intent)
         assert fankey.key_text(flag)[0] == fankey.intent_text(intent)[0], flag
+
+
+@case('网页词表来自后端：mode_words 覆盖按键三态 + User_Fan 家族')
+def _():
+    words = fankey.mode_words()
+    for flag in ('Turbo_Mode', 'Normal_Mode', 'FanBoost_Mode'):
+        assert words[flag] == fankey.key_text(flag)[0], flag
+    assert words['User_Fan'] == fankey.USER_FAN_TEXT[0], words
 
 
 @case('文案里不许再出现第二套模式词')

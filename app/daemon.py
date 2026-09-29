@@ -309,6 +309,7 @@ class Daemon:
                       ('running', 'mode', 'tier', 'label', 'step', 'pct', 'error')},
             'meta': {'cap_labels': CAP_LABELS, 'mode_labels': MODE_LABELS,
                      'tier_labels': TIER_LABELS,
+                     'fan_mode_words': fankey.mode_words(),
                      'sched_profiles': {k: {'label': v['label'], 'desc': v['desc']}
                                         for k, v in SCHED_PROFILES.items()}},
         }
@@ -338,12 +339,14 @@ class Daemon:
     def on_fan_key(self, old, new):
         """实体「造物者模式」键：机主眼里它就是模式键，那就让它真的切模式。
 
-        实测（README 6.2）这个键只改 EC 风扇字节、不动功耗墙，所以以前按下去
-        只有风扇变、标题和意图都不动，机主以为按键坏了。现在把三态翻译成意图：
-        强冷=锁定性能、自动=自适应、自定义曲线=只接管风扇不动电源。
+        2026-09-30 全表观察（README 6.2）证实这个键是硬件模式总开关：风扇字节
+        0x10 ↔ 0xA0 的同时 PL1_SETTING_VALUE 75 ↔ 10、风扇 PWM 表、TGP 一起换。
+        所以三态要如实翻译成意图：全亮=锁定性能、半亮=自适应、不亮=锁定省电。
+        上一版把「不亮」当成「只接管风扇、电源不变」，面板照旧显示自适应，
+        机主看到的状态和机器实际跑的档对不上。
         """
         flag = self.hw.ec.fan_flag_name(new)
-        intent = fankey.KEY_INTENT.get(flag)
+        intent = fankey.key_intent(flag)
         if intent:
             ok, _ = self.set_intent(intent, announce=False)
             if not ok:

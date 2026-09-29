@@ -159,9 +159,15 @@ def make_handler(daemon, cfg, on_shutdown):
 
 
 class Server:
+    # Windows 的 SO_REUSEADDR 语义和 Unix 相反：它允许第二个进程绑到别人正在监听的
+    # 端口上，于是「端口被占自动顺延」永远不触发，两个实例一起收请求。
+    # 2026-09-30 实测就是这样：两份面板同时挂在 8747，还互相踢掉对方的 GCUBridge 连接。
+    class _Httpd(ThreadingHTTPServer):
+        allow_reuse_address = False
+
     def __init__(self, bind, port, daemon, cfg, on_shutdown):
-        self.httpd = ThreadingHTTPServer((bind, port),
-                                         make_handler(daemon, cfg, on_shutdown))
+        self.httpd = self._Httpd((bind, port),
+                                 make_handler(daemon, cfg, on_shutdown))
         self.httpd.daemon_threads = True
         self.thread = None
         self.port = port

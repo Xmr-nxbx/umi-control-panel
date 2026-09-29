@@ -10,35 +10,71 @@
   * 自适应自己换档一律不弹——干活干到一半屏幕上跳东西比没有提示更烦。
 所以本模块只提供「给我文案」的函数，弹不弹由调用方（daemon）决定。
 
-实体键三态是实测出来的（tools/ec_watch.py，README 6.2）：
-    Normal_Mode(0x00) → User_Fan_Mode(0x80) → Turbo_Mode(0x10) → 回到 0x00
-LED 亮度和哪一态对应至今没有证据，文案里不写「全亮/半亮」。
+实体键三态（LED 亮度对应关系由机主 2026-09-30 现场确认，寄存器值由 tools/ec_watch.py 抓到）：
+    全亮 = Turbo_Mode(0x10)        功耗墙 75W、风扇强冷     → 性能模式
+    半亮 = Normal_Mode(0x00)       风扇与功耗墙都交给 EC     → 自适应模式
+    不亮 = User_Fan_HiMode(0xA0)   功耗墙 10W、自定义曲线   → 省电模式
+
+「不亮」这一态以前被写成「只是风扇自定义曲线、电源模式不变」，**是错的**：
+2026-09-30 全表观察（GCUBridge 服务恢复后）抓到按一次键，`PL1_SETTING_VALUE`
+同步 75 → 10、`MYFAN2_L1/L4_PWM`、`L2_PWM_DEFAULT_MYFAN3`、`DynamicBoost_MaxinumTGP`
+整组跟着换，满载实测慢 23~26%（README 6.4）。所以它是一个完整的低功耗档，
+文案必须这么说，否则机主看到面板还写着「自适应」会以为按键没生效。
 """
+# 硬件模式的映射表放在 app.act.channels.base（EC 通道也要用同一张表），
+# 这里只包一层：文案层不许自己另存一份，否则两边迟早对不上。
+from app.act.channels.base import hw_mode_of_fan_flag as hw_mode   # noqa: F401
 from app.policy.scheduler import INTENT_NAMES, INTENT_TIER, TIER_LABELS
 
-# 括号里的数字来自 README 6.4 的满载实测，不是估的。
-FAN_KEY_TEXT = {
-    'Turbo_Mode': ('性能模式', '实体键已开：风扇强冷，电源锁定性能'),
-    'Normal_Mode': ('自适应模式', '实体键已关：风扇与电源都交回自动'),
-    'FanBoost_Mode': ('风扇加速', 'EC 短时把风量拉到最大，电源模式不变'),
-}
+# 一张表定死「这个字节叫什么模式、机器实际发生了什么」。按键弹的那套是从它派生的
+# （只加一句 LED 亮度），网页按钮弹的直接用它 —— 同一个字节不许有两套说法。
+# 括号里的数字来自 README 6.2 的全表差分与 6.4 的满载实测，不是估的。
+FAN_FLAG_TEXT = {'Normal_Mode': ('自适应模式', '风扇与功耗墙都交回 EC 自动'),
+                 'Turbo_Mode': ('性能模式', '功耗墙 75W、风扇强冷，满载最快也最吵'),
+                 'FanBoost_Mode': ('风扇加速', 'EC 短时把风量拉到最大，功耗墙不变')}
 
-USER_FAN_TEXT = ('风扇：自定义曲线', '电源模式不变，面板不再自动改风扇')
+# LED 亮度 ↔ 取值：机主 2026-09-30 现场确认（GCUBridge 在跑时按键只循环全亮/不亮两态）。
+KEY_LED = {'Turbo_Mode': '全亮', 'Normal_Mode': '半亮'}
 
-FAN_FLAG_TEXT = {'Normal_Mode': ('风扇：自动', '转速交给 EC 按温度调'),
-                 'Turbo_Mode': ('风扇：强冷', '满载快 5~9%，风扇会很吵'),
-                 'FanBoost_Mode': ('风扇：加速', 'EC 短时把风量拉到最大')}
+FAN_KEY_TEXT = dict(
+    (flag, (text[0], '实体键%s：%s' % (KEY_LED[flag], text[1]) if flag in KEY_LED else text[1]))
+    for flag, text in FAN_FLAG_TEXT.items())
 
-# 实体键按出来的风扇字节 → 控制意图。查不到就是「这一态不动电源」：
-# 自定义曲线只管风扇、认不出的取值不猜。放在这里而不是 daemon 里，
-# 是为了脱离硬件也能单测这条对应关系。
+USER_FAN_TEXT = ('省电模式', '功耗墙降到 10W、风扇走自定义曲线，满载慢 23~26%')
+USER_FAN_KEY_TEXT = ('省电模式', '实体键不亮：%s' % USER_FAN_TEXT[1])
+
+# 实体键按出来的风扇字节 → 控制意图。User_Fan 全家族单独处理（见 key_intent）。
 KEY_INTENT = {'Turbo_Mode': 'turbo', 'Normal_Mode': 'auto'}
+
+
+def key_intent(flag):
+    """实体键落到某一态时，控制意图该跟着变成什么。
+
+    User_Fan 全家族（0x80 位：Mode/HiMode/Level1~5）都是低功耗档，
+    所以映射到「锁定省电」——面板显示的意图必须和机器实际状态一致。
+    认不出的取值返回 None：只弹提示，不动电源。
+    """
+    if flag and flag.startswith('User_Fan'):
+        return 'office'
+    return KEY_INTENT.get(flag)
+
+
+def mode_words():
+    """给网页用的「风扇字节 → 模式名」表。
+
+    网页以前自己存了一份 JS 词表，结果和弹窗对不上号（机主报过）。现在词只在
+    这里有一份，网页从 /api/state 的 meta 里拿。User_Fan 全家族共用一个名字，
+    网页按前缀判断（app.js 的 fanModeWord）。
+    """
+    words = dict((k, v[0]) for k, v in FAN_FLAG_TEXT.items())
+    words['User_Fan'] = USER_FAN_TEXT[0]
+    return words
 
 
 def key_text(flag):
     """实体键改完风扇字节后弹什么。认不出的取值照实说，不猜。"""
     if flag and flag.startswith('User_Fan'):
-        return USER_FAN_TEXT
+        return USER_FAN_KEY_TEXT
     got = FAN_KEY_TEXT.get(flag)
     if got:
         return got

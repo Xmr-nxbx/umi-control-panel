@@ -574,12 +574,14 @@ def power_verdict():
                   % (round(best_gain if best_gain is not None else spread, 1), freq_txt))
     else:
         # 只说「压不住」等于把机主晾在半路：他真正要知道的是那什么才压得住。
-        # 本机实测（README 6.4）性能墙在散热侧——只改 EC 风扇一个字节就能拉开
-        # 满载吞吐，所以面板在性能档会同时把风扇推到强冷。
+        # 本机实测（README 6.2 / 6.4）：EC 风扇字节就是硬件模式总开关，按一次键
+        # PL1_SETTING_VALUE 75W↔10W、风扇 PWM 表、TGP 整组跟着换，满载差 23~26%。
         reason = ('实测性能档只比省电档快 %s%%（%s），说明 BIOS/EC 接管了频率，'
-                  'powercfg 那一层压不住。这台机器的性能墙在散热侧：改 EC 风扇模式'
-                  '实测就能拉开满载吞吐（README 6.4），所以性能档会同时把风扇推到强冷；'
-                  '功耗墙的落点寄存器还没确认——确认前不猜测写入。'
+                  'powercfg 那一层压不住。这台机器的性能墙在 EC 侧：风扇字节就是'
+                  '硬件模式总开关，它一档 PL1 就在 75W/10W 之间换，满载实测差 23~26%%'
+                  '（README 6.2、6.4），所以面板在性能档会把它推到强冷；'
+                  '反过来直接写 PL1_SETTING_VALUE 实测不生效（写完自清零），'
+                  '所以不裸写功耗墙。'
                   % (round(best_gain if best_gain is not None else (spread or 0), 1), freq_txt))
     return {'effective': effective, 'perf_gain_pct': round(best_gain, 1) if best_gain is not None else None,
             'clock_spread_pct': round(spread, 1) if spread is not None else None,

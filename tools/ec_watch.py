@@ -69,9 +69,11 @@ def main(argv):
             out('    %-46s = %3d  (0x%02X)' % (name, prev[name], prev[name]))
 
     out('\n现在开始观察——请在这段时间里去操作要研究的那个功能：')
-    out('  · 全表模式：打开 Creator Center，依次点「办公/均衡/狂暴」「键盘灯」「电池养护」'
-        '「风扇自定义」这些开关，每点一下停两三秒；')
+    out('  · 全表模式：打开 Creator Center，依次点「键盘背光」「灯条」「Win 键锁定」'
+        '「触摸板」「电池养护」这些开关，每点一下停两三秒；'
+        '（本机 Creator Center 没有办公/均衡/狂暴三档，硬件模式走实体键）')
     out('  · 默认模式：按实体「造物者模式」键。')
+    out('  想同时看 OEM 自己发的命令，另开一个窗口跑 tools\\mqtt_watch.py。')
     hits = {}
     deadline = time.time() + seconds
     while time.time() < deadline:

@@ -1,5 +1,5 @@
 {
-  "_comment": "命令白名单：只允许发送在本机 GCUService 逆向字符串中确认存在的 Action。查不到的一律不发，避免把没验证过的命令打进 EC。",
+  "_comment": "命令白名单：只允许发送在本机 GCUService 逆向字符串中确认存在的 Action。查不到的一律不发，避免把没验证过的命令打进 EC。label 是给日志看的内部说法，不是界面文案（界面词表只有 app/policy/scheduler.py 一处）。",
   "topics": {
     "fan_control": "Fan/Control",
     "setting_control": "Setting/Control",
@@ -9,9 +9,9 @@
     "battery_control": "BatteryProtection/Control"
   },
   "actions": {
-    "OPERATING_OFFICE_MODE": {"topic": "fan_control", "cap": "mode.write", "label": "办公档"},
-    "OPERATING_GAMING_MODE": {"topic": "fan_control", "cap": "mode.write", "label": "造物者/游戏档"},
-    "OPERATING_TURBO_MODE": {"topic": "fan_control", "cap": "mode.write", "label": "狂暴档"},
+    "OPERATING_OFFICE_MODE": {"topic": "fan_control", "cap": "mode.write", "label": "OEM Office 档（OperatingMode=0）"},
+    "OPERATING_GAMING_MODE": {"topic": "fan_control", "cap": "mode.write", "label": "OEM Gaming 档（本机界面上没有这一档）"},
+    "OPERATING_TURBO_MODE": {"topic": "fan_control", "cap": "mode.write", "label": "OEM Turbo 档（OperatingMode=2）"},
     "FAN_BOOST_ON": {"topic": "fan_control", "cap": "fan.boost", "label": "风扇强开"},
     "FAN_BOOST_OFF": {"topic": "fan_control", "cap": "fan.boost", "label": "风扇强开关掉"},
     "GETSTATUS": {"topic": "setting_control", "cap": "status.read", "label": "拉取设备状态"},

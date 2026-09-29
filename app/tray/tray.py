@@ -9,6 +9,7 @@ import struct
 import threading
 
 from app.policy.scheduler import INTENT_NAMES, TIER_LABELS
+from app.tray import fankey
 
 u32 = ctypes.windll.user32
 k32 = ctypes.windll.kernel32
@@ -62,11 +63,11 @@ MENU_FAN_TURBO = 0x1021
 MENU_FAN_USER = 0x1023
 
 # 取值必须是 OEM 枚举 MyFanCTLByteFlag 里的名字，别的不下发。
-# 只放实体「造物者模式」键真正循环的三态（和面板一致），括号里是本机实测的代价/收益。
-# 词和屏幕提示、网页保持一套：风扇就是 自动/强冷/自定义曲线，不另造名字。
-FAN_ITEMS = ((MENU_FAN_NORMAL, 'Normal_Mode', '风扇：自动'),
-             (MENU_FAN_TURBO, 'Turbo_Mode', '风扇：强冷（满载快 5~9%，吵）'),
-             (MENU_FAN_USER, 'User_Fan_Mode', '风扇：自定义曲线（没配过会慢 25%）'))
+# 只放实体「造物者模式」键真正会到的态（和面板一致）。这个字节就是硬件模式总开关，
+# 所以菜单词直接取屏幕提示/网页那一份（fankey），不在这里另写第三套说法。
+FAN_ITEMS = ((MENU_FAN_NORMAL, 'Normal_Mode', fankey.FAN_FLAG_TEXT['Normal_Mode'][0]),
+             (MENU_FAN_TURBO, 'Turbo_Mode', fankey.FAN_FLAG_TEXT['Turbo_Mode'][0]),
+             (MENU_FAN_USER, 'User_Fan_HiMode', fankey.USER_FAN_TEXT[0]))
 
 TIER_COLORS = {'perf': (255, 93, 108), 'mid': (255, 182, 72),
                'bal': (53, 224, 216), 'eco': (74, 222, 128)}
@@ -233,6 +234,17 @@ class Tray:
         if label != self.current_tip:
             self._update_icon(tier, label)
 
+    def _fan_matches(self, flag):
+        """菜单项和当前风扇字节算不算同一档。
+
+        User_Fan 是一个家族（Mode/HiMode/Level1~5，0x80 位），实体键按出来的
+        不一定正好是菜单里写的那一个取值，但它们是同一个低功耗档，勾选要跟着亮。
+        """
+        cur = self._fan or ''
+        if flag.startswith('User_Fan'):
+            return cur.startswith('User_Fan')
+        return cur == flag
+
     def _menu(self):
         hmenu = u32.CreatePopupMenu()
         u32.AppendMenuW(hmenu, MF_STRING, MENU_OPEN, '打开控制面板')
@@ -243,7 +255,7 @@ class Tray:
             u32.AppendMenuW(hmenu, MF_STRING | checked, mid, INTENT_NAMES[intent])
         u32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
         for mid, flag, text in FAN_ITEMS:
-            state = MF_STRING | (MF_CHECKED if self._fan == flag else 0)
+            state = MF_STRING | (MF_CHECKED if self._fan_matches(flag) else 0)
             if self.on_fan is None:
                 state |= MF_GRAYED
             u32.AppendMenuW(hmenu, state, mid, text)

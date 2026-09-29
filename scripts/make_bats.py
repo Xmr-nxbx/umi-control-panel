@@ -15,6 +15,22 @@ OUT = os.path.join(ROOT, 'scripts')
 
 BATS = {}
 
+# 「停面板」不能只发一次 --stop 就走：2026-09-30 那次观察跑到一半，另一个 bat 又把面板
+# 拉起来了，两个实例一起抢 broker 身份，MQTT 报告只留下前 60 秒。所以这里发完 stop 还要
+# 确认 874x 上真的没人听了才继续（最多 5 轮，确认不了就照实警告，不闷头往下跑）。
+STOP_PANEL = r"""set /a STOPTRIES=0
+:stop_panel
+"%EXE%" "main.py" --stop >nul 2>&1
+timeout /t 2 /nobreak >nul
+set /a STOPTRIES+=1
+netstat -ano | findstr /c:":874" | findstr /c:"LISTENING" >nul
+if errorlevel 1 goto stop_panel_done
+if %STOPTRIES% lss 5 goto stop_panel
+echo  警告：874x 端口上还有实例在听，可能另一个观察脚本正在跑。先关掉它再继续，
+echo        否则两边抢同一个 broker 身份，MQTT 那份报告会半路断掉。
+:stop_panel_done
+"""
+
 BATS['启动面板.bat'] = r"""@echo off
 rem 启动 Umi Control Panel（守护模式：进程崩了会自动拉起，面板里点停止才真的退出）。
 rem 用最小化窗口跑，不用 pythonw——它会被安全软件静默查杀。
@@ -31,11 +47,10 @@ timeout /t 3 >nul
 BATS['停止面板.bat'] = r"""@echo off
 rem 优雅停止：还原被改过的电源设置后退出（不是直接杀进程）
 cd /d "%~dp0.."
-if exist "runtime\UmiPanel.exe" (
-  "runtime\UmiPanel.exe" "main.py" --stop
-) else (
-  "runtime\python.exe" "main.py" --stop
-)
+set "EXE=runtime\python.exe"
+if exist "runtime\UmiPanel.exe" set "EXE=runtime\UmiPanel.exe"
+@@STOP@@
+echo 面板已停止。
 pause
 """
 
@@ -248,17 +263,17 @@ if not exist "tools\out" mkdir "tools\out"
 set "EXE=runtime\python.exe"
 if exist "runtime\UmiPanel.exe" set "EXE=runtime\UmiPanel.exe"
 echo 正在停止面板服务（观察期间不自动改任何硬件）…
-"%EXE%" "main.py" --stop >nul 2>&1
-timeout /t 3 /nobreak >nul
+@@STOP@@
 echo.
-echo  接下来 240 秒，请打开 Creator Center，**一次只点一个功能，点完等 15 秒再点下一个**，
+echo  接下来 240 秒，请**一次只动一个功能，动完等 15 秒再动下一个**，
 echo  并在纸上或手机里记下顺序，例如：
-echo     1) 模式：办公 → 均衡 → 狂暴
-echo     2) 电池：充电阈值切到 80%%
-echo     3) 键盘背光：亮度调一格 / 换个灯效
-echo     4) 灯条：开关一次
-echo     5) Win 键锁定 / 触摸板开关：各切一次
-echo     6) 独显直连：如果能点就点一次（会要求重启，可以先取消）
+echo     1) 实体键：按到全亮 → 再按到不亮（本机 Creator Center 没有办公/均衡/狂暴档）
+echo     2) Creator Center 里的造物者开关：开一次、关一次
+echo     3) 电池：充电阈值切到 80%%
+echo     4) 键盘背光：亮度调一格 / 换个灯效
+echo     5) 灯条：开关一次
+echo     6) Win 键锁定 / 触摸板开关：各切一次
+echo     7) 独显直连：如果能点就点一次（会要求重启，可以先取消）
 echo  报告里每条变化都带时间戳，按你的顺序就能一一对回去。
 echo.
 echo  现在开始观察（只读，一发都不写）…
@@ -272,6 +287,48 @@ pause
 """
 
 
+BATS['观察OEM通道.bat'] = r"""@echo off
+setlocal
+rem 听 GCUBridge 自己说话：Creator Center 每个开关最终都发一条 MQTT 命令，
+rem 报文体里就写着 Action 名和参数 —— 比拿 EC 全表差分去猜寄存器可靠得多。
+rem 两个观察器一起跑：MQTT 只订阅不发送，EC 只读不写。都必须先停面板，
+rem 否则面板和观察器抢同一个 broker 身份，会被 GCUBridge 踢线。
+cd /d "%~dp0.."
+if not exist "tools\out" mkdir "tools\out"
+set "EXE=runtime\python.exe"
+if exist "runtime\UmiPanel.exe" set "EXE=runtime\UmiPanel.exe"
+echo 正在停止面板服务（观察期间不自动改任何硬件）…
+@@STOP@@
+echo.
+echo  接下来 240 秒，请打开 Creator Center，**一次只点一个功能，点完等 10 秒再点下一个**，
+echo  并把顺序记下来。观察器只会发一条 GETSTATUS 问当前状态，不改任何设置。
+echo  顺序按「还没弄清楚的」排（已经确认的排在后面，顺便复核）：
+echo     1) Win 键锁定：关一次，等 10 秒，再开一次
+echo     2) 电池那三档（平衡 / 健康 / 长效）：一档一档切，每档等 15 秒，最后切回原来那档
+echo     3) 键盘背光：亮度调一格，再换一个灯效或速度
+echo     4) 灯条（顶部那条）：关一次、开一次
+echo     5) 触摸板：拨一下触摸板上那个实体开关，再拨回来
+echo     6) 屏幕提示 OSD、风扇加速 FanBoost：各切一次
+echo     7) 独显直连：能点就点一次（要求重启可以先取消）
+echo     8) 实体「造物者模式」键：按到全亮，等 10 秒，再按到不亮
+echo  两份报告都带时间戳，按你记的顺序就能一一对回去。
+echo  注意：别再双击另一个「观察」脚本，两个观察器会抢同一个 broker 身份。
+echo.
+start "OEM-MQTT" /min "%EXE%" "tools\mqtt_watch.py" 240 --ask
+echo  另一个窗口在听 MQTT；本窗口同时做 EC 全表只读观察（2 秒一轮，一发都不写）…
+echo.
+"%EXE%" "tools\ec_watch.py" 240 all
+echo.
+echo 等 MQTT 观察器收尾…
+timeout /t 8 /nobreak >nul
+echo 正在重新启动面板…
+start "UmiPanel" /min "%EXE%" "main.py" --supervise --no-browser
+echo 结果在 tools\out\mqtt-watch.txt 和 tools\out\ec-watch-all.txt ——
+echo 把这两个文件和你记的点击顺序一起给我，我据此确认每个功能的真实命令/寄存器。
+pause
+"""
+
+
 BATS['造物者三态实测.bat'] = r"""@echo off
 setlocal
 rem 实测「造物者模式」按键三态（自动/强冷/自定义）在满载下到底差多少。
@@ -281,8 +338,7 @@ cd /d "%~dp0.."
 set "EXE=runtime\python.exe"
 if exist "runtime\UmiPanel.exe" set "EXE=runtime\UmiPanel.exe"
 echo 正在停止面板服务…
-"%EXE%" "main.py" --stop >nul 2>&1
-timeout /t 3 /nobreak >nul
+@@STOP@@
 echo 开始三态实测（满载 + 高转，请别合上盖子）…
 "%EXE%" "tools\ec_mode_bench.py" > "tools\out\ec-mode-bench.txt" 2>&1
 type "tools\out\ec-mode-bench.txt"
@@ -297,6 +353,9 @@ pause
 def main():
     os.makedirs(OUT, exist_ok=True)
     for name, body in BATS.items():
+        body = body.replace('@@STOP@@', STOP_PANEL.rstrip('\n'))
+        if '@@' in body:
+            raise SystemExit('%s 里还有没替换的占位符' % name)
         path = os.path.join(OUT, name)
         with open(path, 'w', encoding='gbk', newline='\r\n') as f:
             f.write(body)

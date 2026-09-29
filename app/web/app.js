@@ -18,16 +18,21 @@ const INTENT_BY_ID = {};
 INTENTS.forEach((it) => { INTENT_BY_ID[it.id] = it; });
 const TIERS = { perf: '性能', mid: '流畅', bal: '均衡', eco: '省电' };
 const BOOST_TEXT = { 0: '禁用', 1: '启用', 2: '激进', 3: '高效', 4: '高效激进', 5: '保证频率' };
-// 风扇模式字节取值来自 OEM 自己的枚举（MyFanCTLByteFlag），这里只做中文注解
-// 实体「造物者模式」按键循环的三态（实测见 README 第 6.2 节）。LED 与哪一态对应
-// 还没确认，所以这里只写 OEM 枚举自己的语义：自动调速 / 用自定义曲线 / 强冷。
-const FAN_KEY_FLAGS = ['Normal_Mode', 'User_Fan_Mode', 'Turbo_Mode'];
-const FAN_FLAG_TEXT = { Normal_Mode: '自动', Turbo_Mode: '强冷', FanBoost_Mode: '风扇加速',
-  User_Fan_Mode: '自定义曲线', User_Fan_HiMode: '自定义·高',
-  User_Fan_Level1: '自定义 1 档', User_Fan_Level2: '自定义 2 档', User_Fan_Level3: '自定义 3 档',
-  User_Fan_Level4: '自定义 4 档', User_Fan_Level5: '自定义 5 档' };
+// 风扇模式字节取值来自 OEM 自己的枚举（MyFanCTLByteFlag）。这个字节就是本机硬件
+// 模式的总开关：按一次实体键，它 0x10↔0xA0 的同时 PL1_SETTING_VALUE 75↔10、
+// 风扇 PWM 表、TGP 整组跟着换（README 6.2）。
+// 中文词表不在这里存第二份——统一从后端 meta.fan_mode_words 拿，
+// 机主报过「网页一套词、弹窗一套词，对不上号」。
+const FAN_KEY_FLAGS = ['Normal_Mode', 'User_Fan_HiMode', 'Turbo_Mode'];
 
-let META = { cap_labels: {}, mode_labels: {} };
+let META = { cap_labels: {}, mode_labels: {}, tier_labels: {}, fan_mode_words: {} };
+const fanModeWord = (flag) => {
+  const w = META.fan_mode_words || {};
+  if (!flag) return null;
+  if (w[flag]) return w[flag];
+  return flag.indexOf('User_Fan') === 0 ? (w.User_Fan || null) : null;
+};
+const hwModeWord = (m) => (m === 'auto' ? '自适应' : (TIERS[m] || null));
 let lastState = null;
 let benchWasRunning = false;
 let benchTimer = null;   // 跑分进行中改成 1 秒刷一次，进度条才看得出在动
@@ -194,16 +199,17 @@ function renderHardware(s) {
   const ecCh = (s.channels || []).find((c) => c.name === 'ec') || {};
   const ecAlive = ecCh.alive === true;
   const keyFlag = FAN_KEY_FLAGS.indexOf(hw.fan_mode_flag) >= 0 ? hw.fan_mode_flag : null;
-  // 实测（2026-09-29，tools/ec_watch.py）：实体「造物者模式」按键只改风扇模式字节，
-  // PL1/PL2/PL4 与 MyFanCCI_Mode_Index 一动不动 —— 所以这里按「按键三态」显示，
-  // 功耗墙那一行仍然如实写「未确认」，不把风扇档说成性能档。
-  const keyText = keyFlag ? (FAN_FLAG_TEXT[keyFlag] || keyFlag)
-    : (ecAlive ? (FAN_FLAG_TEXT[hw.fan_mode_flag] || hw.fan_mode_flag || '未知') : '不可读');
+  // 2026-09-30 全表差分（tools/ec_watch.py all）：实体键写的这个字节是硬件模式总开关，
+  // PL1 75W↔10W、风扇 PWM 表、TGP 都是它的结果。所以「硬件模式」这一行敢下结论了，
+  // 取值认不出来时照实写「未知」，不猜。
+  const keyText = fanModeWord(hw.fan_mode_flag) || hw.fan_mode_flag
+    || (ecAlive ? '未知' : '不可读');
+  const hwMode = hwModeWord(hw.hw_mode);
   const plNote = hw.pl1_setting ? '' : '（出厂默认）';
   const rows = [
-    hwRow('造物者模式按键', keyText + (keyFlag ? '' : '（非三态取值）'), ecAlive),
-    hwRow('功耗墙档位', hw.mode ? ((META.mode_labels || {})[hw.mode] || hw.mode)
-          : (ecAlive ? '未确认（实测按键不动功耗墙）' : '不可控'), !!hw.mode),
+    hwRow('造物者模式按键', keyText + (keyFlag ? '' : '（非按键三态取值）'), ecAlive),
+    hwRow('硬件模式', hwMode || (ecAlive
+          ? `未知（风扇字节 ${hw.fan_mode_flag || '?'}）` : '不可读'), !!hwMode),
     hwRow('风扇转速', hw.fan_rpm != null
           ? (fmtRpm(hw.fan_rpm) + ' / ' + fmtRpm(hw.fan2_rpm)) : '未知', verified('fan.rpm')),
     hwRow('风扇占空比', hw.fan_duty_l != null ? (hw.fan_duty_l + '% / ' + (hw.fan_duty_r != null ? hw.fan_duty_r + '%' : '?'))
@@ -226,14 +232,15 @@ function renderHardware(s) {
 
   const canFan = (caps['fan.mode'] || {}).state === 'verified';
   const available = Object.keys(s.fan_modes || {});
-  // 只放实体按键真正会循环的那三态；User_Fan_Level1~5 是自定义曲线的子档，
+  // 只放实体按键真正会到的那几态（GCUBridge 在跑时是 0x10↔0xA0 两态循环，
+  // 半亮那一态也留着，面板点得到）；User_Fan_Level1~5 是自定义曲线的子档，
   // 放上来只会让面板看起来比实际能控的东西多。
   const flags = FAN_KEY_FLAGS.filter((f) => available.indexOf(f) >= 0);
   const lockLeft = (ecCh.detail || {}).fan_lock_left || 0;
   const lockBy = (ecCh.detail || {}).fan_lock_by;
   const owned = !!(ecCh.detail || {}).fan_user_owned;
   const fanButtons = canFan ? flags.map((f) => `
-    <button data-fan="${f}" class="${hw.fan_mode_flag === f ? 'primary' : ''}">${esc(FAN_FLAG_TEXT[f] || f)}</button>`).join('') : '';
+    <button data-fan="${f}" class="${hw.fan_mode_flag === f ? 'primary' : ''}">${esc(fanModeWord(f) || f)}</button>`).join('') : '';
   const canWrite = (caps['mode.write'] || {}).state === 'verified';
   const modes = ['office', 'balance', 'turbo'];
   $('hw-buttons').innerHTML = fanButtons
@@ -262,15 +269,14 @@ function renderHardware(s) {
   const mqCh = (s.channels || []).find((c) => c.name === 'mqtt') || {};
   const why = (c) => (c.detail || {}).reason || '未探测';
   const hints = [];
-  if (lockLeft) hints.push(`${lockBy || '人工'}优先，${Math.round(lockLeft)} 秒内面板不自动改风扇`);
-  else if (owned) hints.push('当前是自定义曲线，面板不会自动改风扇（点上面的按钮可接管）');
-  // 实测：没配过曲线的自定义档满载只有 2320 MHz，比自动档慢四分之一（README 6.4）
-  if (hw.fan_mode_flag === 'User_Fan_Mode') {
-    hints.push('⚠ 实测这一态满载只有 2320 MHz，比「自动」慢四分之一'
-      + '（没在 Creator Center 里配过曲线时，它是最保守的一档）');
+  if (lockLeft) hints.push(`${lockBy || '人工'}优先，${Math.round(lockLeft)} 秒内面板不自动改硬件模式`);
+  else if (owned) hints.push('当前是低功耗档（自定义曲线），面板不会自动改（点上面的按钮可接管）');
+  // 这一态不是「只改风扇」：全表差分抓到 PL1 被压到 10W，满载实测慢 23~26%（README 6.4）
+  if ((hw.fan_mode_flag || '').indexOf('User_Fan') === 0) {
+    hints.push('⚠ 这一态把功耗墙压到 10W，满载实测慢 23~26%，换来的是安静和低温');
   }
-  if (!canWrite) hints.push('功耗墙档位不可写：' + ((ecCh.detail || {}).write_reason || why(ecCh)));
-  if (!canFan) hints.push('风扇模式不可写：' + ((ecCh.detail || {}).fan_mode_reason || why(ecCh)));
+  if (!canWrite) hints.push('OEM 档位不可写：' + ((ecCh.detail || {}).write_reason || why(ecCh)));
+  if (!canFan) hints.push('硬件模式不可写：' + ((ecCh.detail || {}).fan_mode_reason || why(ecCh)));
   $('hw-hint').textContent = hints.join('；');
   $('hw-hint').classList.toggle('err', !canWrite && !canFan);
 }

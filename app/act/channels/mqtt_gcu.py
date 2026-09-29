@@ -20,9 +20,13 @@ ACTIONS_PATH = os.path.join(os.path.dirname(__file__), 'gcu_actions.json')
 STATUS_TOPICS = ('Tray/Status', 'Fan/Status', 'Setting/Status', 'Keyboard/Status',
                  'HidLightbar/Status', 'Display/Status', 'Monitor/Status',
                  'WhisperMode/Status', 'ProcessControl/Status', 'Customize/Status')
-MODE_FIELD = {'0': 'office', '1': 'balance', '2': 'balance', '3': 'turbo'}
-MODE_ACTION = {'office': 'OPERATING_OFFICE_MODE', 'balance': 'OPERATING_GAMING_MODE',
-               'turbo': 'OPERATING_TURBO_MODE'}
+# OperatingMode 的取值只认 OEM 自己枚举里有的：OperatingMode{Office:0, Turbo:2}
+# （tools/oem_constant_dump.ps1 导出）。以前这张表还写了 1→balance、3→turbo，
+# 那是照抄别家的猜测，和 OEM 枚举直接矛盾；实测 Tray/Status 报的就是 1/2 这类
+# 没定义的值，硬翻译成「均衡」等于在面板上编一个本机不存在的档（机主明确说过
+# Creator Center 里没有办公/均衡/狂暴）。认不出来就写 unknown，并把原始值暴露出去。
+MODE_FIELD = {'0': 'office', '2': 'turbo'}
+MODE_ACTION = {'office': 'OPERATING_OFFICE_MODE', 'turbo': 'OPERATING_TURBO_MODE'}
 
 
 def _varint(n):
@@ -213,7 +217,12 @@ class MqttChannel(Channel):
         self.alive = True
         self.caps[CAP_MODE_READ] = 'verified'
         self.caps[CAP_PL_READ] = 'verified'
-        self.caps[CAP_MODE_WRITE] = 'verified' if self.allow_write else 'unknown'
+        # 写档位不做「连上就算可用」：OPERATING_*_MODE 这三个动作名确实来自 OEM 自己的
+        # 动作表，但本机还没做过一次「写 → 观察哪个寄存器/跑分变了 → 还原」的可逆验证，
+        # 按第 6.3 节的规矩，验证之前不许在面板上点亮这个开关。
+        self.caps[CAP_MODE_WRITE] = 'unknown'
+        self.detail['mode_write_reason'] = ('未做可逆验证：动作名来自 OEM 动作表，'
+                                            '但本机还没实测过它到底改了什么，验证前不点亮')
         self.detail['reason'] = '已连接 GCUBridge'
         cli.publish('Setting/Control', json.dumps({'Action': 'GETSTATUS'}))
         last_ping = time.time()
@@ -245,7 +254,16 @@ class MqttChannel(Channel):
         with self._lock:
             self._payloads[topic] = {'ts': time.time(), 'data': data}
         if topic == 'Tray/Status' and 'OperatingMode' in data:
-            mode = MODE_FIELD.get(str(data['OperatingMode']))
+            raw = str(data['OperatingMode'])
+            mode = MODE_FIELD.get(raw)
+            if self.detail.get('operating_mode_raw') != raw:
+                self.detail['operating_mode_raw'] = raw
+                self.detail['mode_reason'] = '' if mode else (
+                    'OperatingMode=%s 不在 OEM 枚举里（枚举只有 0=Office、2=Turbo），'
+                    '不翻译成任何档位' % raw)
+                if not mode:
+                    self.log.info('[MQTT] Tray/Status OperatingMode=%s：OEM 枚举未定义，'
+                                  '按「未知」处理，不猜' % raw)
             if mode and mode != self.last_mode:
                 first = self.last_mode is None
                 self.last_mode = mode

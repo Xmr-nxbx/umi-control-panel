@@ -138,7 +138,7 @@ def _():
     _with_history(rows, check)
 
 
-@case('四档只差 2% 时，结论既要说「电源档位压不住」，也要指出真正管用的是散热')
+@case('四档只差 2% 时，结论既要说「电源档位压不住」，也要指出真正管用的是 EC 硬件模式')
 def _():
     rows = [rec(tier='eco', ts=300.0, run_id=9, all_mb_s=170.0, clock_mhz=3300),
             rec(tier='bal', ts=301.0, run_id=9, all_mb_s=171.0, clock_mhz=3310),
@@ -149,10 +149,12 @@ def _():
         v = power_verdict()
         assert v['effective'] is False, v
         assert '压不住' in v['reason'], v['reason']
-        # 只说「压不住」等于把机主晾在半路：必须给出那什么才压得住。
-        assert '散热' in v['reason'] and '强冷' in v['reason'], v['reason']
-        # 功耗墙寄存器没确认，结论里不许出现「已解锁功耗墙」这种承诺。
-        assert '不猜测写入' in v['reason'], v['reason']
+        # 只说「压不住」等于把机主晾在半路：必须给出那什么才压得住，
+        # 并且带上实测量级（2026-09-30 全表差分：风扇字节一动，PL1 75W↔10W）。
+        assert 'EC 侧' in v['reason'] and '强冷' in v['reason'], v['reason']
+        assert '23~26%' in v['reason'] and '75W/10W' in v['reason'], v['reason']
+        # 直接写 PL 寄存器实测不生效，结论里不许出现「已解锁功耗墙」这种承诺。
+        assert '不裸写功耗墙' in v['reason'], v['reason']
     _with_history(rows, check)
 
 

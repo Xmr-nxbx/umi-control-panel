@@ -13,7 +13,8 @@ from app.act.channels.mqtt_gcu import MqttChannel
 
 ECHO_SUPPRESS_S = 8.0
 # EC 通道能给出的额外语义值，一并进快照供面板展示
-STATE_KEYS = ('mode', 'pl1', 'pl2', 'pl4', 'fan_rpm', 'fan2_rpm', 'fan_boost', 'fan_mode',
+STATE_KEYS = ('mode', 'hw_mode', 'pl1', 'pl2', 'pl4', 'fan_rpm', 'fan2_rpm', 'fan_boost',
+              'fan_mode',
               'fan_duty_l', 'fan_duty_r', 'fan_ctl_byte', 'fan_mode_flag', 'kb_backlight',
               'pl1_setting', 'pl2_setting', 'pl4_setting', 'vrm_max_limit',
               'battery_pct_ec', 'battery_temp_c', 'battery_cycles', 'charge_limit_up',
