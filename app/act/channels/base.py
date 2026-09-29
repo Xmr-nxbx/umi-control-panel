@@ -67,8 +67,16 @@ def hw_mode_of_fan_flag(flag):
 # 0x09 → 0x19 → 0x29 → 0x09。低半字节恒为 9，高半字节就是档位。
 # 界面词一律用 Creator Center 上的原话（平衡/健康/长效）——OEM 内部把「长效」叫
 # PERFORMANCEDMODE，那个英文名只进日志，不上界面。
-# 三档具体是多少百分比还没实测（CHARGE_LIMIT_UP/DOWN 全程读 0，阈值不在这张表里执行），
-# 所以只认档位名，不编百分比。
+# 三档对应"百分之多少"这个问题**不成立**，不是还没测：GM7MG7P 的 EC 反汇编显示
+# 这个家族的封顶是充电**电压** 0x0522/0x0523（按循环数/温度老化降额，
+# Stationary≥200、Balanced≥100、High capacity 0 mV/cell），代码里不存在任何百分比；
+# 0x0522 还 host 写不住（<101µs 被 EC 夺回）。那套「0x7C3/0x770 门控 → 0x87F 存储上限
+# → 每秒读 0x7B9」的百分比模型来自别的板子（无界 14XA），判据是 0x742 bit2，
+# 本机读到 0x742=2（bit2=0），机制不在场。见 README 6.11 第三节。
+# 所以下面这张表只认档位名，永远不编百分比。
+# 档位编码本身拿到了独立印证：0x07A6 的 bits[5:4] = 00 High capacity(Standard/长效)、
+# 01 Balanced(Long_Life/平衡)、10 Stationary(Trickle/健康)，与观察3 抓到的
+# 0x09/0x19/0x29 逐个吻合。另注：厂商服务退出时会强制把这一档拉回 High capacity。
 BATTERY_MODE_BY_NIBBLE = {0: 'long', 1: 'balanced', 2: 'healthy'}
 BATTERY_MODE_LABELS = {'balanced': '平衡', 'healthy': '健康', 'long': '长效'}
 BATTERY_MODE_ACTION = {'balanced': 'BALANCEDMODE', 'healthy': 'HEALTHYMODE',

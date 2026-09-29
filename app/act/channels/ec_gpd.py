@@ -115,13 +115,21 @@ USER_FAN_BIT = 0x80
 #                      解码在 channels.base，界面词用 Creator Center 的原话。
 #   ADDR_TRIGGER_BYTE  写入握手的脉冲位：第三次点 Win 锁时它 0→1→0 闪了一下。
 #                      只见过脉冲、没见过稳定值，所以只监听不解释。
-# 还没弄清的：这三档对应的**充电百分比**。CHARGE_LIMIT_UP/DOWN 全程读 0，说明阈值不在
-# 这张 EC 表里执行（可能在充电 IC 的 SMBus 上）。所以面板只报档位名，不编百分比；
-# open-revo 说的 100/80/60 是别的机型的说法，不能直接搬到本机。
+# 已经弄清的：这三档**没有对应的充电百分比**。这个 EC 家族的封顶是充电电压
+# 0x0522/0x0523（bank0 0xB158 周期重算，按循环数/温度老化降额），代码里不存在任何
+# 百分比，而且 0x0522 host 写不住（实测 <101µs 被 EC 夺回）。CHARGE_LIMIT_UP/DOWN
+# 全程读 0 也解释通了：百分比门控那套模型（0x7C3/0x770 → 0x87F → 每秒读 0x7B9）
+# 来自别的板子，判据是 0x742 bit2，本机读 0x742=2 → bit2=0，机制不在场。
+# 所以面板只报档位名、永不编百分比；open-revo 说的 100/80/60 是别的机型的说法。
 # 反过来，已经排除的：灯效不在 EC 上。LIGHTBAR_CONTROL_BYTE、RGBKB_LEVEL_R/G/B、
 # SINGLEKBL_ENABLE 在灯明明亮着的时候全是 0，机主点背光/灯条时全表也一个都没动；
 # 走的是 GCUBridge 的 Keyboard/Ctrl（{"function":"SetPower","light":"3","speed":"2"}，
-# 控制器 solution=ITE、type=FourZone）。触摸板上有实体拨动开关，OEM 也另有
+# 控制器 solution=ITE、type=FourZone）。**根因也查到了**：ITE 8291 是 USB HID 设备
+# （048D:CE00 键盘 / 048D:6005 灯条），EC 侧灯条寄存器 0x0748-0x074B 在固件里零引用、
+# 写了也没效果；SINGLEKBL_ENABLE(0x78C) 只是个状态镜像，EC 固件从内部 0x0826 生成
+# bits5-7、厂商服务 SetBrightness 也 RMW 它、Fn+F6/F7 热键走 WMI 177/178——
+# 三个写者共用一个字节，所以它进了 README 6.3 第 8 条的永久禁区。
+# 触摸板上有实体拨动开关，OEM 也另有
 # TOUCHPAD_TOGGLE_ON/OFF 命令——两条路会不会互相盖没验证过，面板只读。
 
 

@@ -239,7 +239,7 @@ tests/test_config_profile.py 6 个调度性格读写场景（盯「补丁漏进 
 tests/test_singleton_port.py 6 个单实例与端口场景（盯 2026-09-30 那个双实例并跑）
 tests/test_oem_status.py     7 个 GCUBridge 状态解析场景（盯 UNLOCK 被 endswith 判成 LOCK 那个坑）
 tests/test_battery_winlock.py 7 个解码场景（把 6.8 那张表的字节值逐条钉住）
-tests/test_write_gates.py     9 个写入闸门场景（跨站 Origin 一律 403、allow_write=false 一律拒发）
+tests/test_write_gates.py     10 个写入闸门场景（跨站 Origin 一律 403、allow_write=false 一律拒发）
 scripts/                    setup_runtime.ps1、make_bats.py（bat 生成器）、17 个入口 bat（GBK+CRLF）
 tools/                      全部离线只读的逆向与验证工具，产物落 tools/out（已 gitignore）
   gen_ec_map.py             从本机 Creator Center 生成 data/ec_map.local.json（不入仓库）
@@ -386,9 +386,18 @@ tools/                      全部离线只读的逆向与验证工具，产物�
      `BatteryProtection/Control` 动作，而且要先经机主同意。
    - 不刷 BIOS、不写 UEFI NVRAM（`UEFI_Firmware.dll` 的 `WriteUefi` 一律不碰）。
      GM5MG0Y 是 AMI 板，公开记录里**降级被拒、改版刷入失败、有人警告会黑屏变砖**。
-   - 不写自定义风扇模式的激活链（`0x706=0x41`、`0x726 bit7`、`0x727 bit5/6`）。
-     按外部资料，置齐这条链之后 EC 才会去执行风扇表；万一表是空的，
-     等于让风扇不再跟温度走。这条必须机主在场 + 温度保险 + 可即时还原才谈得上做。
+   - 不写 UEFI 变量。`UniWillVariable {9f33f85c-13ca-4fd1-9c4a-96217722c593}`
+     是 NV+BS+RT 的**运行时可写**变量，OS 里写 `0x33` 就能让 BIOS 下次开机把
+     隐藏的内存超频菜单放出来（外部资料在 GM7MG7P 上实机验证过）。正因为它这么
+     容易写，才更要一律不碰：那个菜单里有 VDDQ 1.10–1.65 V 的电压项。
+   - 不写 `0x078C`（键盘背光状态镜像）。它看着像个开关，其实 EC 固件自己会从
+     内部 `0x0826` 生成 bits5-7，Fn+F6/F7 热键也写它，厂商服务另有一条
+     「把亮度镜像回 EC」的路径。三个写者共用一个字节，我们插进去就是抢。
+     本机灯效走 ITE 8291 的 USB HID，压根不经过 EC（见 6.11）。
+   - 不写 `0x07D0`。它带 `DO-NOT-WRITE-BLIND`，而且存在 **CLOBBER HAZARD**：
+     DSDT 的 `T1WR 0x1173` 分支会把 GPU 功率 `Arg1*8` 写进**同一个物理字节**，
+     和充电百分比的刻度直接冲突（55% = `0x37`，TGP 最大 = `0xF8`）。
+     必须先读回确认当前是谁在用，才谈得上写。
 
 ### 6.4 造物者模式按键三态实测（2026-09-29 测，2026-09-30 补上原因）
 
@@ -626,12 +635,12 @@ DSDT / EC 转储在公网上不存在**（GitHub 搜 `GM5MG0Y` 零结果），BI
 
 | 地址 | 我们自己的 OEM 常量名 | 外部资料说它是什么 | 本机只读实测（Turbo 档、AC、电量 100%） |
 | --- | --- | --- | --- |
-| 0x741 | `ADDR_AP_OEM_BYTE` / `ADDR_FAN_ALERT_BYTE` | bit0 = ap_exist，激活链第一步 | **1**（bit0 已置） |
-| 0x706 | 不在我们的表里 | 自定义模式要写 0x41 | **0**（未进自定义模式） |
-| 0x726 | 不在我们的表里 | bit7 = 自定义模式；bit3 = AC Recovery | **0** |
-| 0x727 | 不在我们的表里 | bit5（一说 bit6）= 自定义模式 | **0** |
-| 0x7C5 | `ADDR_AP_OEM_BYTE5` | bit7 不置，EC 会**完全忽略**风扇表 | **0x80**（bit7 已置） |
-| 0x7C6 | `ADDR_AP_OEM_BYTE6` | bit2 是激活链一环 | **0x04**（bit2 已置） |
+| 0x741 | `ADDR_AP_OEM_BYTE` / `ADDR_FAN_ALERT_BYTE` | bit0 = ap_exist；EC 用它当 **PL 清零闸** | **1**（bit0 已置 → EC 不清 PL） |
+| 0x706 | 不在我们的表里 | ~~自定义模式要写 0x41~~ 实为每轮减一的倒计时器 | **0** |
+| 0x726 | 不在我们的表里 | ~~bit7 = 自定义模式~~ 全镜像零引用（上游名 AC_AUTO_BOOT bit3） | **0** |
+| 0x727 | 不在我们的表里 | ~~bit5/6 = 自定义模式~~ 全部引用点为 0 | **0** |
+| 0x7C5 | `ADDR_AP_OEM_BYTE5` | ~~bit7 不置 EC 会忽略风扇表~~ 实为 **CPU/GPU 分表**开关（默认 false） | **0x80**（本机置着） |
+| 0x7C6 | `ADDR_AP_OEM_BYTE6` | bit2 = 写表期间拉低的**括号**，不是激活位 | **0x04** |
 | 0x783 | `ADDR_PL1_SETTING_VALUE` | PL1，可写且持久 | **75**（与面板读数一致） |
 | 0x78C | `ADDR_SINGLEKBL_ENABLE` / `ADDR_AP_OEM_BYTE2` | 单色键盘背光：开 0x01 / 关 0x03 | **0**（两个值都不是） |
 | 0x7B9 | `ADDR_BATTERY_CHARGE_LIMIT_UP` | EC 充电环每秒读的**实时**上限 | **0** |
@@ -641,14 +650,12 @@ DSDT / EC 转储在公网上不存在**（GitHub 搜 `GM5MG0Y` 零结果），BI
 
 从这张表能落下四条结论，其中两条**修正了我们自己早先的判断**：
 
-1. **「裸写 PL 自清零」的原因很可能不是"寄存器是别代机型的"**（6.2 里那么写的）。
-   按 `uniwill-laptop-mr` 的实测，0x783/0x784/0x785 是可写且持久的，**前提是先置齐
-   自定义模式激活链** `0x741 bit0 → 0x706=0x41 → 0x726 bit7 → 0x727 bit5/6 →
-   0x7C5 bit7 → 0x7C6 bit2`；缺链的话 EC 直接把写入当没看见。本机现在这条链
-   **六个环节只置了三个**（0x741 bit0、0x7C5 bit7、0x7C6 bit2 已置，
-   0x706/0x726/0x727 全是 0），正好是"不在自定义模式"的样子——和写入自清的现象自洽。
-   这条链**不许自己写**（6.3 第 8 条）：置齐之后 EC 会开始执行风扇表，
-   万一表是空的风扇就不跟温度走了。
+1. ~~**「裸写 PL 自清零」的原因很可能不是"寄存器是别代机型的"**~~ —— **这条已在 6.11 撤回。**
+   当时按 `uniwill-laptop-mr` 的实测推断，0x783/0x784/0x785 可写且持久的前提是
+   先置齐「自定义模式激活链」`0x741 bit0 → 0x706=0x41 → 0x726 bit7 → 0x727 bit5/6 →
+   0x7C5 bit7 → 0x7C6 bit2`。拿到 GM7MG7P 的 EC 反汇编之后逐环节核对，
+   **这条链不存在**：`0x0706` 是个每轮减一的倒计时器，`0x0726` 全镜像零引用、
+   `0x0727` 全零，厂商服务侧对这三个地址**零命中**。真正的机制见 6.11 第 2 条。
 2. **`CHARGE_LIMIT_UP` 读到 0 现在有机制解释了**：EC 的门控条件是
    `0x7C3` 或 `0x770` 等于 4/5，否则要求存储上限 `0x87F` 落在 1–100。
    本机 `0x770=0xFF`、`0x87F=0xFF`，两个条件都不满足 → 实时上限就是 0。
@@ -675,12 +682,189 @@ DSDT / EC 转储在公网上不存在**（GitHub 搜 `GM5MG0Y` 零结果），BI
   命令集里**不含风扇曲线写入、不含 PL1/2/4、不含充电阈值**（只有模式/GPU/键盘类型/
   Fn 锁/触摸板锁/风扇转速/RGB/温度/功耗这几类），对本项目最想要的三件事一件都帮不上。
 
-还有一处**外部资料自己打架**、留待实测裁定的：风扇表布局。一份说是 16 点分块
-（CPU 升温阈值 0xF00–0xF0F、降温 0xF10–0xF1F、占空比 0xF20–0xF2F，GPU 0xF30/0xF40/0xF50），
-另一份说是每风扇 48 字节的 (up, down, duty) **交错三元组**，并警告 0xF5D–0xF5F 是
-RamFan 状态寄存器、不是占空比槽。占空比编码两份倒是一致：原始值 = 百分比 × 2。
+还有一处**外部资料自己打架**的：风扇表布局。一份说是 16 点分块，另一份说是每风扇
+48 字节的 (up, down, duty) **交错三元组**。**这一处已经裁定**——直接读厂商服务
+`FanTable_Manager1p5.SetEcFanTable` 的源码（GM7MG7P 仓库里已解密的 v3.1.39.0），
+分块说是对的，交错说是错的，而且降温阈值的基址两份都没说准：
+
+| | 升温阈值 UpT | 降温阈值 DownT | 占空比 Duty |
+| --- | --- | --- | --- |
+| CPU 16 点 | `0x0F00 + i` | `0x0F11 + i` | `0x0F20 + i` |
+| GPU 16 点 | `0x0F30 + j` | `0x0F41 + j` | `0x0F50 + j` |
+
+三个细节容易踩：① DownT 的基址是 `0x0F10`/`0x0F40` **再加 1**，`0x0F10`/`0x0F40`
+本身厂商从来不写；② `i=15` 那一格 UpT 恒写 `0xFF` 当哨兵，`i<15` 写的是
+**下一个点**的 UpT（`CPU[i+1].UpT`），也就是整张表错位一格存；③ 占空比确实是
+`百分比 × 2`，但 GPU 的 `0x0F5D/0x0F5E/0x0F5F` 被 `RefreshDefaultFanTableAll`
+借去当信箱了（写 `0x0F5F`=模式、`0x0F5D=0xFD`、`0x0F5E=0xC9`，然后 500 ms 轮询），
+所以最后三格占空比槽**不能当普通数据写**——这一点第二份资料说对了。
+
+### 6.11 完整复现 GM7MG7P 的逆向资料：对上了身份，也推翻了我们两条结论（2026-09-30）
+
+机主找到 [`ElDavoo/tongfang-gm7mg7p-re`](https://github.com/ElDavoo/tongfang-gm7mg7p-re)
+（泰坦 X8 Pro / GM7MG7P，i7-10875H + RTX 3070，同方代工），说"很有价值，如果可以，
+完整复现吧"，并明确"不要刷固件，我是想你或许能逆向"。于是把它整份拉下来只做离线阅读
+（7906 个文件：EC 侧 2710 个反编译函数、45481/45624 条指令通过重新汇编校验，
+Windows 侧 375 个解密后的 C# 文件），**没有执行仓库里任何脚本、没有反汇编、
+没有碰机器**。结论分四块。
+
+#### 一、身份对上了，而且不是"近亲"，是同一份代码基
+
+| 证据 | 他们（GM7MG7P） | 我们（GM5MG0Y） | 判定 |
+| --- | --- | --- | --- |
+| EC `0x0740` PROJECT_ID | `0x0F` = PROJECT_ID_CML_GAMING | **实测 `0x0F`** | 相同 |
+| EC 固件标识 | `ITE EC-V14.6` | ROM 偏移 `0x50` 处同串 | 相同 |
+| ITE8850 PD 镜像 `0x20000-0x2FFFF` | sha `30fe7fb81745` | **逐字节相同** | 相同 |
+| 四个 bank 跳板 `0x1100/0x1114/0x1128/0x113C` | `c0087411c0e0c082` | **逐字节相同** | 相同 |
+| `ECSpec.cs` 常量表（175 项，含 109 个 `ADDR_`） | v3.1.6.0 / v3.1.39.0 / v3.9.18.0 三版**逐字节相同** | 我们从本机 `GCUService.exe` 反射出 125 项 | **122 项同名同址，零处地址冲突** |
+| `MyFanCTLByteFlag` 枚举 | Normal 0x00 / Turbo 0x10 / FanBoost 0x40 / User 0x80 / Level1-5 0x81-0x85 / HiMode 0xA0 | 实测三态与之吻合 | 相同 |
+| EC 代码段本体 | `GMxMGxx_11.800` | 客服 ROM 里切出的 `GMxMGxxN109MRO06` 前 256 KiB | **31.39% 字节不同**，同一源、不同 build |
+
+那 3 个对不上的名字是 `APP_Normal_Mode`=0x000、`APP_LightBar_Mode`=0x001、
+`APP_ImageProjectionLight_Mode`=0x002——它们是**应用模式号不是 EC 地址**，
+只是恰好和他们的 `OSD_CAPSLOCK`/`OSD_NUMLOCK` 撞了名字，不算冲突。
+
+**为什么这对我们有用**：厂商服务**不按 DMI 选代码路径**（DMI 精确匹配表是这个仓库
+自己为 Linux 上游写的，不是厂商的东西）。它只看三样——EC `0x0740` 的 PROJECT_ID、
+`0x078E` bit6（`IsSuportRamFan1p5`）、注册表 `HKLM\SOFTWARE\OEM\GamingCenter2\CustomizeTarget`。
+PROJECT_ID 15 不在 `CommercialProjectIDs` 里，所以只要 CustomizeTarget 不是 42(NV)/11(MCJ)，
+本机跑的就是和他们**同一对类**（`MyFanManager_RamFan1p5` + `FanTable_Manager1p5`）。
+也就是说那 375 个已解密的 C# 文件对我们大概率直接可读。仓库里 `MECHREVO` 只以
+`Customize.cs` 的枚举值出现（`Mechrevo=17`、`Mechrevo_COML=4`、`Mechrevo_Creator=2048`），
+`GM5MG0Y` / `Umi Pro 3` 全库零命中。
+
+#### 二、PL 自清零的真机制：EC 根本不会替你设 PL
+
+这条**推翻了我们自己写在 6.10 的结论**。他们对 EC 镜像做了完整的写点普查：
+
+- `0x0783/0x0784/0x0785` 在整个主镜像里**各只有 5 个引用点：4 读 1 写**。
+  唯一的写在 `0xA833`，反汇编长这样：
+
+  ```
+  0xa82b  mov dptr,#0x0741   ; AP_OEM
+  0xa82e  movx a,@dptr
+  0xa82f  jb   acc.0,0xa843  ; "AP 存在" -> 别动 PL
+  0xa832  clr  a
+  0xa833  mov dptr,#0x0783 / movx @dptr,a   ; PL1 = 0
+  0xa837  mov dptr,#0x0784 / movx @dptr,a   ; PL2 = 0
+  0xa83f  mov dptr,#0x0785 / movx @dptr,a   ; PL4 = 0
+  ```
+
+  本机 `0x741 = 1`（bit0 已置），**这条清零分支在我们机器上不该跑**。
+- 每档的默认值块 `0x0730-0x0737` / `0x07A7-0x07AA`（共 12 字节）在整份镜像里
+  **一个读点都没有**。也就是说 EC 从不把"某一档的默认 PL"搬进 PL 寄存器——
+  这些字节是 EC **发布给 host 去取**的，厂商的 `SetUserProfile` 先读它们、
+  再**自己**把 PL 写下去。
+- 34 个 `0x0751` 模式位分支臂里，**没有一臂**把默认块搬进 PL，也没有一臂加载风扇表。
+
+**所以对我们最直接的推论是**：写 `0x0751`（档位字节）指望 PL 跟着变，
+静态证据上**没有任何东西会跟着变**；PL 必须由 host 写。而 host 侧受支持的写法就是
+`Fan/Control {"Action":"SET_OPERATING_MODE_DETAIL","PL1":..,"PL2":..,"PL4":..}`
+→ `SetPL1/2/4Value` → `EcCtrl.Write(1923/1924/1925)` = `0x783/0x784/0x785`。
+这正好是待办 #27 那条路，而**不是**去凑什么激活链。
+
+⚠️ 但那条路上有个坑，他们查出来了：**服务端对 PL 完全不做边界校验**。
+`Convert.ToInt32` 之后直接 `(byte)` 截断写入，`_SmartApcTable.PL1/PL2/PL4`
+（该机 120/120/165）和 `CpuPL1Minimum=10` **只作为 Maximum/Minimum 发给 UI**，
+不参与 clamp（对比 `GpuFeatures.SetGpuConfigurableTGPTarget` 是有下界保护的）。
+发 300 进去会被静默截成 `0x2C`=44 W。**约束全在客户端**，所以我们下发前
+必须先拿 `Fan/Status` 的 OEM 上下限自己夹一遍——这也正是 6.7 里把
+「OEM 允许范围」显示出来的用意。
+
+#### 三、电池：这个 EC 家族**不按百分比封顶**，待办 #26 可以关掉
+
+我们一直想实测"平衡/健康/长效分别是百分之多少"。他们的逐指令手译说明这个问法本身就不成立：
+
+- 真正的封顶是 **EC 内部的充电电压上限 `0x0522/0x0523`**，由 bank0 `0xB158`
+  的 `charge_target_update` 周期重算，公式
+  `target = 0x030E(电池请求 17400 mV) − derating(mV/cell) × cells`。
+  derating 取「年龄档」和「档位地板」的较大值：Stationary ≥ 200、Balanced ≥ 100、
+  High capacity 0；年龄档按循环数 150/250/350/450/550 → 50/100/150/200/250 mV/cell。
+- `0x0522` **host 写不住**：他们连做三次，2000 次连读里捕获到写入值 **0 次**，
+  同一次对 `0x07B9=0x5A` 的对照写却保持住了 → 写路径是通的，`0x0522` 在 **<101 µs**
+  内被 EC 夺回。
+- **EC 代码里不存在任何百分比**（他们的 Linux patch 文档明说）。仓库里唯一出现过的
+  百分比数字来自**别的板子**（MECHREVO 无界 14XA「Balanced ~80%、Health ~60%」），
+  并标注为"他们固件的，本机未观测"。
+- 那套「每秒读 `0x07B9`、被 `0x07C3`/`0x0770` 门控、回落到 `0x087F`」的百分比模型
+  来自 w568w 对 14XA 的逆向，**在同项目板上他们判定"这套机制在本图里没找到"**：
+  `0x087F` 无直接引用；`0x0742` 唯一的写点只置 bit1、从不置 bit2。
+  判据是只读 `0x0742` 看 bit2——**我们早就读到 `0x742 = 2`，bit2 = 0**，
+  和他们的读数一致。所以百分比门控在本机确实不在场。
+- 三档编码得到独立印证：`0x07A6` bits[5:4] = `00` High capacity（Standard，
+  对应 `PERFORMANCEDMODE`，我们的"长效"）、`01` Balanced（Long_Life，
+  `BALANCEDMODE`，"平衡"）、`10` Stationary（Trickle，`HEALTHYMODE`，"健康"）。
+  低半字节本机恒为 `0x09`，含义未定。厂商只做一次读改写
+  （`BatteryProtection2.SetHealthProtectionHigh/Middle/Low`），
+  且**服务退出会强制回 High capacity**。
+
+结论：面板继续**只显示档位名、永不显示百分比**，而且这不是"还没测"，
+是"这个 EC 家族没有百分比这个概念"。另外注意：若电池已进入 250 mV/cell 的年龄档，
+三档在电压上**不会有可观测差别**——所以"测不出差别"和仓库结论是自洽的。
+
+#### 四、灯效走 USB HID，不在 EC 上——我们那条阴性结论终于有了解释
+
+6.7/6.10 里我们记录过：切灯效时 EC 全表纹丝不动，`0x78C` 灯灭时读 0，
+既不是外部的"开 0x01"也不是"关 0x03"。原因查明了：
+
+- ITE 8291 是 **USB HID 设备，不是 I2C、也不归 EC 管**。两个 HID 接口：
+  `048D:CE00`（键盘，usage page `0xFF12`，4-zone）与 `048D:6005`（灯条，`0xFF03`）。
+- 协议是 HID `SET_REPORT` Feature，9 字节
+  `[0, opcode, Control, Effect, Speed, Light, ColorIndex, Direction, Save]`；
+  `0x08` = 灯效、`0x09` = 亮度、`0x14` = 调色板 `Index,R,G,B`、`0x80` = 读固件版本。
+  Linux 的 `ite_8291_lb` 用 8 字节 `HIDIOCSFEATURE`。
+- 亮度 5 档编码 `0/8/22/36/50`，速度 5 档 `10/7/5/3/1` → 我们抓到的
+  `light=3, speed=2` 就是 36 / 5。关灯 = `(1,0,0,0,0,0,0)`。
+- EC 侧的灯条寄存器 `0x0748-0x074B` 在固件中**零引用**，实机写入无任何可见效果。
+  `0x078C` 只是个**状态镜像**：EC 固件自己从内部 `0x0826` 生成 bits5-7，
+  厂商服务 `SetBrightness` 时会把亮度 RMW 进 bits5-7 作镜像，Fn+F6/F7 热键走 WMI 177/178。
+  **三个写者共用一个字节**，所以 6.3 第 8 条把它列进禁区。
+
+这条给了一個新可能：灯效可以在**纯用户态**做（枚举 HID → `SET_REPORT`），
+不碰 EC、不碰驱动、天然可逆。但它是新的写通道，要按 6.3 第 2 条重新走一遍验证，
+本轮没做。
+
+#### 五、两件**没做**的事，以及为什么
+
+- **没有解密我们本机的 `GCUService.exe`**。他们的方法是**内存转储**而非静态破解
+  ConfuserEx：服务运行时 `<Module>.cctor` 已把 IL 解密，直接 `ReadProcessMemory`
+  读进程镜像，再用磁盘文件当模板把 IAT/reloc/CLI header/metadata 补回去
+  （anti-dump 会抹掉 `BSJB` 和流名）。校验方式是数 invalid body：
+  磁盘 3759 个 → dump 后 **0** 个。**但这需要管理员权限（SeDebugPrivilege）**，
+  机主不在场，不擅自提权。命令已经抄在下面，等机主点头再跑：
+
+  ```
+  tasklist | findstr /i GCU          # 先确认真实进程名，机械革命可能改过
+  pip install pefile dnfile
+  python windows\tools\dotnet_dump.py --name GCUService.exe --out GCUService.dumped.exe --report
+  python windows\tools\dotnet_bodies.py "<原exe>" GCUService.dumped.exe   # invalid 应从数千降到 0
+  ilspycmd 9.1.0.7988 -p -o out -r "<安装目录>\MyControlCenter" GCUService.dumped.exe
+  python windows\tools\ec_callsites.py out                               # 得到本机自己的寄存器表
+  ```
+
+  已知失败模式：他们只在 **3.1.39.0** 上成功过，文档明说同一流程未在
+  3.1.6.0 / 3.9.18.0 上试过（不同 build、混淆强度不同，3.1.6.0 反而更重）。
+  我们本机装的版本号要先确认，成败以第 4 步的 invalid 计数为准，别猜。
+- **没有刷任何固件、没有运行 `AFUWINx64.EXE` / `F.bat` / 任何 EFI 工具、
+  没有写任何 UEFI 变量**。客服包里那个 `GMxMGxxN109MRO06.ROM`（13,631,488 字节）
+  只做了字节级离线阅读。顺带确认一件事：**EC 固件就在这个 ROM 里**——
+  `F.bat` 的刷机命令带 `/e`（EC 更新）标志，ROM 偏移 `0x50` 处能读到 `ITE EC-V14.6`、
+  `0x20040` 处能读到 `ITE8850`，前 256 KiB 就是完整 EC 镜像
+  （已切出到 `tools/out/ec_from_mro06.bin`，gitignore 掉了）。
+  仓库的 `vendor/bios-1.09/BIOS_1.09.zip` 里 `GM7MG7P/GMxMGxxN109A08.ROM`
+  **也是 13,631,488 字节**，只是他们那份把 EC 镜像 `GMxMGxx_11.800` 单独用
+  `ecflash.nsh` + `IFUX64.efi` 在 UEFI shell 里 dump 出来了。
+  `N109` = BIOS 1.09，`MRO` 是机械革命的构建后缀，`A08` 是另一变体。
+
+**仍然没解开的**：ROM 内部的机型名字符串。47 个 `_FVH` 固件卷里的 BIOS 主体是
+LZMA 压缩的，手上没有 UEFITool 也没有解压工具链，所以
+`cannot update bios with different platform name` 到底卡在哪个字段仍未查明。
+ROM 里 ASCII 全是 0xFF 填充（49.1%）之外的少量表头，
+`GM5MG0Y`/`MECHREVO`/`PowerMode`/`INOU` 的 UTF-16 检索全部零命中。
+这条要等有机可解卷的时候再说，**不影响任何已落地的功能**。
 
 ## 7. 运行方式（目标是"不用盯着"）
+
 
 - 开机自启：`HKCU\...\Run\UmiControlPanel` → `UmiPanel.exe main.py --supervise --no-browser`；
 - 守护模式 `--supervise`：子进程异常退出会自动拉起（实测强杀后 6 秒恢复）；
@@ -733,12 +917,18 @@ RamFan 状态寄存器、不是占空比槽。占空比编码两份倒是一致�
       已从「候选」升级为「已确认」（见 6.8，`tests/test_battery_winlock.py` 钉住）
 - [x] 机主给的 `UmiPro3-Hackintosh`（OpenCore 工程）核过了：确认本机是同方 GM5MG0Y，
       但 19 个 SSDT 全是通用热补丁、没有 EC 字段定义，对本项目只有 dGPU 走 ACPI 这一条旁证（见 6.8）
-- [ ] **电池三档对应的充电百分比还没实测**：`CHARGE_LIMIT_UP/DOWN` 全程 0，
-      切档时 PL1 与风扇字节都不动（说明与性能档正交）。现在有**两份独立旁证**指向
-      长效 100% / 平衡 80% / 健康 60%（open-revo 明写；另一份无界 14XA 实测的
-      `0x7A6` 编码 0x08/0x18/0x28 与我们抓到的 0x09/0x19/0x29 只差 bit0，档位顺序一致，
-      见 6.10），但都是别人机器上的数。要定这个数只能实测：切到某一档、把电充到停、
-      看停在百分之几。**在实测出来之前面板只显示档位名，不显示百分比**
+- [x] **电池三档的百分比：问法本身不成立，这条可以关掉**（见 6.11 第三节）。
+      原先打算「切到某一档、把电充到停、看停在百分之几」，但 EC 反汇编说明
+      这个家族的封顶是**充电电压** `0x0522/0x0523`（按循环数/温度老化降额，
+      200/100/0 mV/cell 三档地板），**代码里不存在任何百分比**；
+      `0x0522` 还 host 写不住（<101 µs 被 EC 夺回）。
+      那套「`0x07C3`/`0x0770` 门控 → `0x087F` 存储上限 → 每秒读 `0x07B9`」的
+      百分比模型来自别的板子（无界 14XA），判据是 `0x0742` bit2——
+      **本机读到 `0x742 = 2`，bit2 = 0**，与他们同项目板的读数一致，机制不在场。
+      三档编码 `0x07A6` bits[5:4] = 00/01/10 已获独立印证。
+      面板**永久只显示档位名、不显示百分比**，这不是"还没测"而是"没有这个量"。
+      附带结论：电池老化到 250 mV/cell 档之后，三档在电压上不会有可观测差别，
+      所以早先"切档看不出变化"是自洽的，不用再当 bug 查
 - [x] **MQTT 写通道的第一次可逆验证做完了**（Win 键锁定）：`WINKEY_UNLOCK` 下发后
       EC `ADDR_STAUTS_BYTE` 1→0，`WINKEY_LOCK` 写回后又回到 1，EC 直读与 `Setting/Status`
       两条通道一致，写入到生效约 6 秒延迟。`winkey.write` 已升为 verified，
@@ -747,13 +937,25 @@ RamFan 状态寄存器、不是占空比槽。占空比编码两份倒是一致�
       但本机还没做过「写 → 观察哪个寄存器/跑分变了 → 还原」。
       验证之前 `mode.write` 保持「待验证」，面板不点亮那组按钮（6.3 第 2 条）。
       既然 Win 锁那条链已经走通，这一步只差一次带跑分对照的实测
-- [ ] **PL 自清零这件事要重测**：6.2 记的"这组寄存器是别代机型的落点"很可能不对。
-      外部实测显示 0x783/0x784/0x785 可写且持久，**前提是先置齐自定义模式激活链**，
-      而本机现在链上六环只置了三个（见 6.10）。但激活链属 6.3 第 8 条的永久禁区，
-      要动必须机主在场 + 温度保险 + 可即时还原
-- [ ] 改功耗墙的正路已经看到了：`Fan/Control {"Action":"SET_OPERATING_MODE_DETAIL","PL1","PL2","PL4"}`，
+- [x] **PL 自清零的原因查明了，而且和我们原先的猜测相反**（见 6.11 第二节）。
+      原先归因于"自定义模式激活链没置齐"——**那条链不存在**，是外部资料的误传
+      （`0x0706` 是倒计时器，`0x0726`/`0x0727` 在 EC 镜像里零引用，厂商服务侧零命中）。
+      真实机制：EC 主镜像里 `0x0783-0x0785` **各只有 1 个写点**（`0xA833`），
+      且被 `0x0741` bit0 门控——bit0 清零才把三个 PL 归零；本机 `0x741 = 1`，
+      这条分支不该跑。更要紧的是每档默认值块 `0x0730-0x0737`/`0x07A7-0x07AA`
+      在整份镜像里**一个读点都没有**，34 个 `0x0751` 分支臂也没有一臂把默认值搬进 PL。
+      **结论：写档位字节永远不会带动 PL，PL 必须由 host 自己写**——
+      所以改功耗墙只有 `SET_OPERATING_MODE_DETAIL` 一条路，不用再惦记激活链
+- [ ] 改功耗墙的正路已经看到了：`Fan/Control {"Action":"SET_OPERATING_MODE_DETAIL","PL1","PL2","PL4"}`
+      → `SetPL1/2/4Value` → `EcCtrl.Write(0x783/0x784/0x785)`，
       而且 `Fan/Status` 给出了 OEM 自己的边界（PL1 10~120W、PL4 ≤165W、TGP 80~115、
-      目标温度 75~87°C）。要做可逆验证 + 拿这组边界当护栏，验证前不进白名单
+      目标温度 75~87°C）。**但 6.11 查出服务端对这三个值完全不做边界校验**：
+      `Convert.ToInt32` 后直接 `(byte)` 截断，`_SmartApcTable` 与 `CpuPL1Minimum`
+      只发给 UI 当 Maximum/Minimum、不参与 clamp（发 300 会静默变成 44W）。
+      所以护栏**必须由我们自己夹**，下发前拿 `Fan/Status` 的上下限过一遍，
+      再走可逆验证（存原值 → 写 → 回读 → 还原 + 85°C 温度保险），验证前不进白名单。
+      另注：PL1/PL2/PL4 是三个独立 `if`，其余 GPU/TCC/电压项全是 `else-if` 链，
+      **一条消息只能改一个非 PL 项**
       （注意 `Fan/Status` 不是随时都有：本机现在只在被 GETSTATUS 问到时才报，
       所以「OEM 允许范围」这一行经常显示「未报」，不是 bug）
 - [ ] `OperatingMode` 的真实取值：`Tray/Status` 报的值不在 OEM 枚举 `{Office:0, Turbo:2}` 里，
@@ -763,14 +965,36 @@ RamFan 状态寄存器、不是占空比槽。占空比编码两份倒是一致�
       `Setting/Status`），命令名也在 OEM 字符串表里，缺的还是「下发 → 回读 → 还原」那一次实测
 - [ ] 键盘背光的写入：命令已知（`Keyboard/Ctrl {"function":"SetPower","light","speed"}`），
       状态也已知（`Keyboard/Status.powerStatus` 才是真开关，`SingleColorKBBL` 是另一件事），
-      同样等一次可逆验证。「灯效不在 EC 上」这条阴性结论 6.10 又复测过一次：
-      `0x78C`（我们的表里叫 `SINGLEKBL_ENABLE`）在灯灭时读 0，既不是外部资料的
-      开 0x01 也不是关 0x03 —— 本机 FourZone/ITE 方案确实不走这个字节
-- [ ] 风扇曲线读写：`ADDR_MYFAN2_L1~L5_PWM` 与 `User_Fan_Level1~5(0x81~0x85)` 看着是一对，
-      而且全表观察抓到按硬件模式时 `MYFAN2_L1/L4_PWM` 会跟着换（3↔7、5↔15），
-      但「写单个 PWM 会不会被 EC 覆盖」没实测过，暂不写。
-      而且它多半要先过自定义模式激活链那一关（见 6.10 第 1 条）；
-      0xF00 段的表布局两份外部资料还互相打架，得实测裁定
+      同样等一次可逆验证。「灯效不在 EC 上」这条阴性结论现在**有了完整解释**（见 6.11 第四节）：
+      ITE 8291 是 USB HID 设备（`048D:CE00` 键盘 / `048D:6005` 灯条），
+      EC 侧灯条寄存器 `0x0748-0x074B` 零引用、写了也没效果
+- [ ] **新通道候选：灯效走纯用户态 USB HID**。协议已完整逆出——`SET_REPORT` Feature，
+      9 字节 `[0, opcode, Control, Effect, Speed, Light, ColorIndex, Direction, Save]`，
+      `0x08` 灯效 / `0x09` 亮度 / `0x14` 调色板 / `0x80` 读固件版本；
+      亮度 5 档 `0/8/22/36/50`、速度 5 档 `10/7/5/3/1`，关灯 `(1,0,0,0,0,0,0)`。
+      好处是不碰 EC、不碰内核驱动、天然可逆；但它是**新的写通道**，
+      得按 6.3 第 2 条重新走一遍「语义佐证 + 可逆 + 温度保险」，本轮没做
+- [ ] **本机 `GCUService.exe` 的解密**（能拿到我们自己的完整寄存器表，价值最高的一步）。
+      方法已抄在 6.11 第五节：内存转储而非静态破解 ConfuserEx，只 `ReadProcessMemory`，
+      不写目标进程、不发 IOCTL。**但需要管理员权限（SeDebugPrivilege），机主不在场就没跑。**
+      已知风险：他们只在 3.1.39.0 上成功过，别的 build 混淆强度不同；
+      成败以 `dotnet_bodies.py` 的 invalid 计数为准
+- [ ] 风扇曲线读写：**表布局已裁定**（见 6.10 末尾那张表，来源是厂商
+      `FanTable_Manager1p5.SetEcFanTable` 的解密源码，不再是两份资料打架）。
+      完整写序列是 `SetFanTableSetting` → `SetEcFanTable` 写
+      CPU `0x0F00+i`/`0x0F11+i`/`0x0F20+i` 与 GPU `0x0F30+j`/`0x0F41+j`/`0x0F50+j`，
+      Duty 存 `百分比×2`，外层用 `0x07C6` bit2 拉低/置高把整段括起来。
+      **`0x0741` 和 `0x07C5` bit7 都不在这个序列里**（后者是 CPU/GPU 分表开关，
+      默认 false、实测恒 0；本机却读 `0x80`，这点差异要留意）。
+      `0x0F5D-0x0F5F` 被「问 EC 要默认表」的信箱借用，不能当占空比槽写。
+      还缺的实测是「写单个 PWM 会不会被 EC 覆盖」——他们那边有旁证说
+      **单写 `0x0751` 不会让 EC 自动加载表或 PL**，方向上一致，但本机没测过，暂不写
+- [ ] `ADDR_MYFAN2_L1~L5_PWM` 与 `User_Fan_Level1~5(0x81~0x85)` 看着是一对，
+      全表观察也抓到按硬件模式时 `MYFAN2_L1/L4_PWM` 会跟着换（3↔7、5↔15）。
+      EC 侧真正吃「用户风扇模式」的是 **`0x0751` bit7(USER)**：bank1 `0x9432` 的
+      USER 臂按 bit7 在两张 CODE 表之间选，用 **`0x0627` 低半字节**做索引，
+      写 `0x0626`/`0x0627`/`0x0895`。这两个档位状态字节很可能就是早先
+      「激活链」传说里 `0x0726`/`0x0727` 的讹传来源
 - [ ] **同方 WMI 接口在不在本机**：查不到也否不掉——普通权限连微软自己的
       GUID 类都看不见（见 6.5）。需要用管理员权限跑一次 `tools\wmi_guid_probe.ps1`（只读）。
       优先级已经降低：GCUBridge 这条路通了之后，大部分功能都有 OEM 背书，不用赌 WMI。
@@ -798,10 +1022,19 @@ EC/ACPI 交互的设计思路参考社区项目 [OpenRevo](https://github.com/fa
 机械革命/同方（Uniwill）相关硬件行为来自本机实测与离线静态分析记录，
 不保证适用于其它模具；在其他机型上开启 EC 写入前，请先只做只读验证。
 
+6.11 那轮"完整复现"用到的主资料，价值远高于其它来源，因为它对的是**同一块代工板**
+（PROJECT_ID 同为 `0x0F`、PD 镜像逐字节相同、`ECSpec` 常量表 122/125 同名同址）：
+[ElDavoo/tongfang-gm7mg7p-re](https://github.com/ElDavoo/tongfang-gm7mg7p-re)。
+本仓库只**离线阅读**它的文档与反编译产物，未执行其中任何脚本，未再分发其内容。
+
 6.10 那轮交叉核对引用到的社区资料（均为第三方机型上的实测，本机只当线索用）：
-[Terabinaryte/uniwill-laptop-mr](https://github.com/Terabinaryte/uniwill-laptop-mr)（自定义模式激活链、PL、风扇表）、
+[Terabinaryte/uniwill-laptop-mr](https://github.com/Terabinaryte/uniwill-laptop-mr)（PL、风扇表；
+**它提出的"自定义模式激活链"已被 6.11 推翻**，引用时注意）、
 [roj234/mechrevo_ec_api](https://github.com/roj234/mechrevo_ec_api)（同法反射 GCUService 得到的寄存器表与 NVRAM 结构）、
 [losewayy/uniwill-ec-charge-limit](https://github.com/losewayy/uniwill-ec-charge-limit)（H2RAM 窗口模型、IOCTL 表、充电限制的坑）、
-[w568w 的无界 14XA 逆向记录](https://gist.github.com/w568w/b2fc5f9d1f4dff13efe751abec27b396)（`0x7A6` 三档编码、`\_SB.INOU.ECRR/ECRW`）、
+[w568w 的无界 14XA 逆向记录](https://gist.github.com/w568w/b2fc5f9d1f4dff13efe751abec27b396)（`0x7A6` 三档编码、`\_SB.INOU.ECRR/ECRW`；
+它那套充电百分比门控模型在**本板不在场**，判据见 6.11 第三节）、
 以及内核文档 [uniwill-laptop WMI device](https://docs.kernel.org/wmi/devices/uniwill-laptop.html)
-与 [CVE-2026-64143](https://security-tracker.debian.org/tracker/CVE-2026-64143)（6.3 第 8 条那条禁令的依据）。
+与 [CVE-2026-64143](https://nvd.nist.gov/vuln/detail/CVE-2026-64143)（6.3 第 8 条那条禁令的依据：
+*platform/x86: uniwill-laptop: Do not enable the charging limit even when forced*，
+原文即"on some older models (~2020) the battery charging limit can permanently damage the battery"）。
