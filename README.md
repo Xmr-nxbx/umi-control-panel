@@ -375,6 +375,7 @@ tools/                      逆向与验证工具，产物落 tools/out（已 gi
 | 电池电量、电池温度、循环次数 | **可用**（电量与系统 API 互相印证：100% = 100%，循环 83 次） |
 | 充电阈值 `ADDR_BATTERY_CHARGE_LIMIT_UP/DOWN` | **读到 0**：早先记过 80%/75%，现在两次实测都是 0 且无法复现。和 `ADDR_RGBKB_LEVEL_R`、`ADDR_MYFAN2_L1_PWM`、`ADDR_SINGLEKBL_ENABLE` 是同一类——**用户没设过就是 0**，所以「读到 0」不等于功能不可用，但也说明这些是 RAM 里的用户配置，写入语义没确认前一律不动 |
 | 各模式出厂 PL 默认值、TCC offset | **可用**（只读）：OEM 常量表里写着 35W / 60W / 75W 三档。但这三个数是**静态常量**，不代表本机当前在跑哪一档——实测硬件模式的 PL1 是 75W（性能）/ 10W（省电），10W 这个值在常量表里根本没有，所以别拿这张表当「当前档位」读 |
+| **TCC 偏移的「当前值」**（EC `0x0786`，不是上面那三个默认值） | **已接上只读，还没读到数**（2026-09-30 深夜加的，见 6.11 第十三节 ⑥）。这一字节 = `APTN`(bit7 使能) + `APTC`(bit0-6 偏移 °C)，进 60 秒低频组，面板状态里叫 `tcc_offset_enabled` / `tcc_offset_c`。**为什么要单独读它**：`0x07D8-0x07DA` 那三个默认值（本机 5/5/5）**只有使能位置起来才生效**，参考仓库实机抓取里这个字节**一直是 `0x00`**。所以"降频点 = TjMax−5 = 95 °C"是错的推论，别拿它去改跑分工具的温度保险 |
 | 机型标识 ProjectID=15、ModuleID=54 | **可用** |
 | 硬件模式写入（自适应 / 性能 / 省电 / 风扇加速） | **可用**，需 `allow_write=true`。写的就是实体键那个字节，取值只允许 OEM 枚举 `MyFanCTLByteFlag` 里的名字，写完立刻回读校验 |
 | 造物者模式按键字节 `ADDR_MAFAN_CONTROL_BYTE` | **已确认，而且它就是硬件模式总开关**：2026-09-30 全表差分抓到，按一次键这个字节 `Turbo_Mode(0x10) ↔ User_Fan_HiMode(0xA0)` 的同时，`PL1_SETTING_VALUE` 75↔10、`MYFAN2_L1/L4_PWM`、`L2_PWM_DEFAULT_MYFAN3`、`DynamicBoost_MaxinumTGP`、`ConfigurableTGP_DynamicBoost_CTRL_BYTE` 整组跟着换。LED 对应关系由机主现场确认：**全亮=性能、半亮=自适应、不亮=省电** |
@@ -418,6 +419,15 @@ tools/                      逆向与验证工具，产物落 tools/out（已 gi
      DSDT 的 `T1WR 0x1173` 分支会把 GPU 功率 `Arg1*8` 写进**同一个物理字节**，
      和充电百分比的刻度直接冲突（55% = `0x37`，TGP 最大 = `0xF8`）。
      必须先读回确认当前是谁在用，才谈得上写。
+     **这个字节叫什么，现在三方对齐了**（2026-09-30 深夜，见 6.11 十二 ③④）：
+     本机 DSDT 的 `ECMG` 字段表把它命名为 **`DBD1`**（GPU Dynamic Boost），
+     参考仓库标它 `DO-NOT-WRITE-BLIND`，本机 ROM 里的 `T1WR 0x1173` 分支明写着往它写。
+     **常量表里那个 `ADDR_BATTERY_CHARGE_LIMIT_DOWN` 是过期名字，别照着它当充电下限用。**
+   - 顺带一条**同族警告**，不是禁区但必须知道：`T1WR 0x81/0x82/0x84` 写的是
+     `EC0_.APL1/APL2/APL4` = EC `0x0783/0x0784/0x0785`，也就是我们的
+     `ADDR_PL1/PL2/PL4_SETTING_VALUE`。**DSDT/DPTF 那条路本身就是 PL 字节的活跃写者**，
+     我们写进去的 PL 随时可能被 ACPI 侧覆盖。待办 #27 在验证通过前不进白名单，
+     这是主要理由之一。
 
 ### 6.4 造物者模式按键三态实测（2026-09-29 测，2026-09-30 补上原因）
 
@@ -719,14 +729,21 @@ DSDT / EC 转储在公网上不存在**（GitHub 搜 `GM5MG0Y` 零结果），BI
 借去当信箱了（写 `0x0F5F`=模式、`0x0F5D=0xFD`、`0x0F5E=0xC9`，然后 500 ms 轮询），
 所以最后三格占空比槽**不能当普通数据写**——这一点第二份资料说对了。
 
-### 6.11 完整复现 GM7MG7P 的逆向资料：对上了身份，也推翻了我们两条结论（2026-09-30）
+### 6.11 完整复现 GM7MG7P 的逆向资料：对上了身份，也推翻了我们三条结论（2026-09-30）
 
 机主找到 [`ElDavoo/tongfang-gm7mg7p-re`](https://github.com/ElDavoo/tongfang-gm7mg7p-re)
 （泰坦 X8 Pro / GM7MG7P，i7-10875H + RTX 3070，同方代工），说"很有价值，如果可以，
 完整复现吧"，并明确"不要刷固件，我是想你或许能逆向"。于是把它整份拉下来只做离线阅读
 （7906 个文件：EC 侧 2710 个反编译函数、45481/45624 条指令通过重新汇编校验，
 Windows 侧 375 个解密后的 C# 文件），**没有执行仓库里任何脚本、没有反汇编、
-没有碰机器**。结论分四块。
+没有碰机器**。
+
+结论最初分四块（一到四），之后同一轮里又追加到十三块：五是两件**没做**的事，
+六是当场只读复核，七是一处未解释的新观察，八是把本机活着的风扇表转储出来，
+九到十一是客服 ROM 那条线（固件卷、五份 EC 镜像、字节模式法失败），
+**十二和十三是最有价值的两块**——十二从本机 DSDT 里挖出了厂商命名的 EC 寄存器全表
+（并**推翻了我们自己一条阴性结论**，标题里"三条"的第三条就是它），
+十三是参考仓库 `registers.yaml` 对六个悬案的回答，其中一个直接改掉了代码。
 
 #### 一、身份对上了，而且不是"近亲"，是同一份代码基
 
@@ -1340,12 +1357,30 @@ ROM 头部那份（也就是 GM7MG0M 自己的）温度点是**另一组**
 **结论：在 x64 固件上，不真反汇编就分不出 imm32 和 disp32。** 所以那个"便宜的前置判据"
 不是"跑出来是阴性"，而是**根本跑不出结论**。
 
-**② 抽出来的 PE32 里没有字符串，连符号锚点都没有。**
+**② 抽出来的 PE32 里没有字符串，连符号锚点都没有。** ← **这条写错了，2026-09-30 深夜更正**
 
-25 个模块的可见字符串一共只有 `.data` / `.xdata` / 几段序言字节——
-第九节那套命令面帮助文本**不在这些文件里**（在别的段或 UNI 字符串包里，
-`rom_fv_dump.py` 没导出）。也就是说：既没有反汇编器，也没有字符串能拿来对齐，
-就算硬解出来也读不出"这个位叫什么"。
+当时只看了**我们自己**用 `rom_fv_dump.py` 抽出来的那 25 个 PE32：可见字符串一共只有
+`.data` / `.xdata` / 几段序言字节，第九节那套命令面帮助文本不在这些文件里。
+"我们抽出来的那份没有锚点"是真的；**"没有锚点"是假的**——
+锚点在参考仓库里现成放着，我当时没去翻：
+
+| 参考仓库里有什么 | 规模 |
+| --- | --- |
+| `bios/decompiled/*.c` + 配套 `*.asm` | **77 个文件**，Ghidra 反编译的 C，覆盖 `OemGlobalNvsDxe` / `OemApControlDxe` / `OemHooks` / `OemKbLightDxe` / `OemUsbLightBarDxe` / `OemQkeyDxe` / `OemPowerModeDxe` / `OemOcDxe` / `Setup` / `DxeOverClock` …… |
+| `bios/ifr/Setup.en-US.ifr.txt` | **2.47 MB** 的 IFR 转储：每个 Setup 问题的 question id、英文提示词、varstore 偏移 |
+| `bios/decompiled/OemOcDxe.annotated.c` | 厂商无关的**人工标注版**，而且当场演示了怎么用上面两样："`Setup[0x7D7]` is question `0xEC6` in the IFR" |
+
+也就是说：**既不需要装反汇编器，也不需要拿字符串对齐**——C 和 IFR 都有，
+把 Setup 变量里某个字节偏移翻译成"这个位叫什么"的技术，参考仓库自己就跑通了一遍。
+
+**那 #35 为什么还是关着？** 因为 `grep -i apctrl` 在那份 2.47 MB 的 IFR 里**零命中**：
+APCtrl 根本不是 Setup 表单里的一个问题，它是 `OemApControlDxe` 自己那块存储。
+所以锚点技术对 APCtrl 这一项**不适用**，不是"我没找到工具"，是"工具在这儿没有靶子"。
+（顺带一个反面发现，记在这里以免以后有人照着做：`OemApControlDxe.c` 里读的是
+`DAT_ff430004`…`DAT_ff43000a` 这类 **PCH MMIO**，写的是 `0x65/0x66/0x6d/0x6e` 这种小索引，
+**不像**是 UEFI 变量。我原来给 #35 写的第三条理由"它存在 UEFI 变量里，所以 8(b) 永久禁止"
+因此**没有我写的那么确定**。#35 仍然关着，但靠的是第一条理由——判据跑不出结论——
+以及"重开它就得去碰 `0xFF430000` 的裸 MMIO，那是 6.3 第 1 条管的地方"。）
 
 **③ 但撞见一个真的：`0x07D8` 作为函数实参出现在两个模块里。**
 
@@ -1366,6 +1401,40 @@ ROM 头部那份（也就是 GM7MG0M 自己的）温度点是**另一组**
 跟 EC 一点关系没有——注意这两处都在 `OemGlobalNvsDxe` 里，(乙) 一点都不牵强。
 分清要反汇编 + 认协议 GUID，两样都没有。**所以只记"有这么个巧合"，不写进结论。**
 
+**③-补 分清了，而且(甲)(乙)都不对——它是 `sizeof(SETUP_DATA)`。（2026-09-30 深夜）**
+
+按 ② 的更正去读参考仓库的反编译 C，三处证据同向，不需要推：
+
+1. **参考仓库自己标注了。** `bios/decompiled/OemOcDxe.annotated.c` 开头写着
+   "CpuSetup (0x2BB bytes) and **Setup (0x7D8 bytes)**: `bios/ifr/Setup.en-US.ifr.txt`"，
+   正文里写着 `SETUP_DATA Setup; /* 0x7D8, gSetupGuid ec87d643-... */`。
+2. **GUID 对得上。** `OemGlobalNvsDxe.c:292-295` 就在 `0x7d8` 上面四行拼出
+   `ec87d643 / 4bb5eba4 / 3e3fe5a1 / a90db236`——正是那个 `gSetupGuid`。
+3. **调用形态对得上，而且是标准写法。** `OemGlobalNvsDxe.c:355` 是
+   `table[?](u_Setup, &guid, 0, &local_60, lVar2)`，五参数，第四个是**传进去又被改写**的
+   `local_60`（299 行刚赋成 `0x7d8`），紧接着 356 行判
+   `lVar3 == -0x7ffffffffffffffb` = **`EFI_BUFFER_TOO_SMALL`**，
+   然后 360 行 `FUN_00000d60(local_60)` 按真实大小重新 `AllocatePool`、362 行重试。
+   这就是 UEFI 里"先拿一次尺寸、再分配、再取一次"的教科书写法，
+   `0x7d8` 站在 **DataSize** 那个位置上。
+
+`0x7d8` 作为尺寸出现在 **11 个模块**里（`Setup` / `OemHooks` / `OemHooksPei` /
+`OemOcDxe` / `OemKbLightDxe` / `OemUsbLightBarDxe` / `OemDisplayModeDxe` /
+`OemNetworkDxe` / `OemPowerModeDxe` / `OemQkeyDxe` / `DxeOverClock`），形态一致。
+我表格里那四行也就有了准确说法：`mov r9d, 0x7d8` 那个"**第 4 个实参**"，
+第 4 个实参就是 `GetVariable` 的 `DataSize`。
+
+**结论：紧判据那 4 处"真命中"，真命中数是 0。** 字节模式法在 x64 固件上
+不但分不出 imm32 和 disp32，连**唯一那组看着像 EC 地址的立即数**也是结构体尺寸。
+这条路的阴性结果比我原来写的更干净——原来我还留了个"万一(甲)呢"的尾巴，现在没有了。
+
+顺带一个**不能当收益用**的副产品：`OemGlobalNvsDxe.c:369-371` 把
+`Setup[0x744] / Setup[0x745] / Setup[0x4A0]` 三个字节拷进它发布的 GlobalNvs，
+`FUN_000004b8` 则以 `EfiACPIMemoryNVS` 分配 **0x112 = 274 字节**。
+所以那块 NVS 是 274 字节，`0x7d8` 连"(乙) NVS 区里的偏移"都不是——
+它就是 Setup 变量的长度。这三个偏移各自是什么问题，IFR 里有答案，
+但 6.3 第 8 条(b) **永久禁止读写任何 UEFI 变量**，所以只记形状，不去查名字。
+
 **④ `OemApControlDxe` 里一处真 EC 立即数都没有**：它在第二层过滤下命中的 5 处
 全是 `48 8b 05 xx 07 00 00` 形态，即 RIP 相对取自己模块的全局变量。
 这本身也不能当证据（地址可能来自 `.data` 里的表、或者是算出来的），
@@ -1375,9 +1444,331 @@ APCtrl 存在 UEFI 变量里，6.3 第 8 条(b) 永久禁止读写任何 UEFI �
 唯一可能的收益（"那个 WORD 也许是 EC `SUPPORT_BYTE` 家族 `0x078A-0x078F` 的另一个视图"）
 现在也有了反面线索：紧判据下没有任何模块引用 `0x078A-0x078F`。
 
+**④-补 三条理由的当前状态（2026-09-30 深夜按 ②/③-补 复核后）：**
+
+| 原来的理由 | 现在 |
+| --- | --- |
+| ① 判据跑不出结论（imm32 与 disp32 在字节层面同形） | **成立**，一字不改。这是 #35 关着的**唯一硬理由**。 |
+| ② 没有符号锚点 | **半错**。锚点有（77 个反编译 C + 2.47 MB IFR），但对 APCtrl 无靶：IFR 里 `grep -i apctrl` 零命中。改成"锚点技术在这一项上没有对象"。 |
+| ③ 解出来也用不上（APCtrl 在 UEFI 变量里 → 8(b)） | **不确定**。`OemApControlDxe.c` 读的是 `0xFF430004-0x0A` 的 PCH MMIO，不像 UEFI 变量。**不要再拿 8(b) 当这一条的依据。** |
+
+所以 #35 的关闭理由从三条收缩成一条半：判据跑不出结论（硬），
+加上"重开就得碰 `0xFF430000` 的裸 MMIO，那是第 1 条管的"（也够硬，但和原来写的不是一回事）。
+**③-补 那个副产品反而把它钉得更死**：连唯一一组像 EC 地址的立即数都是结构体尺寸，
+说明这个模块压根不在 EC 地址空间里办事。
+`0x078A-0x078F` 没有任何模块引用这一条**继续成立**，未受影响。
+
 **⑤ 没做的事**：没装反汇编器（没有 pip，也犯不上为一条用不上的知识引入新依赖）、
 没执行任何模块代码、没写 EC、没碰 UEFI 变量。扫描脚本 `tools/out/apctrl_ec_imm.py`
 留在 gitignore 里作记录——**它给出的那 285/77 两个数字是错的，别再用**。
+
+**⑤-补**：更正 ②③④ 时**也没做**上面任何一件——只读了参考仓库已经提交好的
+`.c` / `.ifr.txt` 文本，没跑 Ghidra、没装依赖、没读 `Setup` 变量本身、
+没碰 `0xFF430000`。
+
+#### 十二、**更正一条自己的阴性结论**：本机 DSDT 里有厂商命名的 EC 寄存器全表（`ECMG`，98 个字段）（2026-09-30 深夜）
+
+**先说错的那条。** 我早前在 DSDT 上扫过一遍 OperationRegion，结论是：
+
+> "这份 DSDT 的 EC 是邮箱式的（`CMDL`/`CMDH`/`DRDY`/`LDAT`/`HDAT` 那一套），
+> 不是命名字段表；ACPI 侧没有名字可挖。"
+
+**这是错的，而且错得很具体：我把 `opregions()` 的结果按 `space == 3` 过滤了。**
+`space == 3` 是 `EmbeddedControl`。厂商把命名寄存器表放在一个
+**`SystemMemory`** 区域里（`space == 0`），于是被我的过滤器整块丢掉，
+剩下的就只有那三个 EmbeddedControl 区——看上去当然"只有邮箱"。
+
+**实际有三个 EC 视图，不是一个。** DSDT 是 `tools/out/dsdt_mro06.aml`，
+248,178 字节（去掉 36 字节 ACPI 头后 AML 体 248,142 字节），
+里面有 **1580 个 MethodOp、635 个 Scope、214 个 Device、195 个 OperationRegion**。
+挂在设备 `EC0_` 下面的 EC 相关区域是：
+
+| 区域 | AML 偏移 | 空间 | 基址/长度 | 内容 |
+| --- | --- | --- | --- | --- |
+| **`ECMG`** | `0x03B1EF` | **SystemMemory** | `0xFE410000`, `0x10000` | **1 个 Field、flags `0x00`、98 个命名字段，偏移就是厂商 EC 扩展地址 `0x043E`…`0x0ECF`** |
+| `ECMP` | `0x03B445` | EmbeddedControl | `0`, `255` | 标准 EC 空间 `0x00-0xFF`，1 个字段 |
+| `ECXP` | `0x03B45F` | EmbeddedControl | `0`, `255` | 标准 EC 空间 `0x00-0xFF`，94 个字段 |
+
+**`ECMG` 就是我们要找的东西：厂商自己在 ACPI 里给出的 EC 寄存器命名表。**
+98 个字段里，**18 个落在本机 Creator Center 常量表也有的地址上，80 个是我们此前完全没有名字的**。
+
+**① 那 18 个重合地址——这是让另外 80 个可用的理由。**
+
+单看一份**别的机型**的 DSDT，字段名不能直接搬。但重合的这 18 个是**本机自己的常量表**
+和它逐字节对上的，对上的地方语义一致，所以对不上的那 80 个才有资格按"同源、参考级"采信：
+
+| EC 地址 | AML 字段名（位宽） | 本机常量表里的名字 |
+| --- | --- | --- |
+| `0x0743` | `GNEN`(1) + `ECDC`(1) | `ADDR_ConfigurableTGP_DynamicBoost_CTRL_BYTE`、`ADDR_MYFAN2_L1_PWM` |
+| `0x0744` | `CTVA`(8) | `ADDR_ConfigurableTGP_VALUE`、`ADDR_MYFAN2_L2_PWM` |
+| `0x0745` | `DBCT`(8) | `ADDR_DynamicBoost_TotalProcessingPowerTarget_VALUE`、`ADDR_MYFAN2_L3_PWM` |
+| `0x0746` | `MXDB`(8) | `ADDR_DynamicBoost_MaxinumTGP_VALUE`、`ADDR_MYFAN2_L4_PWM` |
+| `0x0747` | `MIDB`(8) | `ADDR_MYFAN2_L5_PWM` |
+| `0x074C` | `PDIN`(4) | `ADDR_OEMSERVICE_PROJECT_ID_BYTE` |
+| `0x0783` | `APL1`(8) | `ADDR_PL1_SETTING_VALUE` |
+| `0x0784` | `APL2`(8) | `ADDR_PL2_SETTING_VALUE` |
+| `0x0785` | `APL4`(8) | `ADDR_PL4_SETTING_VALUE` |
+| **`0x0786`** | **`APTC`(7) + `APTN`(1)** | `ADDR_L1_PWM_DEFAULT_MYFAN3` ← **冲突，见 ③** |
+| `0x0788` | `CTWA`(8) | `ADDR_L3_PWM_DEFAULT_MYFAN3` |
+| `0x07A4` | `GC6S`(1) | `ADDR_AP_BIOS_BYTE` |
+| `0x07C5` | `WHMS`(1) | `ADDR_AP_OEM_BYTE5` |
+| `0x07C6` | `WMS0`(2) | `ADDR_AP_OEM_BYTE6` |
+| **`0x07D0`** | **`DBD1`(8)** | `ADDR_BATTERY_CHARGE_LIMIT_DOWN` ← **冲突，见 ③** |
+| `0x07D3` | `GFID`(3) | `ADDR_ModuleID` |
+
+**② 新的那 80 个地址里，最有用的一批**（全部**参考级、未在本机验证**）：
+
+- **温度传感器**：`CPUT`(0x0E0D CPU)、`PCHT`(0x0E0E PCH)、`SN1T`…`SN5T`
+  (0x0E10/0x0E12/0x0E14/0x0E16/0x0E18)。**七个温度点的地址，一次到位。**
+- **风扇**：`FFAN`(0x0460, 4bit)、`SDAN`(0x0468, 4bit)、`F1SH`/`F1SL`(0x0E1C/0x0E1D，
+  风扇 1 转速高/低字节)、`F1DC`(7bit)+`F1CM`(1bit)@0x0E8C、`F2DC`(7bit)+`F2CM`(1bit)@0x0E9D。
+  后两个是"7 位占空比 + 1 位模式"的复合字节，是 #31 手动占空比的候选靶。
+- **GPU 功率家族**：`PMAX`(0x07B3, 16bit)、`PBSS`(0x07B5, 16bit)、`PSRC`(0x07B7)、
+  `VBNL`(0x07BA, 16bit)、`RBHF`(0x07BC, 16bit)、`CMPP`(0x07BE, 16bit)、
+  `DBEN`(1)+`DBST`(1)@0x07C4、`DBD1`(0x07D0)、`DBD2`(0x07D1)、`DBAP`(0x07D5)、
+  `DBSP`(0x07D6)、`CPUA`(0x07D4)、`CGCT`(0x07D7)。
+- **MyFanCCI 那一组**：`CCI0-CCI3`(0x0EA4-0x0EA7)、`CTL0-CTL7`(0x0EA8-0x0EAF)、
+  `MGI0-MGIF`(0x0EB0-0x0EBF)、`MGO0-MGOF`(0x0EC0-0x0ECF)。
+- 其余：`CPTM`(0x043E)、`VGAT`(0x044F)、`DTTF`(0x07B8)、`AP01`/`AP02`/`AP10`
+  (0x07C0/0x07C1/0x07C2)、`UVER`(0x0EA0, 16bit)、`RESV`(0x0EA2, 16bit)。
+
+⚠️ **`0x07B8 = DTTF` 是真的 ECMG 字段**，和第十一节 ① 里那个
+"`48 b8 07 00 00 00 00 00 00 00` 是 `movabs rax,7`、被误当成地址 `0x07B8`"的
+**对齐假象毫无关系**。那个假象的结论不变，但从此不许拿 `DTTF` 去给它翻案。
+
+**③ 三个长期命名冲突，就此定案。** 判据是**优先采信互相印证的一对来源**：
+DSDT 字段名 + 厂商 Windows 服务的行为，压过 ECSpec 里 MyFan 世代的旧名字
+（旧名字在同一段地址上已经被证明过期——`0x0743-0x0747` 被 ECSpec 叫
+`MYFAN2_L1~L5_PWM`，被 DSDT 叫 Configurable TGP / Dynamic Boost 那一组）。
+
+1. **`0x0786` = TCC 偏移**，不是 `ADDR_L1_PWM_DEFAULT_MYFAN3`。
+   DSDT 拆成 `APTC`(bit0-6, 偏移 °C) + `APTN`(bit7, 使能)；厂商服务的
+   `SetCpuTccOffset` 也按这个语义写（使能写 `offset|0x80`，不使能写 `0`）。详见第十三节。
+2. **`0x0743-0x0747` = Configurable TGP / Dynamic Boost**，不是 `MYFAN2_L1~L5_PWM`。
+3. **`0x07D0` = `DBD1`，GPU Dynamic Boost 的字节**，不是 `ADDR_BATTERY_CHARGE_LIMIT_DOWN`。
+   **这正是 6.3 第 8 条(d) 禁止写它的原因**，现在从"参考仓库标了
+   `DO-NOT-WRITE-BLIND`"升级成"我们知道它是谁在写、写什么"。
+
+**④ `T1WR`：从我们自己的 ROM 里解出来的命令分发器，它把 8(d) 钉死了。**
+
+`T1WR` 是本机 DSDT 里的一个 Method，881 字节，20 个比较分支。命令号集合：
+`0x81 0x82 0x83 0x84 0x85 0x86 0x87 0x1171 0x1172 0x1173 0x2273 0x1175 0x1176`
+（扫描器另外报了 `0x71/0x73/0x74/0x75/0x76/0x61`，**当扫描假象处理，不采信**）。
+`0x83` 的分支体是**空的**——显式 no-op。手工解出来的两条：
+
+```
+T1WR(0x1171, Arg1):
+    NPCFCTGP = 1; Local0 = 0; EC0_.CTWA = Arg1;
+    Local0 = CTWA * 8; NPCFUOCT = Local0; Notify(NPCF, 0xC0)
+
+T1WR(0x1173, Arg1, Arg2):
+    NPCFDBAC = 0; Local0 = 0; Local1 = 0;
+    Local0 = Arg1 * 8; Local1 = Arg2 * 8;
+    EC0_.DBD1 = Local0; EC0_.DBD2 = Local1;
+    NPCFAMAT = Local0; NPCFAMIT = Local1; Notify(NPCF, 0xC0)
+```
+
+`CTWA` = `0x0788`，`DBD1` = **`0x07D0`**，`DBD2` = `0x07D1`。所以
+**`T1WR 0x1173` 把 GPU 功率 `Arg1*8` 写进 `0x07D0`**——三个独立来源现在同向：
+参考仓库的 `DO-NOT-WRITE-BLIND` 标注、我们自己的全表差分、以及**本机 ROM 里的这段 AML**。
+
+**⑤ #27 的踩雷路径有名有姓了。** `T1WR 0x81/0x82/0x84` 写的是
+`EC0_.APL1/APL2/APL4` = EC **`0x0783/0x0784/0x0785`** =
+本机常量表的 `ADDR_PL1/PL2/PL4_SETTING_VALUE`。
+**也就是说 DSDT/DPTF 那条路本身就是 PL 字节的活跃写者**：
+我们写进去的 PL 随时可能被 ACPI 侧覆盖。这不是"可能"，是 ROM 里明写着的三条分支。
+#27 在验证通过之前不许进白名单，这一条是它的主要理由之一。
+
+**顺带冒出一个新假设，明确标成假设，别当结论用。** 6.2 表里那条老观察是：
+"写 `ADDR_PL1_SETTING_VALUE=35`，回读为 35，但**1 秒内自清 0**"，
+当时归因于"`0x783-0x785` 是 MyFan3 一代机型的落点，本机是 CML 平台，写了不认"。
+第二节又把 EC 侧的解释排掉了（EC 主镜像里这三个字节各只有 1 个写点，且被 `0x0741` bit0
+门控，本机 bit0=1，那条分支不该跑）。
+**现在多了第三个候选写者：DSDT。** 如果那次自清是 ACPI/DPTF 侧干的，
+"平台不认这组地址"这个说法就未必成立——回读能读到 35，本身就说明地址是通的。
+**为什么不顺着查下去**：分辨三者要再做一次受控写入并同步抓 DPTF 事件，
+那是 6.3 第 2 条管的硬件写入，得机主在场；而且它不改变任何现有行为——
+不管自清是谁干的，结论都是"**别裸写 PL**"。所以只记假设，不排期。
+
+**⑥ 顺手否掉两件事。**
+
+- **`ECRR`/`ECRW` 不是命令邮箱，是 MMIO 别名。**
+  `ECRR(Arg0)` = `Add(0xFE410000, Arg0, Local0); Local1 = \_SB.PCI0.LPCB.MMRW; Return(Local1)`；
+  `ECRW(Arg0, Arg1)` = `Store(MMRW, Local0); Local1 = Arg0; Store(Arg1, Local0)`。
+  两者都在 `ECMG` 那个 `0xFE410000` 窗口上算地址。`INOU` 和 `FAN` 是 **Name 不是 Method**
+  （方法命中数都是 0）。
+- **DSDT 里那 4 处 `0x07D8` 形态的地址立即数，一个都不是 EC 地址。**
+  全部是 `Store(0x07D9, OSYS)`（紧跟 ASCII `"2009\0"`）、`SPPS` 里的 `Stall(100)` 计时常量、
+  `BRTN` 里一个叫 `"DIDX"` 的缓冲、以及 `SX` 里一段无关常量。
+  按概率算本来就该这样：540 个常量 / 123 个不同取值落在 `0x0100-0x1FFF`，
+  撞上 1.6 个是期望值。**别把这 4 处当证据用。**
+
+**⑦ ⚠️ 地址空间撞车，写代码前必看。**
+
+| 写法 | 是什么 | 能不能碰 |
+| --- | --- | --- |
+| EC 标准空间字节 **`0x7B`**（`ECMP` 里叫 `DEVS`） | 标准 ACPI EC 的第 123 字节 | 只读 |
+| EC 扩展空间 **`0x07B0`** | 完全不同的地址 | — |
+| EC 扩展空间 **`0x0770`** | **充电门控字节** | **永久禁止，6.3 第 8 条(a)** |
+| EC 标准空间 `0x7B` 在 `ECMP` 里的样子 | `ReservedField 984 bits`（=123 字节）后跟 `DEVS 8 bits` | — |
+
+三个数字长得像，落在**两个不同的地址空间**里，其中一个是永久禁区。
+`ECMP`+`ECXP` 合起来给标准空间 `0x00-0xFF` 命名了 **95 个字段**
+（`XIF0-XIFC`、`XST0-3`、`BLLV`、`XHPP`、`TCOS`@0x63、`TURB`@0x66、
+`PL1L`@0x6A、`PL2L`@0x6B、`PL3L`@0x6E、`PL4L`@0x6F、`BRTS`@0x79、
+`TOPD/WUSB/FGPT/WEBC/BLTH/DV3G/WLAN` **七个名字全挤在 0x7B**、
+`LDAT`@0x8A、`HDAT`@0x8B、`RFLG/WFLG/BFLG/CFLG/DRDY`@0x8C、`CMDL`@0x8D、`CMDH`@0x8E、
+`CYCN`、`BIF0-BIFC`、`BST0-3`、`ACIN/BTIN` ……）。
+**`0x7B` 一个字节挂了七个名字**，这件事本身就说明标准空间的位定义有多挤，
+动它之前必须逐位确认，不能按名字猜。
+
+**⑧ 解码规则（这次是内部自洽推出来的，不是背的，记下来免得下次重推）。**
+
+- `PkgLength` **把自己那几个长度字节算进去**，并且**不含 Else 分支**。
+  在 `T1WR` 里验了三次：`If`@0x1F（pkglen `0x1b`=27）正好结束在 0x3B（`a1` 所在处）；
+  `If`@0x3E（pkglen 5）正好结束在 0x44；`If`@0xB6（pkglen `4b 05` → `0x5B`=91）
+  正好结束在 0x112。
+- **`0x93` = `LEqual`**。证据是 `a0 05 93 68 0a 83 a1 4c 32` 这一串：
+  **空的 then 分支**只有解释成 `If (Arg0 == 0x83) { /* 什么都不做 */ } Else { 后面整条链 }`
+  才讲得通；按 `LNotEqual` 读，分支会整个反过来、变成不通的东西。
+  这和 ④ 里 `0x83` 那条空分支是同一件事的两种看法。
+- **`0x86` = `NotifyOp`**，两处独立印证：`Notify(NPCF, 0xC0)` 和
+  `Notify(\_SB.PCI0.PEG0.PEGP, 0xC0)`——正是 NVIDIA 混合显卡那两条标准通知。
+- `77 <op1> <op2> 00` = `Multiply(A,B)` 带 ZeroOp 目标，外面套 `70 … <target>` =
+  `Store(Multiply(A,B), X)`。`Arg0-Arg6` = `0x68-0x6E`，`Local0-Local7` = `0x60-0x67`。
+
+**⑨ 没做的事**：没执行任何 AML、没调用 `ECRR`/`ECRW`、没读写
+`0xFE410000` 那个窗口、没碰 EC、没刷任何东西。
+上面全部是对 `tools/out/dsdt_mro06.aml` 这个**已经躺在 gitignore 里的文件**做静态解码，
+解码脚本（`dsdt_ecmg.py`、`dsdt_ecmg_xref.py`、`dsdt_ec_mailbox.py`、`dsdt_ec_ctx.py`、
+`dsdt_ec_fields.py`、`dsdt_ec_addr.py`）按"ROM 衍生物不进仓库"的既有规矩留在 `tools/out/`。
+
+#### 十三、参考仓库的 `registers.yaml` 回答了六个悬案，其中一个改掉了代码（2026-09-30 深夜）
+
+第十二节的 `ECMG` 是**从本机 ROM 里挖出来的名字**；这一节是**别人在同一款 EC 上
+做过实机验证的结果**，来源是 `ec/annotations/registers.yaml`（4827 行、160 条目、192 个地址）
+及其配套注解。**两者都只读，都没跑硬件。**
+
+**① `0x0751` 的编码：三方对齐，#25 的语义部分可以定了。**
+
+`0x0751 = MANUAL_FAN_CTRL`。厂商 `MyFanManager_RamFan1p5.SetFanMode` 写的常量是
+**Office `0xA0`、Gaming `0x00`、Turbo `0x10`**，外加 Fan Boost 开时置 **bit6**。
+上游 `uniwill-laptop` 给的位名：`FAN_MODE_TURBO` bit4、`FAN_MODE_HIGH` bit5、
+`FAN_MODE_BOOST` bit6、`FAN_MODE_USER` bit7，bit0-2 是风速档位；Office = USER|HIGH = `0xA0`。
+**他们 2026-09-23 用六次 Fn 键切档做过实机验证。**
+
+对上我们自己的三处观察，**三方一致**：
+
+| 来源 | 结论 |
+| --- | --- |
+| 本机 `ec_gpd.py` 里的既有注释 | "全亮 Turbo_Mode(0x10) ↔ 不亮 User_Fan_HiMode(0xA0)，半亮 Normal_Mode(0x00)"，且 `PL1_SETTING_VALUE 75↔10` |
+| 参考仓库 Fn 键实机抓包 | Office `0xA0` / Gaming `0x00` / Turbo `0x10` |
+| 厂商服务 `SetFanMode` 常量 | 同上，另有 bit6 = Fan Boost |
+
+`_derive` 里那句 `fan_boost = bool(ctl & 0x40)` 正好就是 bit6，早就写对了。
+
+**② 但"写这个字节就能切档"是假的——他们的隔离实验证明了这点，和我们第二节的结论撞在一起。**
+
+他们**只写 `0x0751`**，然后看：`0x0783-0x0787` 没动、`0x07C5/0x07C6` 没动、
+`0x0743-0x0746` 没动、风扇表 `0x0F00-0x0F5F` 没动，那次写入静悄悄地留在那儿，什么都没发生。
+他们的原话是：**"所以一个 Linux platform profile 必须自己把 PL 和风扇表都写一遍，
+从 EC 的默认块里取；光写 `0x0751` 不行。"**
+
+**这独立印证了本节第二条（"EC 根本不会替你设 PL"）**，而且解释了第七节那个
+"新观察"：我们按实体键时看到 PL 跟着变，**不是 EC 干的，是 Windows 服务干的**。
+
+**③ `0x075B/0x075C` 是"公布出来的占空比"，不是控制口——#31 别再往那儿写。**
+
+`MAIN_FAN_L_DUTY` / `MAIN_FAN_R_DUTY`。注解里明写着
+"**do not write this expecting the fan to turn**"。占空比换算是 **值 × 2，`0xC8`(200) = 100 %**：
+`FanInfo.GetEcCpuFanDuty` 返回 `Data / 2`，EC 固件自己的上限就是存在 `0xBB22` 的那个 `0xC8` 字面量。
+
+**本机实测数据正好验算通过**：`/api/hardware` 读到 `R_DUTY = 60` → 30 %，在 ×2 约定下合理。
+
+**④ 转速计有两个位置，冲突未解，谁都不许挑一个用。**
+
+- 厂商 Windows 服务：`GetEcCpuFanRpm` 读 **`0x0464/0x0465`**，`GetEcGpuFanRpm` 读 **`0x046C/0x046B`**。
+- 本机 DSDT 的 `ECMG`：风扇 1 转速叫 **`F1SH`/`F1SL` @ `0x0E1C/0x0E1D`**。
+
+**两套地址，都出自厂商自己的东西。** 我们代码现在读的是常量表给的
+`ADDR_EC_MAIN_FAN_RPM_BYTE1/2`。**这个冲突记在案，不解，不猜。**
+
+顺带把**字节序**用本机数据钉死了：`ec_raw` 里第二风扇读到 `BYTE1=8, BYTE2=15`，
+高字节在前 = `0x080F` = **2063 RPM**（合理）；反过来是 33033（不可能）。
+`ec_gpd.py` 里那段"字节序是实测定的"注释，因此又多了一条独立证据。
+
+**⑤ `MODE_PL_DEFAULTS`：三个档的 PL 默认块，而且第四个字节确实会被写。**
+
+Gaming `0x0730-0x0733`、Office `0x0734-0x0737`、**Turbo `0x07A7-0x07AA`**
+（"ECSpec 把最后这块叫 BATTERYSAVER，3.1.39.0 的风扇管理器按 Turbo 读它"）。
+他们实机读到 `3C 3C A5 01` / `23 23 A5 01` / `4B 4B A5 01`。
+仓库里有一条**已提交的更正**说：每块第四个字节（D-state 那个）**是被写的**——
+EC 侧 18 处引用**全是 store**，走 `copy_code_table_into_0730_07a7`（`bank0/94D0.asm`）。
+
+**本机数据站在"Turbo"这一边**：我们实机读到 Turbo 档 `PL1 = 75`，
+而 `ADDR_BATTERYSAVER_PL1_DEFAULT_VALUE = 75`——对上了 `0x07A7` 那块。
+反过来，`0xA0` 档读到 `PL1 = 10`，**和三个默认块（35 / 60 / 75）哪个都不匹配**，
+说明服务是从某个 profile 槽位写的，不是从 EC 默认块读的。
+
+**⑥ `0x0786`：TCC 偏移的单位是 °C，而且它有个使能位——这一条改掉了代码。**
+
+先说单位（#36 问的就是这个）：`MODE_TCC_OFFSET_DEFAULTS` = `0x07D8/0x07D9/0x07DA`，
+注解写明是 "**CPU TCC offset defaults (degrees C)**"，他们 2026-09-23 实机读到 `05 05 05`，
+和每个 UserPofiles 槽里的 TccOffset 5 一致。**本机 `ec_raw` 也读到 5/5/5，一模一样。**
+EC 侧的播种程序是 `bank0,0x9334,seed_tcc_defaults_from_ba36`。
+
+**但"默认 5 °C ⇒ 降频点 = TjMax-5 = 95 °C"这个推论是错的**，因为
+`CPU_TCC_OFFSET (APTC/APTN) = 0x0786` 带一个使能位：
+厂商"用户开启 TCC 偏移时写 `offset|0x80`，否则写 `0`（每个档的默认态；
+**2026-09-23 整轮抓取里它一直是 `0x00`**）"。
+使能位没置，那三个 5 就不生效，降频点还是 TjMax。
+
+**所以我把猜测换成了测量**（**这是本次唯一的代码改动**）：
+
+- `app/act/channels/base.py`：新增 `TCC_ENABLE_BIT = 0x80`、`TCC_OFFSET_MASK = 0x7F`、
+  `tcc_offset_of(raw) -> (使能位, 偏移°C)`，读不到返回 `(None, None)`，**不猜成 0**。
+- `app/act/channels/ec_gpd.py`：`SLOW_GROUPS` 新增第四组
+  `('tcc', ('ADDR_L1_PWM_DEFAULT_MYFAN3',))`——**60 秒一轮，没进 2 秒高频组，
+  6.3 第 6 条的限速预算一点没动**；`_derive` 输出 `tcc_offset_raw` /
+  `tcc_offset_enabled` / `tcc_offset_c`。
+- `app/act/hardware.py`：`STATE_KEYS` 收下 `tcc_offset_enabled` / `tcc_offset_c`；
+  **`tcc_offset_raw` 按 `fan_rpm_raw`/`battery_temp_raw` 的先例留在 `ec_raw` 不进 `state`**。
+- `tests/test_tcc_offset.py`：**新增，8/8 通过**。除了钉解码
+  （`0x00→(False,0)`、`0x80→(True,0)`、`0x85→(True,5)`、`0x05→(False,5)`、
+  `0xFF→(True,127)`、`None→(None,None)`），还钉了两条**结构**：
+  `0x0786` 必须在 `SLOW_GROUPS` 而**不在** `FAST_GROUPS`；派生值进 `STATE_KEYS` 而原始字节不进。
+- 全套 **16 个文件全绿**（原 15 + 新增 1）。
+
+**#36 因此改了性质**：单位问题**已经离线答完**（°C），剩下的只是
+"重启面板、把这个字节读出来"，**不需要跑负载**。
+`tools/ec_mode_bench.py` 的 `TEMP_ABORT = 97.0` **一个字没动**——
+在读到 `tcc_offset_enabled` 之前改它就是拿推论当测量，
+而这正是本节 ⑥ 刚刚否掉的那类错误。`tools/ec_write_test.py` 的 `TEMP_GUARD_C = 85.0` 同样没动。
+
+**⑦ `0x07C6` bit2 是风扇表写入的闸门——#31 的写协议有了。**
+
+`AP_OEM_6 = 0x07C6`。**bit2 = `ENABLE_UNIVERSAL_FAN_CTRL`：厂商在每次写风扇表之前清掉它、
+写完再置回去**（`MyFanTableCtrl.SetFanControlByRamFan1p5`），
+实机上表现为每次切档时一个 **1-2 秒的凹陷**。bit0-1 = DSDT 里的 `WMS0`，
+回读出来是 NVIDIA Whisper Mode。静息态实机读到 `0x04`。
+
+**#31 将来真要写风扇表，必须先清 bit2、写完置回**，否则会和厂商服务抢同一个闸门。
+这条现在记在待办里，**代码没有加任何写入**。
+
+**⑧ 作用域提醒：PD 镜像的 `0x07D8` 不是 EC 的 `0x07D8`。**
+
+`ec/firmware/GMxMGxx_11.800` 文件 `0x20000` 处那份 ITE8850-PD 镜像
+是**另一个 8051 程序**，有自己独立的 XDATA 空间。`0x07D8` 的 34 处引用里
+**33 处属于 PD 镜像，EC 侧只有 1 处**。两边只共用一个数字，别的什么都不共用。
+（第十一节 ③-补 那个 `sizeof(SETUP_DATA)` 是**第三个**同样数字的巧合——
+同一个 `0x07D8`，在 BIOS 侧是结构体尺寸、在 PD 镜像里是另一个程序的 XDATA、
+在 EC 侧才是 TCC 偏移默认值。）
+
+**⑨ 没做的事**：没写 EC、没写 UEFI 变量、没重启机主正在跑的面板、
+没跑负载（跑负载会触发一次无人值守的 EC 风扇模式写入）、没发 HID 报文、
+没把厂商那条 55 % 占空比曲线抄进任何预设、没动 `TEMP_ABORT`、
+没为了核对而去读参考仓库的实机证据目录之外的任何东西。
+本节全部是读**已提交的文本**，加上一处**只读**的代码改动。
 
 ## 7. 运行方式（目标是"不用盯着"）
 
@@ -1458,6 +1849,17 @@ APCtrl 存在 UEFI 变量里，6.3 第 8 条(b) 永久禁止读写任何 UEFI �
       说明"档位"在固件里是**风扇模式 + 开关模式**两件独立的事，
       和仓库记的 `OperatingMode` `{Office:0, Gaming:1, Turbo:2}` 不是同一根轴，
       验证时要连 `0x0751` 的 bit 一起看，别只对一个整数
+      **`0x0751` 的编码本身已经三方对齐，不用再猜**（见 6.11 第十三节 ①）：
+      **Office `0xA0` / Gaming `0x00` / Turbo `0x10`**，bit6 = Fan Boost，
+      位名 `TURBO` bit4、`HIGH` bit5、`BOOST` bit6、`USER` bit7，bit0-2 是风速档位。
+      三方是：本机 `ec_gpd.py` 既有注释（"全亮 Turbo_Mode(0x10) ↔ 不亮
+      User_Fan_HiMode(0xA0)，半亮 Normal_Mode(0x00)"）、参考仓库 2026-09-23 的
+      **六次 Fn 键实机抓包**、以及厂商 `MyFanManager_RamFan1p5.SetFanMode` 的常量。
+      `fan_boost = bool(ctl & 0x40)` 早就是 bit6，写对了。
+      **另一件事必须记住**：他们做过隔离实验——**只写 `0x0751`，
+      `0x0783-0x0787`/`0x07C5`/`0x07C6`/`0x0743-0x0746`/风扇表 `0x0F00-0x0F5F` 一个都没动**。
+      所以我们按实体键时看到 PL 跟着变，**是 Windows 服务干的，不是 EC 干的**；
+      验证 `OPERATING_*_MODE` 时如果服务没在跑，**别指望有任何连带效果**。
 - [x] **PL 自清零的原因查明了，而且和我们原先的猜测相反**（见 6.11 第二节）。
       原先归因于"自定义模式激活链没置齐"——**那条链不存在**，是外部资料的误传
       （`0x0706` 是倒计时器，`0x0726`/`0x0727` 在 EC 镜像里零引用，厂商服务侧零命中）。
@@ -1482,6 +1884,14 @@ APCtrl 存在 UEFI 变量里，6.3 第 8 条(b) 永久禁止读写任何 UEFI �
       **一条消息只能改一个非 PL 项**
       （注意 `Fan/Status` 不是随时都有：本机现在只在被 GETSTATUS 问到时才报，
       所以「OEM 允许范围」这一行经常显示「未报」，不是 bug）
+      **⚠️ 踩雷路径现在有名有姓了**（2026-09-30 深夜，见 6.11 第十二节 ⑤）：
+      **本机 DSDT 里的 `T1WR 0x81/0x82/0x84` 三条分支写的就是 `EC0_.APL1/APL2/APL4`
+      = EC `0x0783/0x0784/0x0785`**，和服务端 `EcCtrl.Write` 是同一组物理字节。
+      也就是说 **DSDT/DPTF 那条路本身就是 PL 的活跃写者**，我们写进去的值
+      随时可能被 ACPI 侧覆盖，而且覆盖不会经过我们任何一道闸。
+      这让"存原值 → 写 → 回读 → 还原"这套流程多了一个失败模式：
+      **还原回去的值可能也不是我们写之前那个**。验证时要把这一点当观察项，
+      不能只看"回读等不等于我写的"。
 - [ ] `OperatingMode` 的真实取值：`Tray/Status` 报的值不在 OEM 枚举 `{Office:0, Turbo:2}` 里，
       现在一律按「未知」处理并把原始值暴露在通道状态里，等一次点击观察把它对上
 - [ ] 这些开关的**写入**都还没验证，面板一律只读：USB 关机充电、OSD、Fn/NumPad 锁、
@@ -1562,6 +1972,20 @@ APCtrl 存在 UEFI 变量里，6.3 第 8 条(b) 永久禁止读写任何 UEFI �
       四个值明摆着**存在 Table1 / Table2 两套风扇表**，命令名还叫 `Set Myfan3 Table`。
       所以我们读到的那 92 个字节很可能只是其中一套，另一套在别处——
       换档转储这件事从"值得做"升级成"必须先做"，否则写入可能落在没生效的那套表上
+      **闸门和换算两边都拿到独立旁证了**（见 6.11 第十三节 ③⑦）：
+      `0x07C6` bit2 = `ENABLE_UNIVERSAL_FAN_CTRL`，厂商在每次写风扇表**之前清掉、之后置回**
+      （`MyFanTableCtrl.SetFanControlByRamFan1p5`），他们实机上看到每次切档有个
+      **1-2 秒的凹陷**——和我们从解密源码读到的"外层用 bit2 把整段括起来"是同一件事，
+      两边对上了。占空比换算也印证了：**值 × 2，`0xC8`(200) = 100 %**，
+      `FanInfo.GetEcCpuFanDuty` 返回 `Data / 2`，EC 固件自己的上限就是存在 `0xBB22`
+      的那个 `0xC8` 字面量；本机 `R_DUTY = 60` → 30 %，在 ×2 约定下合理。
+      **`0x075B/0x075C` 明确不是控制口**：注解原话是"do not write this expecting
+      the fan to turn"，它们是**公布出来的占空比**，只读。
+      **新增的手动占空比候选靶**（来自本机 DSDT 的 `ECMG`，**参考级、本机未验证**）：
+      `F1DC`(7bit 占空比) + `F1CM`(1bit 模式) 同在 **`0x0E8C`**，
+      `F2DC` + `F2CM` 同在 **`0x0E9D`**。`0x0Exx` 整段和本机常量表**零重合**，
+      所以第十二节那 18 个重合地址提供的背书覆盖不到它们——
+      **必须先用只读转储确认这两个字节在本机存在且在动，才谈得上写**。
 - [ ] `ADDR_MYFAN2_L1~L5_PWM` 与 `User_Fan_Level1~5(0x81~0x85)` 看着是一对，
       全表观察也抓到按硬件模式时 `MYFAN2_L1/L4_PWM` 会跟着换（3↔7、5↔15）。
       EC 侧真正吃「用户风扇模式」的是 **`0x0751` bit7(USER)**：bank1 `0x9432` 的
@@ -1615,24 +2039,61 @@ APCtrl 存在 UEFI 变量里，6.3 第 8 条(b) 永久禁止读写任何 UEFI �
       `FeatureReportByteLength` 由设备自报为 **9**。厂商五条样例报告逐字节复现成功。
       **模块里没有任何发送函数**（`test_no_write_path` 钉住），
       `lighting.rgb`=verified、`lighting.rgb.write`=blocked
-- [x] **APCtrl 位定义这条关掉，不再追**（见 6.11 第十一节）。三条理由凑齐了：
-      那个"便宜的前置判据"**跑不出结论**（x64 上 imm32 和 RIP 相对 disp32 在字节层面
-      同形，粗判据 285 处命中几乎全是位移；连过滤用的那两组操作码本身都是最常见的
-      RIP 相对 ModRM）；抽出来的 PE32 **一个字符串都没有**，没锚点；
-      而且就算解出来也**用不上**——APCtrl 存在 UEFI 变量里，6.3 第 8 条(b) 永久禁止碰。
+- [x] **APCtrl 位定义这条关掉，不再追**（见 6.11 第十一节，**理由已于 2026-09-30 深夜更正**）。
+      **唯一硬理由**是那个"便宜的前置判据"**跑不出结论**：x64 上 imm32 和 RIP 相对 disp32
+      在字节层面同形，粗判据 285 处命中几乎全是位移，连过滤用的那两组操作码本身都是
+      最常见的 RIP 相对 ModRM。
+      **原来写的另两条都动了**：
+      ① "抽出来的 PE32 一个字符串都没有、没锚点"——**只对我们自己抽的那份成立**。
+      参考仓库现成放着 **77 个 Ghidra 反编译 `.c`** 和 **2.47 MB 的 IFR 转储**
+      （`bios/ifr/Setup.en-US.ifr.txt`），还有人工标注版演示怎么把 Setup 偏移翻译成
+      IFR question id。锚点技术是有的，只是 `grep -i apctrl` 在 IFR 里**零命中**——
+      APCtrl 不是 Setup 表单里的问题，**这一项上没有靶子**。
+      ② "就算解出来也用不上，因为它存在 UEFI 变量里、6.3 第 8 条(b) 禁止"——
+      **这条不再确定，别再用**。`OemApControlDxe.c` 读的是 `0xFF430004-0x0A` 的 PCH MMIO，
+      写的是 `0x65/0x66/0x6d/0x6e` 这类小索引，不像 UEFI 变量。
+      重开它就得去碰 `0xFF430000` 的裸 MMIO，那是 6.3 第 1 条管的地方，所以**还是关着**。
       唯一可能的收益（那个 WORD 也许是 EC `SUPPORT_BYTE` 家族的另一个视图）
-      也有了反面线索：紧判据下**没有任何模块引用 `0x078A-0x078F`**
-- [ ] **TCC 偏移这组寄存器读出来了，但"5 是什么单位"没证实**（见 6.11 第七节②-补）。
-      常量表里 `defaults` 其实是两组，我们此前只用了 PL 那组：
+      继续有反面线索：紧判据下**没有任何模块引用 `0x078A-0x078F`**。
+      **顺带把第十一节 ③ 那个"真命中"也否了**：4 处 `0x7D8` 全部是
+      `sizeof(SETUP_DATA)`（Setup 这个 UEFI 变量的字节长度，GUID `ec87d643-…`），
+      不是 EC 地址——**紧判据的真命中数是 0**。
+- [ ] **TCC 偏移：单位已经离线证实是 °C，`0x0786` 已接上只读，剩"重启面板读一次"**
+      （见 6.11 第十三节 ⑥；原描述见 6.11 第七节②-补）。
       `0x07D8/0x07D9/0x07DA` = GAMING/OFFICE/TURBO 的 TCC 偏移，**本机三个都读 5**，
-      而且**读通路早就通了**（`ec_gpd.py` 的 `defaults` 组一直在读，只是没人看那三行）。
-      若按 Intel 语义（节流点 = TjMax − offset，10875H 的 TjMax=100）则节流点在 **95 °C**，
-      那么 `tools/ec_mode_bench.py` 那个 **97 °C 保险就永远轮不到触发**——
-      硬件先动手了。不算危险，但那个数字该往下挪；
-      挪之前先用只读的办法证实单位：满载跑一轮，看 CPU 实际稳在多少度。
-      **这轮没跑**：近 30 分钟历史里机器一直空闲（`cpu_temp` 46-49 °C），
-      而且一上负载调度器就会自动跟随去写风扇模式字节——那是一次没人看着的硬件写入。
-      所以这件事和 #25/#27/#31 一起等机主在场。
+      参考仓库的注解写明单位是 **degrees C**、他们实机也读到 `05 05 05`——单位这一问答完了。
+      **但原来那条推论是错的，别照着做**：推论说"按 Intel 语义节流点 = TjMax−5 = 95 °C，
+      所以 97 °C 保险永远轮不到、该往下挪"。错在漏了使能位——
+      `CPU_TCC_OFFSET` = **`0x0786`**，DSDT 的 `ECMG` 把它拆成 `APTC`(bit0-6 偏移) +
+      `APTN`(bit7 使能)，厂商只在用户开启 TCC 偏移时写 `offset|0x80`，**否则写 0**，
+      而他们 2026-09-23 整轮抓取里这个字节**一直是 `0x00`**。使能位没置，那三个 5 就不生效。
+      **已做的改动（只读，没碰任何阈值）**：`base.py` 加了 `tcc_offset_of()` 解码器；
+      `ec_gpd.py` 的 `SLOW_GROUPS` 加了第四组 `('tcc', ('ADDR_L1_PWM_DEFAULT_MYFAN3',))`，
+      **60 秒一轮、没进 2 秒高频组**（6.3 第 6 条的限速预算没动）；
+      `hardware.py` 的 `STATE_KEYS` 收下 `tcc_offset_enabled`/`tcc_offset_c`；
+      新增 `tests/test_tcc_offset.py`（8/8，含"必须在低频组"的结构断言）。全套 **16 个文件全绿**。
+      **剩下的事**：重启面板 → `GET /api/hardware` 读 `state.tcc_offset_enabled`。
+      **不需要跑负载**，所以它从"需机主在场"降级成"下次重启面板时顺手看一眼"。
+      读到之后才谈 `tools/ec_mode_bench.py` 的 `TEMP_ABORT = 97.0` 要不要挪；
+      **在读到之前一个字都不许改**——拿推论当测量，正是这一条刚刚否掉的错误。
+      `tools/ec_write_test.py` 的 `TEMP_GUARD_C = 85.0` 与此无关，保持原样。
+- [ ] **`ECMG` 那 98 个字段还没接进面板**（见 6.11 第十二节）。最有价值的是七个温度点
+      `CPUT`(0x0E0D)/`PCHT`(0x0E0E)/`SN1T`-`SN5T`(0x0E10,0x0E12,0x0E14,0x0E16,0x0E18)。
+      **但要先解决两件事才谈得上接**：① 这些名字来自 `ECMG`（`SystemMemory` @ `0xFE410000`），
+      我们的通道走的是 `\\.\ACPIDriver` 的 EC IOCTL，**扩展地址能不能直接这么读还没验过**
+      （`0x0Exx` 那一段和本机常量表**零重合**，所以第十二节那 18 个重合地址提供的
+      背书覆盖不到它，只能算**参考级、未验证**）；② 按 6.3 第 6 条，
+      新增只读项要么进 60 秒低频组、要么做成**点了按钮才读的按需转储**
+      （像风扇表那样：一轮 96 项、间隔 0.03 秒、结果缓存 10 秒），
+      **不许塞进 2 秒高频组**。先做只读按需转储，跑通了再谈上面板。
+- [ ] **转速计有两个位置，冲突未解，谁都不许挑一个用**（见 6.11 第十三节 ④）。
+      厂商 Windows 服务的 `GetEcCpuFanRpm` 读 **`0x0464/0x0465`**、
+      `GetEcGpuFanRpm` 读 **`0x046C/0x046B`**；而本机 DSDT 的 `ECMG` 把风扇 1 转速
+      命名为 **`F1SH`/`F1SL` @ `0x0E1C/0x0E1D`**。两套都出自厂商自己的东西。
+      我们代码现在读常量表给的 `ADDR_EC_MAIN_FAN_RPM_BYTE1/2`，**读出来是 0**
+      （第二风扇读到 `8,15` → `0x080F` = 2063 RPM，字节序因此钉死为高字节在前）。
+      主风扇恒为 0 到底是"这台机器单风扇在转"还是"读错了地方"，
+      **要等上面那条 `ECMG` 只读转储跑通才有办法分辨**。在此之前不改地址。
       ⚠️ 另外固件里 `OemGlobalNvsDxe`/`OemHooks` 有 4 处把 `0x07D8` 当**函数实参**，
       但分不清是 EC 地址还是 GlobalNvs 区里的字节偏移，**这个巧合不采信**（见第十一节③）
 
@@ -1649,6 +2110,16 @@ EC/ACPI 交互的设计思路参考社区项目 [OpenRevo](https://github.com/fa
 （PROJECT_ID 同为 `0x0F`、PD 镜像逐字节相同、`ECSpec` 常量表 122/125 同名同址）：
 [ElDavoo/tongfang-gm7mg7p-re](https://github.com/ElDavoo/tongfang-gm7mg7p-re)。
 本仓库只**离线阅读**它的文档与反编译产物，未执行其中任何脚本，未再分发其内容。
+具体读到的是这几处（第十二、十三节全部出自这里）：
+`ec/annotations/registers.yaml`（4827 行 / 160 条目 / 192 个地址，含实机验证记录）、
+`ec/annotations/dsdt-ecmg-fields.csv`、`ec/annotations/pd-0x07d8-flow.md`、
+`ec/annotations/ghidra-functions.csv`、
+`bios/decompiled/*.c` 与配套 `*.asm`（**77 个文件**的 Ghidra 反编译产物，
+第十一节 ③-补 的更正就是读 `OemGlobalNvsDxe.c` 读出来的）、
+`bios/decompiled/OemOcDxe.annotated.c`（人工标注版，`sizeof(SETUP_DATA)` = `0x7D8`
+和 `gSetupGuid ec87d643-…` 都写在这里）、以及 `bios/ifr/Setup.en-US.ifr.txt`
+（2.47 MB 的 IFR 转储——**只用来 `grep -i apctrl` 确认零命中，没有据此查任何 Setup 项的名字**，
+因为 6.3 第 8 条(b) 永久禁止读写 UEFI 变量）。
 
 6.10 那轮交叉核对引用到的社区资料（均为第三方机型上的实测，本机只当线索用）：
 [Terabinaryte/uniwill-laptop-mr](https://github.com/Terabinaryte/uniwill-laptop-mr)（PL、风扇表；

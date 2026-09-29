@@ -68,6 +68,26 @@ def hw_mode_of_fan_flag(flag):
     return HW_MODE_BY_FAN_FLAG.get(flag)
 
 
+# EC 0x0786：CPU 的 TCC 偏移。这一个字节有两个 OEM 名字，两边都出自厂商自己的东西——
+# 本机 Creator Center 的 ECSpec 叫它 ADDR_L1_PWM_DEFAULT_MYFAN3（风扇 PWM 默认值），
+# 而客服 ROM 里那份 DSDT 的 ECMG 字段表把它拆成 APTC(bit0-6) + APTN(bit7)，
+# 厂商服务侧的 SetCpuTccOffset 也是按后一种语义写的：用户开 TCC 偏移就写 offset|0x80，
+# 不开就写 0。两边不一致时认 DSDT + 服务这一对，理由是它们互相印证，
+# 而 ECSpec 那个名字属于 MyFan3 一代、在这一段地址上是过期的（同一段里
+# 0x0743-0x0747 被 ECSpec 叫 MYFAN2_L1~L5_PWM，被 DSDT 叫 Dynamic Boost 那一组）。
+# 为什么要读它：0x07D8-0x07DA 那三个「每档一个 TCC 偏移默认值」（本机 5/5/5）
+# **只有 APTN 置位时才生效**。不看这一位就断言降频点是 TjMax-5，是拿默认值当现值。
+TCC_ENABLE_BIT = 0x80
+TCC_OFFSET_MASK = 0x7F
+
+
+def tcc_offset_of(raw):
+    """0x0786 → (使能位, 偏移 °C)。读不到就是 (None, None)，不猜。"""
+    if raw is None:
+        return None, None
+    return bool(raw & TCC_ENABLE_BIT), raw & TCC_OFFSET_MASK
+
+
 # 电池充电那三档。2026-09-30 01:16 观察3（logs/观察3 + tools/out/mqtt-watch.txt）两条通道
 # 同时对上号了：机主按「平衡 → 健康 → 长效」点过去，GCUBridge 的 BatteryProtection/Control
 # 依次收到 BALANCEDMODE / HEALTHYMODE / PERFORMANCEDMODE，EC 的 ADDR_AP_OEM_BYTE4 依次

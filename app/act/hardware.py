@@ -21,7 +21,7 @@ STATE_KEYS = ('mode', 'hw_mode', 'pl1', 'pl2', 'pl4', 'fan_rpm', 'fan2_rpm', 'fa
               'battery_pct_ec', 'battery_temp_c', 'battery_cycles', 'charge_limit_up',
               'charge_limit_down', 'project_id', 'module_id', 'vrm_limit', 'silent_mode',
               'mode_index', 'ec_power_source', 'win_key_locked', 'battery_mode',
-              'battery_mode_raw', 'oem')
+              'battery_mode_raw', 'tcc_offset_enabled', 'tcc_offset_c', 'oem')
 
 
 class Hardware:

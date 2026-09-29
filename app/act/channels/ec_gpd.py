@@ -34,7 +34,7 @@ from app.act.channels.base import (CAP_BATTERY_LIMIT, CAP_FAN_CURVE,
                                    CAP_FAN_RPM, CAP_MODE_READ, CAP_MODE_WRITE,
                                    CAP_PL_READ, CAP_PL_WRITE, CAP_TEMP_EC, MODES,
                                    battery_mode_of_oem_byte4, hw_mode_of_fan_flag,
-                                   win_locked_of_status_byte)
+                                   tcc_offset_of, win_locked_of_status_byte)
 from app.paths import data_path
 from app.sense.system import power_status
 
@@ -85,6 +85,15 @@ SLOW_GROUPS = (
                   'ADDR_TURBO_TCC_OFFSET_DEFAULT_VALUE')),
     ('battery_static', ('ADDR_EC_BT1CycleCount_BYTE1', 'ADDR_EC_BT1CycleCount_BYTE2',
                         'ADDR_BATTERY_CHARGE_LIMIT_UP', 'ADDR_BATTERY_CHARGE_LIMIT_DOWN')),
+    # 0x0786 这一个字节有两个 OEM 名字，而且两边都出自厂商自己的东西：
+    #   本机 Creator Center 的 ECSpec 叫它 ADDR_L1_PWM_DEFAULT_MYFAN3（风扇 PWM 默认值）；
+    #   DSDT 的 ECMG 字段表把它拆成 APTC(bit0-6) + APTN(bit7)，即「TCC 偏移 + 使能位」，
+    #   厂商服务侧的 SetCpuTccOffset 也按这个语义写：使能时写 offset|0x80，不使能写 0。
+    # 读它的理由：0x07D8-0x07DA 那三个 TCC 默认值（本机 5/5/5）**只有在 APTN 置位时
+    # 才生效**。不看这一位，就没法判断降频点到底是 TjMax 还是 TjMax-5，
+    # 也就没法校准跑分工具那道 97 °C 保险（README 6.11 十三）。
+    # 60 秒一轮，不进 2 秒高频组。
+    ('tcc', ('ADDR_L1_PWM_DEFAULT_MYFAN3',)),
 )
 
 # 变化监听：只盯语义寄存器（风扇转速/占空比/温度这类每秒都在动的不进监听，否则刷爆日志）。
@@ -509,6 +518,7 @@ class EcChannel:
         battery = self.values.get('battery') or {}
         static = self.values.get('battery_static') or {}
         ident = self.values.get('identity') or {}
+        tcc = self.values.get('tcc') or {}
 
         # 字节序是实测定的，不是猜的：
         #   风扇 BYTE1=9 BYTE2=129 → 高字节在前 = 2433 RPM（合理）；反过来 33033 不可能；
@@ -520,6 +530,8 @@ class EcChannel:
         cycles = self._word(static.get('ADDR_EC_BT1CycleCount_BYTE2'),
                             static.get('ADDR_EC_BT1CycleCount_BYTE1'))
         ctl = fan.get(FAN_KEY)
+        tcc_raw = tcc.get('ADDR_L1_PWM_DEFAULT_MYFAN3')
+        tcc_enabled, tcc_c = tcc_offset_of(tcc_raw)
         out = {
             'fan_rpm': rpm if self._plausible_rpm(rpm) else None,
             'fan_rpm_raw': rpm,
@@ -554,6 +566,11 @@ class EcChannel:
             'charge_limit_down': static.get('ADDR_BATTERY_CHARGE_LIMIT_DOWN'),
             'project_id': ident.get('ADDR_PROJECT_ID_BYTE'),
             'module_id': ident.get('ADDR_ModuleID'),
+            # 0x0786 = APTN(bit7 使能) + APTC(bit0-6 偏移，单位 °C)。只拆位、只照实报，
+            # 不在这里算降频点：那还要一个 TjMax，而 TjMax 不是 EC 给的，别混进来。
+            'tcc_offset_raw': tcc_raw,
+            'tcc_offset_enabled': tcc_enabled,
+            'tcc_offset_c': tcc_c,
             'source': self.name,
         }
         out['pl1'] = self._effective_pl(out, 1)

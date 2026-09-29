@@ -227,6 +227,14 @@ function renderHardware(s) {
           : '未知', hw.fan_duty_l != null),
     hwRow('PL1 / PL2' + plNote, hw.pl1 != null ? (hw.pl1 + 'W / ' + (hw.pl2 != null ? hw.pl2 + 'W' : '?'))
           : '未知', verified('power_limit.read')),
+    // 这一行是为了不让人误读上面那三个 TCC 默认值（0x07D8-0x07DA，本机 5/5/5）：
+    // 那三个数只有在 0x0786 的使能位（APTN, bit7）置起来时才生效，而参考仓库
+    // 实机抓取里这个字节一直是 0x00。所以「降频点 = TjMax−5 = 95 °C」是错的推论。
+    // 这里只报使能与偏移两个事实，不算降频点——那还要一个 TjMax，而 TjMax 不是 EC 给的。
+    hwRow('CPU TCC 偏移', hw.tcc_offset_enabled == null ? '未知'
+          : (hw.tcc_offset_enabled
+             ? ('已开启 · 偏移 ' + hw.tcc_offset_c + ' °C')
+             : '未开启（出厂那三个默认偏移不生效）'), hw.tcc_offset_enabled != null),
     hwRow('电池（EC）', hw.battery_pct_ec != null
           ? (hw.battery_pct_ec + '% · ' + (hw.battery_temp_c != null ? hw.battery_temp_c + '°C' : '?')
              + (hw.battery_cycles != null ? ' · ' + hw.battery_cycles + ' 次循环' : ''))
