@@ -55,8 +55,9 @@
 | 最大处理器状态 50% | 4273 MHz | 3329 MHz | 3.70 Mops/s |
 | **30% + 禁用睿频 + EPP=100 + 最低频率 5%** | 4283 MHz | 3316 MHz | 3.68 Mops/s |
 
-四档跑分（`tools/out/bench-compare.txt`）同样：省电 100.1 分、均衡 100.0、流畅 101.3、性能 103.4，
-频率区间 4246～4359 MHz，**只差 2.6%**。
+四档跑分（`tools/out/bench-compare.txt`，**用的是已退役的纯 Python 负载**，新负载的数字见下一节）
+同样：省电 100.1 分、均衡 100.0、流畅 101.3、性能 103.4，频率区间 4246～4359 MHz，**只差 2.6%**。
+两代负载、两次独立实测给出同一个结论，所以这不是测量方法的问题。
 
 结论：**这台机器的 CPU 频率由 BIOS/EC 接管，Windows 电源计划那一层压不住**
 （睿频开关写进去、回读也对，但硬件不理）。所以：
@@ -209,14 +210,14 @@ app/
   tray/tray.py              Shell_NotifyIcon 托盘 + 会话锁定/解锁通知（同一个消息窗口收事件）
   tray/osd.py               屏幕提示：color-key 分层窗口，自己带消息循环线程，画不出就退化
   tray/fankey.py            屏幕提示文案：全项目唯一一套模式词（省电/均衡/流畅/性能）
-tests/test_scheduler.py     22 个调度决策场景（含换挡防抖两条）
+tests/test_scheduler.py     25 个调度决策场景（含换挡防抖两条、温度趋势预判三条）
 tests/test_bench_score.py   11 个跑分算分场景（方向、归一化、zstd 解析、老成绩整批丢弃）
 tests/test_fankey.py        12 个屏幕提示场景（一套模式词、三态不张冠李戴、实体键映射到哪个意图）
 tests/test_history.py       7 个历史缓冲场景（含假时钟与「坏文件不拖垮启动」）
 tests/test_supervise_guard.py 8 个守护卡死判定场景（含「健康时不许误杀」）
 tests/test_tray_session.py  6 个会话事件分发场景（不锁屏幕也能验证解锁那条路）
 tests/test_config_profile.py 6 个调度性格读写场景（盯「补丁漏进 config.json」那个 bug）
-scripts/                    setup_runtime.ps1、make_bats.py（bat 生成器）、14 个入口 bat（GBK+CRLF）
+scripts/                    setup_runtime.ps1、make_bats.py（bat 生成器）、16 个入口 bat（GBK+CRLF）
 tools/                      全部离线只读的逆向与验证工具，产物落 tools/out（已 gitignore）
   gen_ec_map.py             从本机 Creator Center 生成 data/ec_map.local.json（不入仓库）
   oem_constant_dump.ps1     反射导出 OEM 程序集的常量与枚举（IOCTL 码、寄存器名、模式取值）
@@ -232,6 +233,10 @@ tools/                      全部离线只读的逆向与验证工具，产物�
   ec_mode_bench.py          造物者三态满载实测（正反序各一遍，写前存原值、测完还原、97°C 保险）
   tier_effect_test.py       逐项验证 Windows 电源旋钮在本机是否有效（结论：无效）
   freq_probe.py             PDH 频率计数器可用性探测
+  fetch_bench_tools.py      取官方 zstd 二进制到 tools/bin（不进仓库）
+  build_coremark.py         从 EEMBC 官方源码现编 coremark.exe，编完必须自检出分数才算成功
+  wmi_scan.ps1              只读扫本机 ACPI/WMI 设备与 root\wmi 类（普通权限看不见 GUID 类，见 6.5）
+  wmi_guid_probe.ps1        只读探测同方 MIFS 那个 GUID 在不在本机（需管理员权限才有意义）
 ```
 
 **设计原则**
@@ -378,6 +383,30 @@ tools/                      全部离线只读的逆向与验证工具，产物�
 
 复现：`scripts\造物者三态实测.bat`（会先停面板、测完自动重启面板，全程约 7 分钟，风扇很吵）。
 
+### 6.5 「走 WMI 而不是裸 EC」这条线索的核查结果（2026-09-29）
+
+社区建议参考 Linux 的 `tongfang-mifs-wmi`：同方模具的性能模式/风扇/键盘背光/触摸板锁
+是通过 **WMI GUID 方法**暴露的，用户态就能调，不用碰驱动 IOCTL。上游源码里那个 GUID 是
+`B60BFB48-3E5B-49E4-A0E9-8CFFE1B3434B`（探测纯靠 GUID，无 DMI 白名单），命令格式是
+32 字节缓冲：`[0]=0xFA 读 / 0xFB 写`，`[1]=访问类型`，`[3]=功能号`，`[4..]` 是参数；
+功能号 8=性能档位、9=独显直连、10/16/17/18=灯效与键盘背光、11=Fn 锁、12=触摸板锁、
+13=风扇转速、20=强冷开关、21=PWM 上限、22=CPU 温度。**如果这台机器上有它，
+我们要的所有功能都有一条 OEM 自己背书的路，一个 EC 写操作都不用猜。**
+
+核查结论：**这台机器的模具是 Uniwill，不是同方（Tongfang）**——两家是不同的代工厂，
+机械革命都用过。证据：本机 EC 驱动 `UWACPIDriver.sys`（UW = UniWill）、设备节点
+`ACPI\INOU0000`（名字就叫 ACPIDriver）、触摸板 `ACPI\UNIW0001`、
+OEM 服务目录 `C:\Program Files\OEM\CreatorCenter\UniwillService\`。
+所以「同方平台的 WMI 接口」在这台机器上不一定存在。
+
+本机探测结果**不作数**：`tools/wmi_scan.ps1` 与 `tools/wmi_guid_probe.ps1`（都只读、
+只列类名方法名、不调用任何方法）在普通权限下连微软自己的 WMI 映射 GUID
+`05901221-D566-11D1-B2F0-00A0C9062910` 都查不到，说明这个权限级别根本看不见任何
+GUID 类——所以「查不到 B60BFB48」既不能证明它不在，也不能证明它在。
+要下定论只有一条路：**用管理员权限再跑一次 `tools\wmi_guid_probe.ps1`**（只读，不写硬件）。
+
+在那之前，不基于这条线索写任何代码。
+
 ## 7. 运行方式（目标是"不用盯着"）
 
 - 开机自启：`HKCU\...\Run\UmiControlPanel` → `UmiPanel.exe main.py --supervise --no-browser`；
@@ -418,6 +447,9 @@ tools/                      全部离线只读的逆向与验证工具，产物�
 - [ ] 电池保养三档（长效/平衡/健康）：`ADDR_BATTERY_CHARGE_LIMIT_UP/DOWN` 可读，
       但两次实测都是 0（早先记过 80%/75%，无法复现），写入语义未确认，**故意不做**，不编造。
       面板只把读到的电量 / 电池温度 / 循环次数如实显示出来（这三项与系统 API 互相印证过）
+- [ ] **同方 WMI 接口（`B60BFB48-…`）在不在本机**：查不到也否不掉——普通权限连微软自己的
+      GUID 类都看不见（见 6.5）。需要用管理员权限跑一次 `tools\wmi_guid_probe.ps1`（只读）。
+      在的话，性能档位/独显直连/键盘背光/触摸板锁/风扇全都有 OEM 背书的路，不用猜 EC
 - [ ] 兜底通道：需恢复 GCUBridge 服务（`scripts\启用造物者档控制.bat`，会弹 UAC）
 - [ ] 托盘图标的桌面可见性需本机确认（沙箱内截不到图）
 

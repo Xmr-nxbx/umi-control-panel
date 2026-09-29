@@ -137,9 +137,11 @@ def _():
 
 @case('温度快速上冲提前解锁性能')
 def _():
+    # 负载必须是真负载：CPU 20% 那一档实测会被背景噪声顶上来（见下面那条 13% 用例），
+    # 所以这里用 55%，只验「升温够快就提前放开功耗墙」。
     s = Scheduler(P, APPS)
-    pts = [(snap(cpu=20, temp=68), 'auto')] * 3
-    pts += [(snap(cpu=22, temp=t), 'auto') for t in (71, 74, 76, 78)]
+    pts = [(snap(cpu=55, temp=68), 'auto')] * 3
+    pts += [(snap(cpu=55, temp=t), 'auto') for t in (71, 74, 76, 78)]
     seq = drive(s, pts)
     assert 'perf' in seq, seq
 
@@ -239,6 +241,32 @@ def _():
                 start=5000.0)
     assert seq == ['bal', 'mid'], seq
     assert s.resume_until > 5001.0, s.resume_until
+
+
+@case('温度趋势预判：真任务点火（5 秒升 7°C、CPU 50%）直接给性能档，不等 2.5 秒负载确认')
+def _():
+    s = Scheduler(P, APPS)
+    seq = drive(s, [(snap(cpu=50, temp=t), 'auto') for t in (66, 68, 70, 73, 76)])
+    assert seq[:4] == ['bal', 'bal', 'mid', 'perf'], seq
+    assert '温度趋势' in s.reason, s.reason
+
+
+@case('温度趋势预判：只有余温在升、负载是背景噪声（CPU 13%）时不许升档')
+def _():
+    # 这条是实测逼出来的：跑分刚结束、CPU 13%/GPU 0%，余温还在爬，
+    # 面板就升到性能档并把风扇推到强冷 —— 白花噪音，一点性能没换来。
+    s = Scheduler(P, APPS)
+    seq = drive(s, [(snap(cpu=13, temp=t), 'auto') for t in (66, 68, 70, 73, 76)])
+    assert set(seq) == {'bal'}, seq
+    assert '温度趋势' not in s.reason, s.reason
+
+
+@case('温度趋势预判：没到 70°C 就不算「热」，负载再高也只按负载规则走')
+def _():
+    s = Scheduler(P, APPS)
+    seq = drive(s, [(snap(cpu=50, temp=t), 'auto') for t in (60, 62, 64, 66, 68)])
+    assert seq == ['bal', 'bal', 'mid', 'mid', 'mid'], seq
+    assert '温度趋势' not in s.reason, s.reason
 
 
 def main():

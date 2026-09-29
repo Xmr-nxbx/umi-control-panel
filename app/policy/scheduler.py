@@ -121,9 +121,11 @@ class Scheduler:
         if now - base_ts < window * 0.6:
             return False
         rise = temp - base_t
+        # 负载门槛是这条规则的命门：只看温度上冲会把「跑分刚结束的余温」
+        # 当成新任务点火（实测 CPU 13%、GPU 0% 就升过档，白白把风扇推到强冷）。
         return (rise >= float(self.p.get('temp_rise_deg', 4.0))
                 and temp >= float(self.p.get('temp_rise_min_c', 70.0))
-                and (cpu_pct or 0) >= float(self.p.get('temp_rise_load_min', 12.0)))
+                and (cpu_pct or 0) >= float(self.p.get('temp_rise_load_min', 30.0)))
 
     # ---------- 温度保护 ----------
     def _update_throttle(self, temp, now):

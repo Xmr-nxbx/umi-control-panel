@@ -36,8 +36,11 @@ DEFAULTS = {
         'cpu_bal_exit': 20, 'gpu_bal_exit': 8, 'bal_exit_hold_s': 15.0,
         'cpu_eco': 15, 'gpu_eco': 5, 'eco_hold_s': 20.0, 'eco_idle_s': 90.0,
         'eco_light_idle_factor': 0.5,
+        # 温度趋势预判：升温够快就提前放开功耗墙，让重任务快进快出。
+        # temp_rise_load_min 原定 12%，实测被背景噪声骗过（CPU 13%、GPU 0%、
+        # 跑分刚结束余温还在升 → 白白升到性能档并把风扇推到强冷），提到 30%。
         'temp_rise_deg': 4.0, 'temp_rise_window_s': 5.0,
-        'temp_rise_min_c': 70.0, 'temp_rise_load_min': 12.0,
+        'temp_rise_min_c': 70.0, 'temp_rise_load_min': 30.0,
         'temp_limit_c': 95.0, 'temp_recover_c': 90.0,
         'dwell_s': 300.0,
         'dwell_idle_s': 30.0, 'dwell_hold_s': 45.0,
