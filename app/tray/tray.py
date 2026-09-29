@@ -13,6 +13,10 @@ from app.policy.scheduler import TIER_LABELS
 u32 = ctypes.windll.user32
 k32 = ctypes.windll.kernel32
 s32 = ctypes.windll.shell32          # Shell_NotifyIconW 在 shell32，不在 user32
+try:
+    wts32 = ctypes.windll.wtsapi32   # 会话锁定/解锁通知在这里
+except OSError:
+    wts32 = None
 
 # LRESULT/LPARAM 在 x64 上是 64 位。不声明 argtypes 的话 ctypes 按 c_int 传参，
 # DefWindowProcW 遇到大 lparam 会抛 OverflowError——异常发生在窗口回调里，
@@ -33,6 +37,10 @@ WM_LBUTTONUP = 0x0202
 WM_RBUTTONUP = 0x0205
 WM_DESTROY = 0x0002
 WM_COMMAND = 0x0111
+WM_WTSSESSION_CHANGE = 0x02B1      # 会话锁定/解锁：Windows 会主动通知
+WTS_SESSION_LOCK = 7
+WTS_SESSION_UNLOCK = 8
+NOTIFY_FOR_THIS_SESSION = 0
 TPM_RETURNCMD = 0x0100
 TPM_RIGHTBUTTON = 0x0002
 MF_STRING = 0x0000
@@ -102,7 +110,8 @@ def _make_ico_bytes(size, rgb, dim):
 
 
 class Tray:
-    def __init__(self, cfg, log, on_open, on_intent, on_quit, on_mode, on_fan=None):
+    def __init__(self, cfg, log, on_open, on_intent, on_quit, on_mode, on_fan=None,
+                 on_session=None):
         self.cfg = cfg
         self.log = log
         self.on_open = on_open
@@ -110,6 +119,7 @@ class Tray:
         self.on_quit = on_quit
         self.on_mode = on_mode
         self.on_fan = on_fan
+        self.on_session = on_session
         self._fan = None
         self.hwnd = None
         self.icon = None
@@ -148,10 +158,34 @@ class Tray:
         if not self.hwnd:
             self.log.error('托盘窗口创建失败')
             return False
+        self._register_session_notifications()
         self._update_icon('bal', '均衡')
         if getattr(self, '_added', False):
-            self.log.info('[托盘] 已挂载，图标颜色随档位变化')
+            self.log.info('[托盘] 已挂载，图标颜色随档位变化（会话解锁事件：%s）' % (
+                '已注册' if getattr(self, '_session_on', False) else '不可用，靠空闲推断'))
         return getattr(self, '_added', False)
+
+    def _register_session_notifications(self):
+        """注册会话锁定/解锁通知。
+
+        用户报的第二个痛点是「息屏后亮屏时性能模式自动关闭」。这件事 Windows 会
+        明确发事件，用不着靠「空闲时间突然变短」去猜；而且注册必须在这个
+        消息窗口所属的线程里做——会话事件是发给窗口的，不是发给进程的。
+        """
+        if wts32 is None or not self.hwnd or getattr(self, '_session_on', False):
+            return False
+        try:
+            wts32.WTSRegisterSessionNotification.restype = wt.BOOL
+            wts32.WTSRegisterSessionNotification.argtypes = [wt.HWND, wt.DWORD]
+            ok = bool(wts32.WTSRegisterSessionNotification(self.hwnd, NOTIFY_FOR_THIS_SESSION))
+        except Exception as exc:                           # noqa: BLE001
+            self.log.warn('[托盘] 会话通知注册异常：%r' % (exc,))
+            return False
+        self._session_on = ok
+        if not ok:
+            self.log.warn('[托盘] 会话通知注册失败 err=%s，亮屏缓冲退回空闲时间推断'
+                          % k32.GetLastError())
+        return ok
 
     def _make_icon(self, tier):
         rgb = TIER_COLORS.get(tier, (120, 140, 170))
@@ -222,6 +256,15 @@ class Tray:
         u32.DestroyMenu(hmenu)
         return cmd
 
+    def _session_event(self, kind):
+        # 托盘线程里的回调不能把异常抛回消息循环：那样图标会直接消失（历史上真这样坏过）
+        if self.on_session is None:
+            return
+        try:
+            self.on_session(kind)
+        except Exception as exc:                           # noqa: BLE001
+            self.log.warn('[托盘] 会话事件处理异常：%r' % (exc,))
+
     def _on_command(self, cmd):
         if cmd == MENU_OPEN:
             self.on_open()
@@ -238,6 +281,12 @@ class Tray:
                 self.on_fan(flag)
 
     def _wnd_proc(self, hwnd, msg, wparam, lparam):
+        if msg == WM_WTSSESSION_CHANGE:
+            if wparam == WTS_SESSION_UNLOCK:
+                self._session_event('unlock')
+            elif wparam == WTS_SESSION_LOCK:
+                self._session_event('lock')
+            return 0
         if msg == WM_TRAY:
             if lparam == WM_LBUTTONUP or lparam == WM_LBUTTONDBLCLK:
                 self.on_open()
@@ -264,6 +313,12 @@ class Tray:
                 u32.TranslateMessage(ctypes.byref(msg))
                 u32.DispatchMessageW(ctypes.byref(msg))
             self.remove()
+            if getattr(self, '_session_on', False) and wts32 is not None:
+                try:
+                    wts32.WTSUnRegisterSessionNotification(self.hwnd)
+                except Exception:                           # noqa: BLE001
+                    pass
+                self._session_on = False
         except Exception as exc:                           # noqa: BLE001
             import traceback
             self.log.error('[托盘] 线程异常退出：%r | %s' % (

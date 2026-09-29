@@ -231,6 +231,16 @@ def _():
     assert seq[-1] == 'perf', seq                # eco→perf 跨三级，立刻放行
 
 
+@case('均衡档时亮屏/解锁：立刻升流畅，不等负载起来、也不受防抖限制')
+def _():
+    # 用真实防抖参数：人工事件必须绕过「刚掉下来不许爬回去」那条
+    s = Scheduler(dict(DEFAULTS['scheduler']), APPS)
+    seq = drive(s, [(snap(cpu=3, idle=120), 'auto'), (snap(cpu=3, idle=0.2), 'auto')],
+                start=5000.0)
+    assert seq == ['bal', 'mid'], seq
+    assert s.resume_until > 5001.0, s.resume_until
+
+
 def main():
     print('调度器决策表：共 %d 个场景' % len(CASES))
     failed = [n for n, fn in CASES if not run(CASES.index((n, fn)) + 1, n, fn)]

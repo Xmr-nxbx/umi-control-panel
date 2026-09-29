@@ -211,6 +211,14 @@ class Scheduler:
                 return self._out(now, snap)
 
         elif self.tier == 'bal':
+            # 人刚回到电脑前（解锁事件或空闲突降）：先给流畅档。
+            # 这一条是给「息屏亮屏后性能模式自动关闭」那个老毛病的：那时机器
+            # 负载还没起来，只按负载门槛判就会停在均衡档，用户第一下点击发木。
+            if in_resume:
+                # 缓冲升档不走 _try()：防抖是掐传感器噪声的，而「人刚回到电脑前」
+                # 是明确的人工事件，等 20 秒才给劲就白设计了。
+                self.set_tier('mid', '亮屏缓冲：先给流畅档', now)
+                return self._out(now, snap)
             factor = float(self.p.get('eco_light_idle_factor', 0.5)) if light else 1.0
             low = cpu < float(self.p['cpu_eco']) and gpu < float(self.p.get('gpu_eco', 5))
             if (self._ok('eco_enter', low, now, float(self.p['eco_hold_s']) * factor)

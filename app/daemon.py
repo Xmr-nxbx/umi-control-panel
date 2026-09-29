@@ -331,6 +331,22 @@ class Daemon:
         self.log.info('[面板] 意图设为 %s' % intent)
         return True, 'ok'
 
+    def note_session(self, kind):
+        """会话解锁 = 人回到电脑前。这是 Windows 给的确定信号。
+
+        用户报的第二个痛点是「息屏后亮屏时性能模式自动关闭」。以前只能靠
+        「空闲 ≥5 秒突然变成 <0.6 秒」推断有人回来了，会漏、会晚；解锁事件
+        一到位就直接续上缓冲窗口，档位不会在用户动手前掉下去。
+        """
+        now = time.time()
+        if kind != 'unlock':
+            self.log.info('[会话] 锁定/切走：接下来档位只按负载和温度走')
+            return False
+        buf = float(self.cfg.get('scheduler', 'resume_buffer_s', default=15.0))
+        self.sched.resume_until = max(self.sched.resume_until, now + buf)
+        self.log.info('[会话] 解锁：接下来 %.0f 秒不掉档' % buf)
+        return True
+
     def set_mode_now(self, mode):
         """直接下发硬件档位（不改编排意图）。"""
         ok, detail = self.hw.set_mode(mode, reason='面板手动')

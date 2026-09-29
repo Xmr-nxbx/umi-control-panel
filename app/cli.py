@@ -563,7 +563,10 @@ def main(argv=None):
 
             tray = Tray(cfg, log, open_panel, set_intent,
                         lambda: quit_evt.set(), lambda m: daemon.set_mode_now(m),
-                        on_fan=lambda f: daemon.set_fan_mode(f))
+                        on_fan=lambda f: daemon.set_fan_mode(f),
+                        # 会话解锁事件挂在这个消息窗口上：--no-tray 时没有这个源，
+                        # 亮屏缓冲会自动退回「空闲突降」推断（仍然可用，只是会晚一两秒）
+                        on_session=lambda kind: daemon.note_session(kind))
             tray._intent = cfg.get('intent')
             tray.start()
             state['tray'] = tray
