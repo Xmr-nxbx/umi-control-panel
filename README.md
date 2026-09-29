@@ -30,6 +30,7 @@
 | 内置跑分对比（单线程 / 多线程 / 短任务延迟 / 内存） | **可用** | `main.py --bench compare` 或面板「跑分对比」卡，纯标准库，不下载任何软件 |
 | 息屏掉档拦截、驻留期、亮屏缓冲、换挡防抖 | **可用** | 纯软件层，见 `app/policy/scheduler.py`，21 条决策表测试覆盖 |
 | CPU 温度 / 占用、GPU 温度/功耗/占用、内存、空闲、前台进程 | **可用** | PDH 热区 + nvidia-smi + Win32 API，**零内核驱动** |
+| 历史曲线（温度 / 实际频率 / 占用 / 风扇转速） | **可用** | 5 秒一点、窗口 30 分钟、档位切换点画成竖线；纯 canvas，断网也能看 |
 | EC 直连通道 | **已打通** | `\\.\ACPIDriver` + `IOCTL_GPD_ACPI_ECREAD/ECWRITE`，普通权限即可，见第 6 节 |
 | 造物者模式按键（风扇三态：自动 / 自定义曲线 / 强冷） | **可读 + 可写** | 就是实体键写的同一个字节；满载实测见 6.4，面板与按键不互相抢方向盘 |
 | 硬件功耗墙档位（办公/均衡/狂暴）寄存器 | **未确认** | 按键只动风扇、不碰功耗墙；面板如实显示「未确认」，不猜、不写 |
@@ -133,9 +134,11 @@ app/
   act/channels/gcu_actions.json  只允许发送已在本机逆向字符串中确认存在的 Action
   server/httpd.py           标准库 ThreadingHTTPServer + REST + 静态白名单
   web/                      index.html / app.js / style.css（无构建步骤）
-  tray/tray.py              Shell_NotifyIcon 托盘，图标随档位变色，右键可切意图与风扇模式
-tests/test_scheduler.py     19 个调度决策场景
-scripts/                    setup_runtime.ps1、make_bats.py（bat 生成器）、12 个入口 bat（GBK+CRLF）
+  history.py                遥测历史环形缓冲（5 秒一点、保留 30 分钟、60 秒落盘，重启接上）
+  tray/tray.py              Shell_NotifyIcon 托盘，图标随档位变色，右键可切意图与造物者三态
+tests/test_scheduler.py     21 个调度决策场景（含换挡防抖两条）
+tests/test_history.py       7 个历史缓冲场景（含假时钟与「坏文件不拖垮启动」）
+scripts/                    setup_runtime.ps1、make_bats.py（bat 生成器）、14 个入口 bat（GBK+CRLF）
 tools/                      全部离线只读的逆向与验证工具，产物落 tools/out（已 gitignore）
   gen_ec_map.py             从本机 Creator Center 生成 data/ec_map.local.json（不入仓库）
   oem_constant_dump.ps1     反射导出 OEM 程序集的常量与枚举（IOCTL 码、寄存器名、模式取值）
@@ -147,7 +150,8 @@ tools/                      全部离线只读的逆向与验证工具，产物�
   ec_write_test.py          可逆写验证（风扇模式 + 85°C 温度保险 + 自动还原）
   ec_pl_test.py             功耗墙写入的可逆实验（写→全核跑分→还原，结论：不生效）
   ec_mode_probe.py          快照全表 125 个寄存器 → 写一个候选 → 差分 → 还原
-  ec_watch.py               只读监听语义寄存器变化，用于抓实体按键的落点
+  ec_watch.py               只读变化观察器：21 项语义寄存器（0.5s 一轮）或 125 项全表（2s 一轮）
+  ec_mode_bench.py          造物者三态满载实测（正反序各一遍，写前存原值、测完还原、97°C 保险）
   tier_effect_test.py       逐项验证 Windows 电源旋钮在本机是否有效（结论：无效）
   freq_probe.py             PDH 频率计数器可用性探测
 ```

@@ -36,10 +36,19 @@
   </section>
 
   <section class="card">
-    <h2>硬件档位</h2>
+    <h2>硬件（EC 直连）</h2>
     <div class="hw-rows" id="hw"></div>
     <div class="btn-row" id="hw-buttons"></div>
     <p class="hint" id="hw-hint"></p>
+  </section>
+
+  <section class="card span-2">
+    <h2>历史曲线 <span class="tag" id="hist-range">最近 30 分钟</span></h2>
+    <div class="chart"><canvas id="chart-temp" width="980" height="152"></canvas>
+      <div class="legend" id="legend-temp"></div></div>
+    <div class="chart"><canvas id="chart-load" width="980" height="152"></canvas>
+      <div class="legend" id="legend-load"></div></div>
+    <p class="hint" id="hist-hint">曲线只存在本机 data/history.json，重启面板会接着画。</p>
   </section>
 
   <section class="card span-2">

@@ -248,7 +248,7 @@ def cmd_health(cfg, log):
               '启用造物者档控制.bat）', optional=True)
     else:
         from app.daemon import Daemon
-        daemon = Daemon(cfg, log)
+        daemon = Daemon(cfg, log, record_history=False)
         daemon.tick()
         time.sleep(1.2)
         daemon.tick()
@@ -451,7 +451,7 @@ def main(argv=None):
 
     bind = cfg.get('server', 'bind', default='127.0.0.1')
     want_port = args.port or int(cfg.get('server', 'port', default=8747))
-    daemon = Daemon(cfg, log)
+    daemon = Daemon(cfg, log, record_history=not args.one_shot)
     state = {'srv': None, 'tray': None}
     quit_evt = threading.Event()
 

@@ -82,6 +82,13 @@ def make_handler(daemon, cfg, on_shutdown):
                 self._send(200, {'channels': [c.status() for c in daemon.hw.channels],
                                  'state': daemon.hw.snapshot(),
                                  'caps': daemon.hw.capability_map()})
+            elif path == '/api/history':
+                minutes = None
+                try:
+                    minutes = min(60.0, float(self.path.split('minutes=')[-1]))
+                except ValueError:
+                    pass
+                self._send(200, daemon.history_view(minutes))
             elif path == '/api/ec/probe':
                 self._send(200, daemon.hw.ec.probe())
             elif path == '/api/bench':

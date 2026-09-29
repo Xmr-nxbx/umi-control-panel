@@ -20,6 +20,7 @@ const FAN_FLAG_TEXT = { Normal_Mode: '自动', Turbo_Mode: '强冷', FanBoost_Mo
 let META = { cap_labels: {}, mode_labels: {} };
 let lastState = null;
 let benchWasRunning = false;
+let histData = { samples: [], marks: [] };
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
@@ -321,8 +322,130 @@ async function startBench(mode) {
   loadBench();
 }
 
-async function loadLogs() {
+// ---------- 历史曲线（纯 canvas，不引任何图表库：面板必须断网可用）----------
+const TIER_COLOR = { perf: '#ff5d6c', mid: '#ffb648', bal: '#35e0d8', eco: '#4ade80' };
+const SERIES = {
+  temp: [
+    { key: 'cpu_temp', label: 'CPU 温度', axis: 'L', unit: '°C', color: '#ff5d6c' },
+    { key: 'cpu_mhz', label: '实际频率', axis: 'R', unit: 'MHz', color: '#ffb648' },
+  ],
+  load: [
+    { key: 'cpu_pct', label: 'CPU 占用', axis: 'L', unit: '%', color: '#35e0d8', max: 100 },
+    { key: 'gpu_pct', label: 'GPU 占用', axis: 'L', unit: '%', color: '#4a9df8', max: 100 },
+    { key: 'fan_rpm', label: '风扇转速', axis: 'R', unit: ' RPM', color: '#4ade80' },
+  ],
+};
+
+function niceMax(v, floor) {
+  const x = Math.max(v || 0, floor || 1);
+  const step = Math.pow(10, Math.floor(Math.log10(x)));
+  return Math.ceil(x / (step / 2)) * (step / 2);
+}
+
+function drawChart(canvasId, series, data) {
+  const cv = $(canvasId);
+  if (!cv) return;
+  const rows = data.samples || [];
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth || 900;
+  const h = cv.clientHeight || 152;
+  cv.width = Math.round(w * dpr);
+  cv.height = Math.round(h * dpr);
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  const box = document.getElementById(canvasId.replace('chart-', 'legend-'));
+  if (rows.length < 3) {
+    g.fillStyle = '#7c8ba1'; g.font = '12px system-ui';
+    g.fillText('正在积累数据（每 5 秒一个点，已采到 %d 个）…', 12, h / 2);
+    if (box) box.innerHTML = '';
+    return;
+  }
+  const padL = 40; const padR = 46; const padT = 10; const padB = 16;
+  const iw = w - padL - padR; const ih = h - padT - padB;
+  const t0 = rows[0].t; const t1 = rows[rows.length - 1].t || t0 + 1;
+  const px = (t) => padL + ((t - t0) / Math.max(1, t1 - t0)) * iw;
+  const span = {};
+  series.forEach((s) => {
+    const vals = rows.map((r) => r[s.key]).filter((v) => v != null);
+    if (!vals.length) { span[s.axis] = { lo: 0, hi: s.max || 10 }; return; }
+    const hi = s.max || niceMax(Math.max(...vals), s.key.indexOf('temp') >= 0 ? 60 : 10);
+    const lo = s.max ? 0 : Math.max(0, Math.floor(Math.min(...vals) / 10) * 10);
+    span[s.axis] = span[s.axis] || { lo: Infinity, hi: -Infinity };
+    span[s.axis].lo = Math.min(span[s.axis].lo, lo);
+    span[s.axis].hi = Math.max(span[s.axis].hi, hi);
+  });
+  const py = (axis, v) => {
+    const sc = span[axis] || { lo: 0, hi: 1 };
+    const k = (v - sc.lo) / Math.max(1e-6, sc.hi - sc.lo);
+    return padT + ih - k * ih;
+  };
+  // 网格 + 两侧刻度
+  g.strokeStyle = '#232c3b'; g.fillStyle = '#7c8ba1'; g.font = '10px system-ui'; g.lineWidth = 1;
+  for (let i = 0; i <= 3; i += 1) {
+    const y = padT + (ih / 3) * i;
+    g.beginPath(); g.moveTo(padL, y); g.lineTo(w - padR, y); g.stroke();
+    const lf = span.L || { lo: 0, hi: 1 }; const rf = span.R || { lo: 0, hi: 1 };
+    g.textAlign = 'right';
+    g.fillText(Math.round(lf.hi - ((lf.hi - lf.lo) / 3) * i), padL - 5, y + 3);
+    if (span.R) {
+      g.textAlign = 'left';
+      g.fillText(Math.round(rf.hi - ((rf.hi - rf.lo) / 3) * i), w - padR + 5, y + 3);
+    }
+  }
+  // 档位切换点
+  (data.marks || []).forEach((m) => {
+    if (m.t < t0 || m.t > t1) return;
+    const x = px(m.t);
+    g.strokeStyle = TIER_COLOR[m.tier] || '#7c8ba1';
+    g.setLineDash([3, 3]);
+    g.beginPath(); g.moveTo(x, padT); g.lineTo(x, padT + ih); g.stroke();
+    g.setLineDash([]);
+  });
+  // 曲线
+  series.forEach((s) => {
+    g.strokeStyle = s.color; g.lineWidth = 1.6; g.beginPath();
+    let pen = false; let last = null;
+    rows.forEach((r) => {
+      const v = r[s.key];
+      if (v == null) { pen = false; return; }
+      const x = px(r.t); const y = py(s.axis, v);
+      if (!pen) { g.moveTo(x, y); pen = true; } else { g.lineTo(x, y); }
+      last = v;
+    });
+    g.stroke();
+    s._cur = last;
+  });
+  // 时间轴
+  g.fillStyle = '#7c8ba1'; g.textAlign = 'left';
+  g.fillText(new Date(t0 * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }), padL, h - 4);
+  g.textAlign = 'right';
+  g.fillText(new Date(t1 * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }), w - padR, h - 4);
+  if (box) {
+    box.innerHTML = series.map((s) => {
+      const vals = rows.map((r) => r[s.key]).filter((v) => v != null);
+      const lo = vals.length ? Math.min(...vals) : null;
+      const hi = vals.length ? Math.max(...vals) : null;
+      return `<span><i style="background:${s.color}"></i>${esc(s.label)} `
+        + `<b>${s._cur == null ? '—' : Math.round(s._cur) + esc(s.unit)}</b> `
+        + `<span style="opacity:.7">（区间 ${lo == null ? '—' : Math.round(lo) + esc(s.unit)}`
+        + ` ~ ${hi == null ? '—' : Math.round(hi) + esc(s.unit)}）</span></span>`;
+    }).join('');
+  }
+}
+
+async function loadHistory() {
   try {
+    const d = await api('/api/history');
+    histData = d;
+    drawChart('chart-temp', SERIES.temp, d);
+    drawChart('chart-load', SERIES.load, d);
+    const n = (d.samples || []).length;
+    $('hist-range').textContent = n ? `最近 ${Math.round(((d.samples[d.samples.length - 1].t - d.samples[0].t) / 60) || 0)} 分钟 · ${n} 个点` : '暂无数据';
+  } catch (e) { /* 服务未就绪时静默 */ }
+}
+
+async function loadLogs() {  try {
     const d = await api('/api/logs?n=120');
     $('logs').textContent = (d.lines || []).join('\n') || '（暂无日志）';
     $('logs').scrollTop = $('logs').scrollHeight;
@@ -344,5 +467,12 @@ renderIntents();
 poll();
 loadLogs();
 loadBench();
+loadHistory();
 setInterval(poll, 2000);
 setInterval(loadLogs, 10000);
+setInterval(loadHistory, 5000);
+// 曲线是按像素画的，窗口宽度一变就要重画（不重新拉数据）
+window.addEventListener('resize', () => {
+  drawChart('chart-temp', SERIES.temp, histData);
+  drawChart('chart-load', SERIES.load, histData);
+});

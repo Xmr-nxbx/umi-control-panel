@@ -51,12 +51,13 @@ MENU_AUTO = 0x1013
 MENU_QUIT = 0x1999
 MENU_FAN_NORMAL = 0x1020
 MENU_FAN_TURBO = 0x1021
-MENU_FAN_BOOST = 0x1022
+MENU_FAN_USER = 0x1023
 
-# 风扇模式取值必须是 OEM 枚举 MyFanCTLByteFlag 里的名字，别的不下发
-FAN_ITEMS = ((MENU_FAN_NORMAL, 'Normal_Mode', '风扇：自动'),
-             (MENU_FAN_TURBO, 'Turbo_Mode', '风扇：强冷'),
-             (MENU_FAN_BOOST, 'FanBoost_Mode', '风扇：加速'))
+# 取值必须是 OEM 枚举 MyFanCTLByteFlag 里的名字，别的不下发。
+# 只放实体「造物者模式」键真正循环的三态（和面板一致），括号里是本机实测的代价/收益。
+FAN_ITEMS = ((MENU_FAN_NORMAL, 'Normal_Mode', '造物者模式：自动'),
+             (MENU_FAN_TURBO, 'Turbo_Mode', '造物者模式：强冷（满载快 5~9%，吵）'),
+             (MENU_FAN_USER, 'User_Fan_Mode', '造物者模式：自定义曲线（没配过会慢 25%）'))
 
 TIER_COLORS = {'perf': (255, 93, 108), 'mid': (255, 182, 72),
                'bal': (53, 224, 216), 'eco': (74, 222, 128)}

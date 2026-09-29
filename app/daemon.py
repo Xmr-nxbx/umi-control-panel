@@ -7,6 +7,7 @@ from app.act.hardware import Hardware
 from app.act.power import PowerExecutor, active_scheme
 from app.bench import Bench, best_of_each_tier, power_verdict, save_record, set_baseline
 from app.config import SCHEME_LABELS, SCHEMES
+from app.history import History
 from app.policy.scheduler import TIER_LABELS, Scheduler
 from app.sense.clock import ClockSense
 from app.sense.gpu import GpuSense
@@ -21,7 +22,10 @@ COMPARE_TIERS = ('eco', 'bal', 'mid', 'perf')
 
 
 class Daemon:
-    def __init__(self, cfg, log):
+    def __init__(self, cfg, log, record_history=True):
+        """record_history=False 给一次性自检用：
+        --one-shot / --health 也会构造一个 Daemon 走两拍，但那是另一个进程，
+        不该去写常驻实例正在维护的 data/history.json。"""
         self.cfg = cfg
         self.log = log
         self.sense = SystemSense()
@@ -31,6 +35,7 @@ class Daemon:
         self.power = PowerExecutor(log)
         self.hw = Hardware(cfg, log)
         self.sched = Scheduler(cfg['scheduler'], cfg['apps'])
+        self.history = History(log) if record_history else None
         self._apply_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
@@ -53,6 +58,8 @@ class Daemon:
     # ---------- 生命周期 ----------
     def start(self):
         self.power.capture_baseline(['balanced', 'high_perf'])
+        if self.history:
+            self.log.info('[历史] 接上了上次运行的 %d 个采样点' % self.history.load())
         self.hw.start()
         self._thread = threading.Thread(target=self._run, name='daemon', daemon=True)
         self._thread.start()
@@ -65,6 +72,8 @@ class Daemon:
     def stop(self, restore=None):
         self._stop.set()
         self.hw.stop()
+        if self.history:
+            self.history.close()
         if restore is None:
             restore = bool(self.cfg.get('power', 'restore_on_exit', default=True))
         if restore:
@@ -285,9 +294,14 @@ class Daemon:
             'meta': {'cap_labels': CAP_LABELS, 'mode_labels': MODE_LABELS,
                      'tier_labels': TIER_LABELS},
         }
+        if self.history:
+            self.history.record(self._state, tier, decision.get('throttle'), now)
 
     def state(self):
         return getattr(self, '_state', {})
+
+    def history_view(self, minutes=None):
+        return self.history.view(minutes) if self.history else {'samples': [], 'marks': []}
 
     def is_admin(self):
         from app.sense.system import is_admin
