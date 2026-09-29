@@ -490,7 +490,8 @@ function renderCaps(s) {
   const shown = ['mode.read', 'mode.write', 'power_limit.read', 'power_limit.write',
                  'fan.rpm', 'fan.mode', 'fan.curve', 'fan.curve.write', 'ec.temp',
                  'battery.limit',
-                 'battery.mode.write', 'winkey.write', 'gpu.mux', 'lighting.rgb'];
+                 'battery.mode.write', 'winkey.write', 'gpu.mux', 'lighting.rgb',
+                 'lighting.rgb.write'];
   const stateText = { verified: '可用', unknown: '待验证', blocked: '受限',
                       missing: '缺本机配置', unsupported: '不支持' };
   $('caps').innerHTML = shown.map((cap) => {

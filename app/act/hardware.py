@@ -9,6 +9,7 @@ import time
 from app.act.channels.base import (CAP_FAN_MODE, CAP_MODE_READ, CAP_MODE_WRITE,
                                    CAP_PL_READ, CAP_FAN_RPM, MODE_LABELS)
 from app.act.channels.ec_gpd import EcChannel
+from app.act.channels.hid_ite8291 import HidLightChannel
 from app.act.channels.mqtt_gcu import MqttChannel
 
 ECHO_SUPPRESS_S = 8.0
@@ -30,7 +31,10 @@ class Hardware:
         self.lock = threading.Lock()
         self.ec = EcChannel(cfg, log)
         self.mqtt = MqttChannel(cfg, log)
-        self.channels = [self.ec, self.mqtt]
+        # 灯效通道只读（枚举 HID 设备），排在最后：它 read() 返回空表，
+        # 不参与档位/快照，只往能力表里添 lighting.rgb 两条。
+        self.hid = HidLightChannel(cfg, log)
+        self.channels = [self.ec, self.mqtt, self.hid]
         self.state = {k: None for k in STATE_KEYS}
         self.state.update({'source': None, 'last_event': None, 'ec_raw': {}})
         self._last_write_ts = 0.0
@@ -43,6 +47,7 @@ class Hardware:
     # ---------- 生命周期 ----------
     def start(self):
         self.ec.probe()
+        self.hid.probe()
         self.mqtt.start()
         self._thread = threading.Thread(target=self._run, name='hardware', daemon=True)
         self._thread.start()
@@ -60,6 +65,13 @@ class Hardware:
                     self.ec.probe()
                 except Exception as exc:                   # noqa: BLE001
                     self.log.error('EC 通道复查异常：%r' % (exc,))
+                if not self.hid.alive:
+                    # 灯设备可能在睡眠/唤醒后才出现，所以只在没找到时重试；
+                    # 找到了就不再枚举（一轮要打开上百个句柄，没必要空转）。
+                    try:
+                        self.hid.probe()
+                    except Exception as exc:               # noqa: BLE001
+                        self.log.error('灯效通道复查异常：%r' % (exc,))
             for _ in range(20):
                 if self._stop.is_set():
                     return
@@ -69,6 +81,7 @@ class Hardware:
         self._stop.set()
         self.mqtt.close()
         self.ec.close()
+        self.hid.close()
 
     # ---------- 能力 ----------
     def capability_map(self):

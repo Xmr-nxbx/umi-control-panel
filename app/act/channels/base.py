@@ -19,11 +19,12 @@ CAP_BATTERY_MODE_WRITE = 'battery.mode.write'   # 电池充电三档（平衡/�
 CAP_WINKEY_WRITE = 'winkey.write'               # Win 键锁定开关
 CAP_DGPU = 'gpu.mux'
 CAP_RGB = 'lighting.rgb'
+CAP_RGB_WRITE = 'lighting.rgb.write'   # 写灯效：协议已逆出，但可逆验证要机主在场
 
 ALL_CAPS = (CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ, CAP_PL_WRITE,
             CAP_FAN_RPM, CAP_FAN_MODE, CAP_FAN_CURVE, CAP_FAN_CURVE_WRITE,
             CAP_TEMP_EC, CAP_BATTERY_LIMIT,
-            CAP_BATTERY_MODE_WRITE, CAP_WINKEY_WRITE, CAP_DGPU, CAP_RGB)
+            CAP_BATTERY_MODE_WRITE, CAP_WINKEY_WRITE, CAP_DGPU, CAP_RGB, CAP_RGB_WRITE)
 
 CAP_LABELS = {
     # 措辞跟着实测走（2026-09-30 全表观察，README 6.2）：本机的硬件模式总开关是
@@ -42,7 +43,10 @@ CAP_LABELS = {
     CAP_BATTERY_MODE_WRITE: '切换电池充电档（平衡/健康/长效）',
     CAP_WINKEY_WRITE: 'Win 键锁定开关',
     CAP_DGPU: '独显直连 MUX',
-    CAP_RGB: '键盘/灯带 RGB',
+    # 措辞必须说清「找到了设备」不等于「能控制」：灯效的真实通路是 USB HID，
+    # 设备枚举是只读的、随时可验，而写下去要发 Feature Report，还没做过可逆验证。
+    CAP_RGB: '键盘/灯带设备已就位（USB HID 枚举）',
+    CAP_RGB_WRITE: '写灯效（协议已逆出，未做可逆验证）',
 }
 
 MODES = ('office', 'balance', 'turbo')

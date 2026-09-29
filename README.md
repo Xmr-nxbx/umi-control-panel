@@ -46,6 +46,7 @@
 | 实时 PL1/PL2 写入 | **未生效，已找到原因** | 写进去会自清、性能无变化（见 6.2）；离线核对 OEM 代码后确认那一组寄存器是 MyFan3 一代机型的落点，本机是 CML 平台。改功耗墙走风扇字节，不裸写 PL |
 | 风扇曲线（16 点表） | **可读，已实测** | 布局取自同源机型反编译出的 `SetEcFanTable`/`GetEcFanTable`，本机只读转储两轮（每轮 96 次读、**0 次写**）解出 CPU/GPU 各 16 点，面板上点一下就读（见 6.11 第八节）。**写入未验证**：可逆验证要机主在场，能力表里 `fan.curve.write` 一直是 `blocked`，面板不给按钮 |
 | OEM GCUBridge 通道（MQTT） | **已连通，只读在用** | 服务恢复后 `127.0.0.1:13688` 可连；一条 `GETSTATUS` 就拿到全部开关状态（Win 锁、触摸板、灯条、键盘背光、独显直连…，见 6.6）。**写通道待验证**：没做过可逆验证之前面板不点亮 |
+| 灯效设备（ITE 8291，USB HID） | **已枚举到位，写入故意没做** | 本机 18 个 HID 接口里 4 个是 ITE，键盘四区背光（`048D:CE00` page `0xFF12`）与 USB 灯条（`048D:6005` page `0xFF03`）都在，设备自报 Feature 报告 **9 字节**，与协议假设一致；9 字节编码器已实现，厂商 BIOS 里那五条样例报告逐字节复现成功（见 6.11 第四节）。**模块里没有任何发送函数**，能力表 `lighting.rgb` = 可用、`lighting.rgb.write` = 受限（新写通道要先按 6.3 第 2 条做一次可逆验证，需机主在场） |
 
 ### 实测结论：为什么「切了档却体会不出来」
 
@@ -224,6 +225,8 @@ app/
                             + 16 点风扇表按需只读转储（fan_curve()，一个写都不发）
   act/channels/mqtt_gcu.py  兜底通道：OEM GCUBridge MQTT + 命令白名单
   act/channels/gcu_actions.json  只允许发送已在本机逆向字符串中确认存在的 Action
+  act/channels/hid_ite8291.py 灯效通道：ITE 8291 USB HID 只读枚举 + 9 字节报告编码器；
+                            按 (VID,PID,usage page) 三元组挑设备，**没有任何发送函数**
   server/httpd.py           标准库 ThreadingHTTPServer + REST + 静态白名单
   web/                      index.html / app.js / style.css（无构建步骤）
   history.py                遥测历史环形缓冲（5 秒一点、保留 30 分钟、60 秒落盘，重启接上）
@@ -244,6 +247,7 @@ tests/test_write_gates.py     10 个写入闸门场景（跨站 Origin 一律 40
 tests/test_fan_curve.py       12 个风扇表解码场景（拿本机实测基线钉住布局、三个坑与「只读」自检）
 tests/test_rom_fv.py          12 个固件卷解析场景（合成镜像，钉住 DataOffset 差 4、LZMA_Alone 13 字节头与错位重对齐）
 tests/test_rom_ec_fantable.py 26 个 EC 默认风扇表场景（合成镜像，钉住 48 字节记录布局、合理性判据与相位过滤）
+tests/test_hid_light.py     72 个灯效场景（厂商五条样例逐字节复现、三元组挑设备、以及「不许长出发送函数」）
 scripts/                    setup_runtime.ps1、make_bats.py（bat 生成器）、17 个入口 bat（GBK+CRLF）
 tools/                      逆向与验证工具，产物落 tools/out（已 gitignore）。默认只读；
                             带写的那些都自带「存原值→温度保险→还原回读」，脚本自检 writes 计数
@@ -272,6 +276,9 @@ tools/                      逆向与验证工具，产物落 tools/out（已 gi
                             找机型名、OEM 模块名、厂商字符串表；不刷写、不碰任何设备，见 6.11 第九节
   rom_ec_fantable.py        只读解出 ROM 里各份 EC 镜像自带的**默认风扇表**（48 字节定长记录），
                             并可与 ec_fantable_dump.py 的活表对照，见 6.11 第十节
+  hid_light_probe.py        只读枚举 HID 接口：报出每个 ITE 集合的 usage page / Feature 长度 /
+                            版本，并复现厂商那五条样例报告（只打印不发）；不需要管理员，
+                            可以和面板同时跑，见 6.11 第四节
 ```
 
 **设计原则**
@@ -844,6 +851,35 @@ PROJECT_ID 15 不在 `CommercialProjectIDs` 里，所以只要 CustomizeTarget �
 不碰 EC、不碰驱动、天然可逆。但它是新的写通道，要按 6.3 第 2 条重新走一遍验证，
 本轮没做。
 
+**实测补充：只读枚举了本机 18 个 HID 接口，上面那段里的两处推断现在改成实测（2026-09-30 深夜）**
+
+`tools/hid_light_probe.py`（只读，可以和面板同时跑，不需要管理员）实测结果：
+
+- **每个 ITE 设备暴露的是两个集合，不是一个。** 上面写"两个 HID 接口"是照着文档说的，
+  实际上 `048D:CE00` 和 `048D:6005` 各自都有两个集合：
+
+  | 设备 | 接口 | usage page | Feature 长度 | 认作 |
+  |------|------|-----------|-------------|------|
+  | `048D:CE00` | `MI_00` | `0xFF89` usage 16 | **17** 字节 | 认不出来，不碰 |
+  | `048D:CE00` | `MI_01` | `0xFF12` usage 1 | 9 字节 | 键盘四区背光 |
+  | `048D:6005` | `MI_00` | `0xFF89` usage 16 | **17** 字节 | 认不出来，不碰 |
+  | `048D:6005` | `MI_01` | `0xFF03` usage 1 | 9 字节 | USB 灯条 |
+
+  所以挑选目标**必须用 (VID, PID, usage page) 三元组**，不能只用 VID/PID：
+  只用 VID/PID 会先撞上 `MI_00` 那个 17 字节的集合，然后把 9 字节的报告发进去——
+  发到语义未知的接口上，后果未知。这条不是洁癖，是防错。代码里 `TARGET_BY_TRIPLE`
+  就是这么做的，`tests/test_hid_light.py` 的 fixture 故意把 `MI_00` 排在前面钉住它。
+- **9 字节这个长度不再是推断，是设备自己报的。** `HidP_GetCaps` 在两个灯效集合上都返回
+  `FeatureReportByteLength == 9`，和协议假设对上了。此前它只靠 Linux 驱动和文档佐证。
+- **两个 `0xFF89` / 17 字节的集合仍然认不出来**，登记在 `detail['other_collections']` 里但
+  永不打开句柄。按 6.3 第 1 条，没有 OEM 代码佐证的接口不探测。
+- **厂商那五条样例报告逐字节复现成功**（只打印、不发）：`LEDKB` 两条、`USBLB` 三条。
+  顺带对上了编码——`0x32` = 50 = 亮度最高档，`0x05` = 速度第 3 档，`0x24` = 36 = 亮度第 4 档。
+  编码器实现见 `app/act/channels/hid_ite8291.py`，只做了编码，**没有发送函数**。
+- **可逆性这半边现在有厂商自己的证据了**：第九节 ②-补 里那两条 BIOS 命令
+  （`LEDKB /GetStatus` 与 `USBLB /GetMode`）说明两个灯设备都能读回当前设置，
+  所以"存原值 → 写 → 写回"是厂商认可的做法，不是我们发明的。真正下发仍然要机主在场。
+
 #### 五、两件**没做**的事，以及为什么
 
 - **没有解密我们本机的 `GCUService.exe`**。他们的方法是**内存转储**而非静态破解
@@ -1112,6 +1148,27 @@ MECHREVO / Standard / Standard / Standard                    ← Type 3 机箱
 - **`OemTdr`**：`/SetTDR: Set OemTDR value from 0 to 255`，存在 `UniWillVariable` 里，打印 `%03d`。
   语义没查出来，只记存在，**不猜**。
 
+**②-补：又过了一遍命令面，捞到四条对 #29 直接有用的（2026-09-30 深夜）**
+
+- **两个灯设备都有「读回」命令**——这是 #29 缺的那半「可逆」：
+  `LEDKB /GetStatus : Display current keyboard light setting.`、
+  `USBLB /GetMode : Display current USB light Bar setting.`，
+  而且 USBLB 的回显是三条各 8 字节的格式串 `1AH : %02X×8` / `14H : %02X×8` / `08H : %02X×8`，
+  正好一一对上它的三条写命令。**厂商自己就是「读回来 → 改 → 写回去」这么干的**，
+  所以"先存一份当前设置、写完能还原成它"这条路在固件侧是走得通的，不是我们硬凑。
+- **RGBKB 不是灯效引擎，就是一个静态颜色**：`/Set <6-digits>: 000000 ~ 505050`、
+  `Sample1: /Set 494847 => Set Red:49 Green:48 Blue:47`、
+  `Current RGB Configuration: R:%d, G:%d, B:%d`、`/Clear: Revert RGB KB default color level.`。
+  BIOS 侧对"RGB 键盘"的全部想象就是**每通道 0-50 的一个颜色**；
+  真正的灯效（呼吸/波浪那些）只能靠 `LEDKB /SetData` 那 8 个裸字节下去。
+  → 面板上别照 Creator Center 那样列一堆灯效名，先把**亮度五档 + 单色**做对。
+- **APCtrl 有 `/Clear : Revert SetApCtrl default configuration` 和 `/GetStatus`**，
+  14 个功能位全部是 `1 => on / 0 => off` 的开关，取值只认 1 和 0
+  （`Value of Param:/XX invalid. Value should be 1 or 0.`）。
+  位序仍然**没解出来**，不猜（见待办 #35）。
+- **`ColorCalibration`**：`/Set (1: Enable / 0: Disable)` + `/Get`，回显
+  `Current Color Calibration Support Status: 0x%02x`。又一个"BIOS 侧存着、OS 侧读不到"的开关。
+
 **③ OEM DXE/SMM 模块清单**（356 个模块名里属于 OEM 的那批），每个都是 Windows 侧某项能力的
 固件对家：`OemACPIDriverDxe` / `OemACPIDriverSmm` / `OemACPIDriverHookDxe`
 （就是我们 EC 通道用的 `\\.\ACPIDriver` 的固件侧）、`OemPowerModeDxe`、`OemTurboModeDxe`、
@@ -1354,8 +1411,23 @@ ROM 头部那份（也就是 GM7MG0M 自己的）温度点是**另一组**
       正是实测亮度五档 `0/8/22/36/50` 的顶档）、USB Light Bar 三条 opcode `1AH/14H/08H`
       配样例（`0x14` 那条第 4-6 字节 `ff ff ff` = RGB 白，`0x08` 那条第 5 字节 `0x24 = 36`
       又是亮度档之一）、RGBKB `/Set <6-digits>: 000000 ~ 505050`（**每通道 0-50**）。
-      还差的是「可逆」那半：Feature Report 大多没有读回，可逆性得换个方式论证
-      （先存一份已知的良好设置，写完能还原成它）。
+      还差的是「可逆」那半——**这半现在也有了**（见 6.11 第九节②-补）：厂商 BIOS 自己给了
+      读回命令 `LEDKB /GetStatus : Display current keyboard light setting.` 与
+      `USBLB /GetMode : Display current USB light Bar setting.`，两个灯设备都能读回当前值，
+      所以"存原值 → 写 → 写回 → 回读"是厂商认可的路子，不是我们发明的。
+      另有一条**限制**得记下来：`RGBKB` 不是灯效引擎，它只设一个静态颜色
+      （`/Set 494847 => Red:49 Green:48 Blue:47`，每通道 0-50），DXE 卷里 275 次正则搜索
+      **没有任何效果名词**（呼吸/波浪/彩虹…），所以效果枚举我们至今没有，代码里也不编造。
+      **只读的这半已经落地了**：`app/act/channels/hid_ite8291.py` 做枚举 + 编码，
+      `tools/hid_light_probe.py` 给机主看，`tests/test_hid_light.py` 72 条钉住；
+      实测（见 6.11 第四节末尾）每个 ITE 设备**各有两个集合**，`MI_00` 是
+      `page 0xFF89` / **17 字节** / 语义未知，所以挑设备必须用 (VID,PID,usage page)
+      三元组，只用 VID/PID 会把 9 字节的报告发进那个未知接口；
+      两个灯效集合的 `FeatureReportByteLength` 都由设备自报为 **9**，
+      9 字节布局从"文档推断"升级成"实测"；厂商五条样例报告逐字节复现成功。
+      **发送路径故意不存在**（不是加了开关，是模块里根本没有 send/write 函数，
+      并由 `test_no_write_path` 钉住），能力表上 `lighting.rgb` = verified、
+      `lighting.rgb.write` = blocked。真正下发仍按 6.3 第 2 条要机主在场做一次可逆验证。
       **前提已只读钉死**：`Get-PnpDevice` 枚举确认本机 `VID_048D&PID_CE00`（键盘）
       与 `VID_048D&PID_6005`（灯条）都在、各有 MI_00/MI_01 两个接口、Status OK
       （见 6.11 第六节）
