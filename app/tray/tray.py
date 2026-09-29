@@ -8,7 +8,7 @@ import ctypes.wintypes as wt
 import struct
 import threading
 
-from app.policy.scheduler import TIER_LABELS
+from app.policy.scheduler import INTENT_NAMES, TIER_LABELS
 
 u32 = ctypes.windll.user32
 k32 = ctypes.windll.kernel32
@@ -63,9 +63,10 @@ MENU_FAN_USER = 0x1023
 
 # 取值必须是 OEM 枚举 MyFanCTLByteFlag 里的名字，别的不下发。
 # 只放实体「造物者模式」键真正循环的三态（和面板一致），括号里是本机实测的代价/收益。
-FAN_ITEMS = ((MENU_FAN_NORMAL, 'Normal_Mode', '造物者模式：自动'),
-             (MENU_FAN_TURBO, 'Turbo_Mode', '造物者模式：强冷（满载快 5~9%，吵）'),
-             (MENU_FAN_USER, 'User_Fan_Mode', '造物者模式：自定义曲线（没配过会慢 25%）'))
+# 词和屏幕提示、网页保持一套：风扇就是 自动/强冷/自定义曲线，不另造名字。
+FAN_ITEMS = ((MENU_FAN_NORMAL, 'Normal_Mode', '风扇：自动'),
+             (MENU_FAN_TURBO, 'Turbo_Mode', '风扇：强冷（满载快 5~9%，吵）'),
+             (MENU_FAN_USER, 'User_Fan_Mode', '风扇：自定义曲线（没配过会慢 25%）'))
 
 TIER_COLORS = {'perf': (255, 93, 108), 'mid': (255, 182, 72),
                'bal': (53, 224, 216), 'eco': (74, 222, 128)}
@@ -236,10 +237,10 @@ class Tray:
         hmenu = u32.CreatePopupMenu()
         u32.AppendMenuW(hmenu, MF_STRING, MENU_OPEN, '打开控制面板')
         u32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
-        for mid, name in ((MENU_AUTO, '自适应'), (MENU_OFFICE, '办公'),
-                          (MENU_BALANCE, '均衡'), (MENU_TURBO, '狂暴')):
-            checked = MF_CHECKED if self._intent == name else 0
-            u32.AppendMenuW(hmenu, MF_STRING | checked, mid, name)
+        for mid, intent in ((MENU_AUTO, 'auto'), (MENU_OFFICE, 'office'),
+                            (MENU_BALANCE, 'balance'), (MENU_TURBO, 'turbo')):
+            checked = MF_CHECKED if self._intent == intent else 0
+            u32.AppendMenuW(hmenu, MF_STRING | checked, mid, INTENT_NAMES[intent])
         u32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
         for mid, flag, text in FAN_ITEMS:
             state = MF_STRING | (MF_CHECKED if self._fan == flag else 0)

@@ -85,7 +85,7 @@ def measure(ch, bench, thermal, clock, flag):
     rpm.start()
     mon.start()
     try:
-        multi = bench.run_multi(target_s=LOAD_S)
+        multi = bench.load(target_s=LOAD_S)
     finally:
         mon.halt()
         mon.join(timeout=2.0)
@@ -97,8 +97,8 @@ def measure(ch, bench, thermal, clock, flag):
     temp = out.get('temp_c')
     if temp and temp >= TEMP_ABORT:
         raise RuntimeError('温度 %s°C 触顶，立刻还原' % temp)
-    print('  → 多线程 %.2f Mops/s，平均 %s MHz（峰值 %s），风扇均 %s / 峰 %s RPM，最高 %s°C'
-          % (out.get('mops') or 0, out.get('clock_mhz'), out.get('clock_peak_mhz'),
+    print('  → 多线程 %.1f MB/s，平均 %s MHz（峰值 %s），风扇均 %s / 峰 %s RPM，最高 %s°C'
+          % (out.get('mb_s') or 0, out.get('clock_mhz'), out.get('clock_peak_mhz'),
              out.get('rpm_avg'), out.get('rpm_peak'), out.get('temp_c')), flush=True)
     return out
 
@@ -127,7 +127,7 @@ def main(argv=None):
         return 1
     original = ch._read_named(FAN_KEY)
     print('起始 %s = 0x%02X（%s），测完会原样写回' % (
-        FAN_KEY, original or 0, ch._fan_flag_name(original) or '?'))
+        FAN_KEY, original or 0, ch.fan_flag_name(original) or '?'))
     bench = Bench(log=log, thermal=thermal, clock=clock)
 
     results = {}
@@ -144,7 +144,7 @@ def main(argv=None):
             time.sleep(COOLDOWN_S)
     finally:
         back = ch.set_fan_mode(
-            ch._fan_flag_name(original) or 'Normal_Mode', who='工具还原') \
+            ch.fan_flag_name(original) or 'Normal_Mode', who='工具还原') \
             if original is not None else (False, '起始值没读到，未还原')
         print('\n还原起始值：%s' % (back[1],))
         thermal.close()
@@ -155,18 +155,18 @@ def main(argv=None):
         base = results[flags[0]]
         print('\n=== 对比（基准 = %s，本轮顺序 %s）===' % (flags[0], '→'.join(flags)))
         print('%-16s %10s %10s %9s %9s %8s' % (
-            '状态', 'Mops/s', '平均MHz', '均RPM', '最高°C', '相对'))
+            '状态', 'MB/s', '平均MHz', '均RPM', '最高°C', '相对'))
         for flag, r in results.items():
-            gain = (r['mops'] / base['mops'] - 1.0) * 100.0 if base.get('mops') else 0.0
+            gain = (r['mb_s'] / base['mb_s'] - 1.0) * 100.0 if base.get('mb_s') else 0.0
             print('%-16s %10.2f %10s %9s %9s %7.1f%%' % (
-                flag, r.get('mops') or 0, r.get('clock_mhz'), r.get('rpm_avg'),
+                flag, r.get('mb_s') or 0, r.get('clock_mhz'), r.get('rpm_avg'),
                 r.get('temp_c'), gain))
         spread = [r.get('rpm_avg') or 0 for r in results.values()]
         print('\n风扇转速跨度 %d RPM；吞吐最大差 %.1f%%。'
               '如果吞吐差不到 5%%，说明这一档改变的是噪音与温度，不是性能上限。'
               % (max(spread) - min(spread),
-                 max((r.get('mops') or 0) for r in results.values()) /
-                 min((r.get('mops') or 1) for r in results.values()) * 100 - 100))
+                 max((r.get('mb_s') or 0) for r in results.values()) /
+                 min((r.get('mb_s') or 1) for r in results.values()) * 100 - 100))
     return code
 
 

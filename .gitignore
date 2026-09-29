@@ -14,6 +14,11 @@ __pycache__/
 *.dmp
 *.raw
 
+# 跑分工具：第三方二进制、上游源码、便携编译器（都能由脚本重新取，不入库）
+/tools/bin/
+/tools/src/
+/tools/toolchain/
+
 # 编辑器 / 系统
 .vscode/
 .idea/

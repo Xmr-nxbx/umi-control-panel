@@ -23,6 +23,9 @@ DEFAULTS = {
     'intent': 'auto',
     'tray': {
         'enabled': True,
+        # 按实体「造物者模式」键时在屏幕上方弹一条提示：Creator Center 卸载后
+        # 按键仍然生效但一个字都不弹，机主只能靠听风扇声猜。
+        'osd': True,
     },
     'scheduler': {
         'enabled': True,

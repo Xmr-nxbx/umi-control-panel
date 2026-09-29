@@ -120,7 +120,7 @@ pause
 BATS['跑分对比.bat'] = r"""@echo off
 setlocal
 rem 四档逐一对比跑分（约 2 分钟）：面板在跑就交给面板执行，否则本机独立跑。
-rem 纯内置负载，不下载任何第三方跑分软件。结束后自动还原电源设置。
+rem 负载是开源工具的真实工作量：zstd 压缩 + CoreMark + 短任务延迟。结束后自动还原电源设置。
 cd /d "%~dp0.."
 if not exist "tools\out" mkdir "tools\out"
 if exist "runtime\UmiPanel.exe" (
@@ -129,6 +129,39 @@ if exist "runtime\UmiPanel.exe" (
   "runtime\python.exe" "main.py" --bench compare > "tools\out\bench-compare.txt" 2>&1
 )
 type "tools\out\bench-compare.txt"
+pause
+"""
+
+BATS['下载跑分工具.bat'] = r"""@echo off
+setlocal
+rem 取开源跑分负载：zstd（facebook/zstd 官方 Release，BSD-3/GPL-2）放到 tools\bin。
+rem 顺带生成固定种子的基准输入文件，保证每次跑的内容一模一样、档位之间才可比。
+cd /d "%~dp0.."
+set "PYTHONIOENCODING=utf-8"
+if not exist "tools\out" mkdir "tools\out"
+"runtime\python.exe" "tools\fetch_bench_tools.py" > "tools\out\fetch-bench-tools.txt" 2>&1
+type "tools\out\fetch-bench-tools.txt"
+pause
+"""
+
+BATS['编译CoreMark.bat'] = r"""@echo off
+setlocal
+rem 从 EEMBC 官方仓库取 CoreMark 源码，用本机编译器编出 tools\bin\coremark.exe。
+rem 不用网上的现成 exe：跑分工具来路不明，分数就没有意义。
+cd /d "%~dp0.."
+set "PYTHONIOENCODING=utf-8"
+if not exist "tools\out" mkdir "tools\out"
+"runtime\python.exe" "tools\build_coremark.py" > "tools\out\build-coremark.txt" 2>&1
+type "tools\out\build-coremark.txt"
+if exist "tools\bin\coremark.exe" (
+  echo.
+  echo 编译成功：tools\bin\coremark.exe
+) else (
+  echo.
+  echo 没编出来。多半是没有 C 编译器——装一个便携工具链就行，例如：
+  echo   winget install --id BrechtSanders.WinLibs.POSIX.UCRT
+  echo 或者把 gcc.exe 所在目录加进 PATH，再重跑这个脚本。
+)
 pause
 """
 

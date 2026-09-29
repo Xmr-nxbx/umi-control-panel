@@ -76,18 +76,19 @@ def _http_json(port, path, body=None, timeout=10):
 def _print_bench_table(view):
     rows = view.get('tiers') or []
     base = view.get('baseline') or {}
-    print('\n基准（=100 分）：单线程 %s Mops/s，多线程 %s Mops/s，短任务 %s ms，内存 %s MB/s' % (
-        base.get('single_mops'), base.get('multi_mops'), base.get('burst_ms'),
-        base.get('mem_mb_s')))
-    print('%-6s %-7s %-9s %-9s %-9s %-9s %-8s %-6s' % (
-        '档位', '总分', '单线程', '多线程', '短任务ms', '内存MB/s', '频率MHz', '最高温'))
+    print('\n基准（=100 分）：全核 %s MB/s，单核 %s MB/s，CoreMark %s，短任务 %s ms' % (
+        base.get('all_mb_s'), base.get('core_mb_s'), base.get('coremark'),
+        base.get('burst_ms')))
+    print('%-6s %-7s %-11s %-11s %-10s %-10s %-8s %-6s' % (
+        '档位', '总分', '全核MB/s', '单核MB/s', 'CoreMark', '短任务ms', '频率MHz', '最高温'))
     for row in rows:
         r = row.get('record') or {}
         s = row.get('score') or {}
-        print('%-6s %-7s %-9s %-9s %-9s %-9s %-8s %-6s' % (
+        print('%-6s %-7s %-11s %-11s %-10s %-10s %-8s %-6s' % (
             row.get('label') or row.get('tier'),
             s.get('overall') if s.get('overall') is not None else '-',
-            r.get('single_mops'), r.get('multi_mops'), r.get('burst_ms'), r.get('mem_mb_s'),
+            r.get('all_mb_s'), r.get('core_mb_s'),
+            r.get('coremark') or '-', r.get('burst_ms'),
             r.get('clock_mhz') or '-', r.get('temp_after_c') or '-'))
     verdict = view.get('verdict')
     if verdict:
@@ -160,10 +161,11 @@ def cmd_bench_local(cfg, log, mode):
             record['run_id'] = run_id
             save_record(record)
             results.append(record)
-            print('    → 单线程 %s Mops/s，多线程 %s Mops/s，短任务 %s ms，内存 %s MB/s，'
+            print('    → 全核 %s MB/s，单核 %s MB/s，CoreMark %s，短任务 %s ms，'
                   '频率 %s MHz，最高 %s°C'
-                  % (record['single_mops'], record['multi_mops'], record['burst_ms'],
-                     record['mem_mb_s'], record.get('clock_mhz'), record.get('temp_after_c')))
+                  % (record['all_mb_s'], record['core_mb_s'],
+                     record.get('coremark') or '未测', record['burst_ms'],
+                     record.get('clock_mhz'), record.get('temp_after_c')))
             if i + 1 < len(tiers):
                 print('    降温 %ds…' % BENCH_COOLDOWN_S)
                 time.sleep(BENCH_COOLDOWN_S)
@@ -594,6 +596,17 @@ def main(argv=None):
                              name='tray-sync', daemon=True).start()
         except Exception as exc:                           # noqa: BLE001
             log.error('托盘启动失败（面板仍可用）：%r' % (exc,))
+
+    # 屏幕提示：实体键、网页/托盘手动操作时弹一下；自适应自己换档不弹（打扰）。
+    # 和托盘是两码事，--no-tray 时照样要弹。
+    if cfg.get('tray', 'osd', default=True):
+        try:
+            from app.tray.osd import Osd
+
+            daemon.osd = Osd(log)
+            daemon.hw.ec.on_key = daemon.on_fan_key
+        except Exception as exc:                           # noqa: BLE001
+            log.error('屏幕提示启动失败（按键仍生效，只是不弹字）：%r' % (exc,))
 
     if cfg.get('server', 'open_browser_on_start', default=True) and not args.no_browser:
         webbrowser.open(url)

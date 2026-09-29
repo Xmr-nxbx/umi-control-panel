@@ -13,6 +13,12 @@ STATIC = {'/': ('index.html', 'text/html; charset=utf-8'),
           '/manifest.webmanifest': ('manifest.webmanifest', 'application/manifest+json')}
 SENSITIVE_KEYS = {'password', 'token', 'secret'}
 
+# 面板每 2 秒轮询一次的地址。成功的轮询不记日志——
+# 一记就把「最近日志」刷满（600 行只够一分钟），机主真正想看的动作反而被挤掉。
+# 出错（非 200）照样记。
+QUIET_PATHS = ('/api/state', '/api/history', '/api/logs', '/api/bench',
+               '/style.css', '/app.js', '/favicon.ico', '/index.html')
+
 
 def _scrub(node):
     if isinstance(node, dict):
@@ -29,7 +35,10 @@ def make_handler(daemon, cfg, on_shutdown):
         server_version = 'UmiControlPanel/0.1'
 
         def log_message(self, fmt, *args):
-            daemon.log.info('[http] ' + (fmt % args))
+            text = fmt % args
+            if ' 200 ' in text and any(p in text for p in QUIET_PATHS):
+                return
+            daemon.log.info('[http] ' + text)
 
         # ---- 工具 ----
         def _send(self, code, body, ctype='application/json; charset=utf-8'):

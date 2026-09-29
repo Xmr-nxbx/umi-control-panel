@@ -1,0 +1,150 @@
+# -*- coding: utf-8 -*-
+"""屏幕提示文案的测试。
+
+    runtime\\python.exe tests\\test_fankey.py
+
+盯的是四件容易悄悄坏掉的事：
+  * 全项目只有一套模式词（省电/均衡/流畅/性能），弹窗不许另造说法；
+  * 三态文案不能张冠李戴（把强冷说成自动，机主会以为按键坏了）；
+  * 实体键的三态映射到哪个控制意图（强冷→锁性能、自动→自适应、自定义曲线→不动电源）；
+  * 认不出的取值照实说，不猜。
+弹不弹的规矩（人动手才弹）在 daemon 里，这里只管文案和映射。
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app.policy.scheduler import INTENT_NAMES                # noqa: E402
+from app.tray import fankey                                 # noqa: E402
+
+CASES = []
+
+
+def case(name):
+    def deco(fn):
+        CASES.append((name, fn))
+        return fn
+    return deco
+
+
+@case('实体键强冷 → 性能模式，副标题说清风扇和电源都变了')
+def _():
+    title, sub = fankey.key_text('Turbo_Mode')
+    assert title == '性能模式', title
+    assert '强冷' in sub and '锁定性能' in sub, sub
+
+
+@case('实体键自动 → 自适应模式，副标题说清交回自动')
+def _():
+    title, sub = fankey.key_text('Normal_Mode')
+    assert title == '自适应模式', title
+    assert '自动' in sub, sub
+
+
+@case('User_Fan 全家族都算自定义曲线：只接管风扇，不动电源')
+def _():
+    for flag in ('User_Fan_Mode', 'User_Fan_HiMode', 'User_Fan_Level3'):
+        title, sub = fankey.key_text(flag)
+        assert title == '风扇：自定义曲线', (flag, title)
+        assert '电源模式不变' in sub, (flag, sub)
+
+
+@case('认不出的取值照实说，不猜')
+def _():
+    title, sub = fankey.key_text('Turbo_Mode+FanBoost_Mode')
+    assert title == '风扇模式变了', title
+    assert 'Turbo_Mode+FanBoost_Mode' in sub, sub
+    title, sub = fankey.key_text(None)
+    assert '未知' in sub, sub
+
+
+@case('意图弹窗复用模式词：锁定性能 → 性能模式 + 不再自动切换')
+def _():
+    title, sub = fankey.intent_text('turbo')
+    assert title == '性能模式', title
+    assert '不再自动切换' in sub, sub
+    title, sub = fankey.intent_text('office')
+    assert title == '省电模式', title
+    title, sub = fankey.intent_text('balance')
+    assert title == '均衡模式', title
+
+
+@case('意图自适应 → 自适应模式 + 自动换档')
+def _():
+    title, sub = fankey.intent_text('auto')
+    assert title == '自适应模式', title
+    assert '自动换档' in sub, sub
+
+
+@case('意图取值不认识时不许编模式名')
+def _():
+    title, sub = fankey.intent_text('gaming')
+    assert title == '控制意图变了', title
+    assert 'gaming' in sub, sub
+
+
+@case('风扇策略弹窗：网页/托盘手动改风扇时用同一套词')
+def _():
+    title, sub = fankey.fan_text('Turbo_Mode')
+    assert title == '风扇：强冷', title
+    title, sub = fankey.fan_text('User_Fan_Mode')
+    assert title == '风扇：自定义曲线', title
+    title, sub = fankey.fan_text('Normal_Mode')
+    assert title == '风扇：自动', title
+
+
+@case('调度性格弹窗带上性格名和说明')
+def _():
+    title, sub = fankey.profile_text('安静优先', '升档慢、降档快，兼顾噪音')
+    assert title == '调度性格：安静优先', title
+    assert sub == '升档慢、降档快，兼顾噪音', sub
+
+
+@case('实体键三态 → 控制意图：强冷锁性能、自动回自适应、自定义曲线不动电源')
+def _():
+    assert fankey.KEY_INTENT.get('Turbo_Mode') == 'turbo'
+    assert fankey.KEY_INTENT.get('Normal_Mode') == 'auto'
+    # 这两类不许改电源：自定义曲线只管风扇，认不出的取值不敢猜。
+    for flag in ('User_Fan_Mode', 'User_Fan_HiMode', 'FanBoost_Mode',
+                 'Turbo_Mode+FanBoost_Mode', None):
+        assert fankey.KEY_INTENT.get(flag) is None, flag
+
+
+@case('按键弹的标题和意图弹的标题必须是同一句话（两套词就白对齐了）')
+def _():
+    for flag, intent in fankey.KEY_INTENT.items():
+        assert intent in INTENT_NAMES, (flag, intent)
+        assert fankey.key_text(flag)[0] == fankey.intent_text(intent)[0], flag
+
+
+@case('文案里不许再出现第二套模式词')
+def _():
+    texts = list(fankey.FAN_KEY_TEXT.values()) + list(fankey.FAN_FLAG_TEXT.values())
+    texts += [fankey.USER_FAN_TEXT]
+    texts += [fankey.intent_text(i) for i in ('auto', 'office', 'balance', 'turbo')]
+    texts += [fankey.key_text(f) for f in ('Turbo_Mode', 'Normal_Mode', 'User_Fan_Mode', 'X')]
+    for title, sub in texts:
+        for banned in ('办公', '狂暴', '造物者 开', '造物者 关'):
+            assert banned not in title + sub, (banned, title, sub)
+
+
+def main():
+    print('屏幕提示文案：%d 个场景' % len(CASES))
+    bad = 0
+    for i, (name, fn) in enumerate(CASES, 1):
+        try:
+            fn()
+            print('  ok   [%02d] %s' % (i, name))
+        except AssertionError as exc:
+            bad += 1
+            print('  FAIL [%02d] %s -> %s' % (i, name, exc))
+        except Exception as exc:                            # noqa: BLE001
+            bad += 1
+            print('  ERR  [%02d] %s -> %r' % (i, name, exc))
+    print('\n结果：%d/%d 通过' % (len(CASES) - bad, len(CASES)))
+    return 1 if bad else 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

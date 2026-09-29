@@ -1,11 +1,21 @@
 'use strict';
 
+// 意图 → 档位的对应关系写在这里，面板上照着念，别让机主去猜。
+// 全项目只有一套模式词：省电/均衡/流畅/性能。意图就是「自适应 / 锁定某模式」，
+// 不再另造「办公/狂暴」——机主反馈过两套词并存根本对不上号。
+// tier=null 表示不锁档位（自适应），标题就显示调度器当前实际落在哪一档。
 const INTENTS = [
-  { id: 'auto', name: '自适应', desc: '按负载/空闲/温度趋势自动换挡' },
-  { id: 'office', name: '办公', desc: '锁定省电档，最低能耗' },
-  { id: 'balance', name: '均衡', desc: '锁定均衡档，日常够用' },
-  { id: 'turbo', name: '狂暴', desc: '锁定性能档，功耗拉满' },
+  { id: 'auto', name: '自适应', tier: null,
+    desc: '不锁模式：面板按负载和温度，自己在 省电/均衡/流畅/性能 之间换' },
+  { id: 'office', name: '锁定省电', tier: 'eco',
+    desc: '一直用省电模式：最凉、最省电、风扇最安静，性能最低' },
+  { id: 'balance', name: '锁定均衡', tier: 'bal',
+    desc: '一直用均衡模式：日常够用，不会自己乱跳' },
+  { id: 'turbo', name: '锁定性能', tier: 'perf',
+    desc: '一直用性能模式：功耗拉满，风扇最响' },
 ];
+const INTENT_BY_ID = {};
+INTENTS.forEach((it) => { INTENT_BY_ID[it.id] = it; });
 const TIERS = { perf: '性能', mid: '流畅', bal: '均衡', eco: '省电' };
 const BOOST_TEXT = { 0: '禁用', 1: '启用', 2: '激进', 3: '高效', 4: '高效激进', 5: '保证频率' };
 // 风扇模式字节取值来自 OEM 自己的枚举（MyFanCTLByteFlag），这里只做中文注解
@@ -20,6 +30,7 @@ const FAN_FLAG_TEXT = { Normal_Mode: '自动', Turbo_Mode: '强冷', FanBoost_Mo
 let META = { cap_labels: {}, mode_labels: {} };
 let lastState = null;
 let benchWasRunning = false;
+let benchTimer = null;   // 跑分进行中改成 1 秒刷一次，进度条才看得出在动
 let histData = { samples: [], marks: [] };
 
 const $ = (id) => document.getElementById(id);
@@ -44,6 +55,43 @@ function toast(text, bad) {
   el.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
+}
+
+// ---------- 自动探测硬件通道 ----------
+// 以前要点「重新探测通道」才更新，机主点一次看到「自检通过」就不敢再动了，
+// 也不知道下一次该什么时候点。现在改成：页面看得见就定时探，切回来也探一次，全部带防抖。
+// 防抖是必须的：一次探测要把 EC 的 125 个寄存器按 2 秒一轮的限速读一遍，
+// 快速来回切标签页要是每次都触发，等于让 EC 白忙，日志也会被刷满。
+const PROBE_DEBOUNCE_MS = 1500;    // 切回页面后等这么久才探，期间再切走就取消
+const PROBE_MIN_GAP_MS = 90000;    // 两次探测最少隔这么久
+const PROBE_EVERY_MS = 180000;     // 页面一直开着的话，每 3 分钟探一次
+const VISIBLE_DEBOUNCE_MS = 400;   // 切回页面后补数据的防抖
+let probeTimer = null;
+let visibleTimer = null;
+let probing = false;
+let lastProbeAt = 0;
+
+function scheduleProbe() {
+  clearTimeout(probeTimer);
+  if (document.hidden || probing) return;
+  probeTimer = setTimeout(autoProbe, PROBE_DEBOUNCE_MS);
+}
+
+async function autoProbe(say) {
+  if (probing || document.hidden) return;
+  const now = Date.now();
+  if (now - lastProbeAt < PROBE_MIN_GAP_MS) return;
+  probing = true;
+  lastProbeAt = now;
+  try {
+    const r = await api('/api/ec/probe');
+    if (say) toast('通道自检：' + ((r.detail || {}).reason || '完成'));
+  } catch (e) {
+    // 自动探测失败不打扰人：卡片上本来就会写通道状态，只有手点时才弹提示
+    if (say) toast('通道自检失败：' + e.message, true);
+  }
+  probing = false;
+  poll();
 }
 
 function renderIntents() {
@@ -71,13 +119,21 @@ function renderPills(s) {
   const ec = s.power_caps || {};
   pills.push(`<span class="pill ${ec.epp_supported ? 'ok' : 'warn'}">EPP ${ec.epp_supported ? '支持' : '不支持'}</span>`);
   pills.push(`<span class="pill ${s.admin ? 'ok' : ''}">${s.admin ? '管理员' : '普通权限'}</span>`);
-  if (s.throttle) pills.push('<span class="pill bad">温度保护中</span>');
-  if (s.dwell_left > 0) pills.push(`<span class="pill warn">驻留 ${Math.round(s.dwell_left)}s</span>`);
-  if (s.pending) pills.push(`<span class="pill warn">换挡防抖：${Math.round(s.pending.in_s)}s 后 → `
-    + `${esc((META.tier_labels || {})[s.pending.tier] || s.pending.tier)}</span>`);
-  if (s.resume_left > 0) pills.push(`<span class="pill warn">亮屏缓冲 ${Math.round(s.resume_left)}s</span>`);
-  if (s.guard_hits) pills.push(`<span class="pill ok">掉档拦截 ${s.guard_hits} 次</span>`);
-  if (s.external_hits) pills.push(`<span class="pill warn">外部改动 ${s.external_hits} 次</span>`);
+  if (s.throttle) pills.push('<span class="pill bad">太热了，正在压性能</span>');
+  if (s.dwell_left > 0) {
+    pills.push(`<span class="pill warn">刚升上来，先稳住 ${Math.round(s.dwell_left)} 秒再考虑降档</span>`);
+  }
+  if (s.pending) {
+    // 「防抖」是工程词，机主看不懂。这里说清楚：想降档，但要连续观察一段时间才真降。
+    pills.push(`<span class="pill warn">准备换到 `
+      + `${esc((META.tier_labels || {})[s.pending.tier] || s.pending.tier)}，`
+      + `再观察 ${Math.round(s.pending.in_s)} 秒（免得来回跳档）</span>`);
+  }
+  if (s.resume_left > 0) {
+    pills.push(`<span class="pill warn">刚解锁屏幕，${Math.round(s.resume_left)} 秒内不降档</span>`);
+  }
+  if (s.guard_hits) pills.push(`<span class="pill ok">已拦下 ${s.guard_hits} 次误降档</span>`);
+  if (s.external_hits) pills.push(`<span class="pill warn">外部改过 ${s.external_hits} 次设置</span>`);
   $('pills').innerHTML = pills.join('');
 }
 
@@ -117,6 +173,12 @@ function renderMeters(s) {
 function fmtRpm(v) {
   if (v == null) return '?';
   return v < 200 ? '停转' : (v + ' RPM');
+}
+
+// 跑分剩余时间：说「1 分 40 秒」比说「100 秒」好懂
+function fmtDur(s) {
+  s = Math.max(0, Math.round(s));
+  return s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分 ${s % 60} 秒`;
 }
 
 function hwRow(k, v, ok) {  // 文案一律由调用方给：ok 只决定灰不灰。以前这里硬写「不可控」，
@@ -177,7 +239,7 @@ function renderHardware(s) {
   $('hw-buttons').innerHTML = fanButtons
     + (canWrite ? modes.map((m) => `
     <button data-mode="${m}">${esc((META.mode_labels || {})[m] || m)}</button>`).join('') : '')
-    + `<button class="ghost" id="btn-refresh-hw">重新探测通道</button>`;
+    + `<button class="ghost" id="btn-refresh-hw">立即自检通道</button>`;
   document.querySelectorAll('#hw-buttons button[data-fan]').forEach((b) => {
     b.onclick = async () => {
       try { const r = await api('/api/fan-mode', { flag: b.dataset.fan }); toast(r.detail || '已下发'); }
@@ -192,10 +254,10 @@ function renderHardware(s) {
       poll();
     };
   });
-  $('btn-refresh-hw').onclick = async () => {
-    try { const r = await api('/api/ec/probe'); toast('EC 探测：' + ((r.detail || {}).reason || '完成')); }
-    catch (e) { toast('EC 探测失败：' + e.message, true); }
-    poll();
+  $('btn-refresh-hw').onclick = () => {
+    // 手点就是「我现在就要知道结果」，所以绕开自动探测的最短间隔，并且要弹提示
+    lastProbeAt = 0;
+    autoProbe(true);
   };
   const mqCh = (s.channels || []).find((c) => c.name === 'mqtt') || {};
   const why = (c) => (c.detail || {}).reason || '未探测';
@@ -204,7 +266,7 @@ function renderHardware(s) {
   else if (owned) hints.push('当前是自定义曲线，面板不会自动改风扇（点上面的按钮可接管）');
   // 实测：没配过曲线的自定义档满载只有 2320 MHz，比自动档慢四分之一（README 6.4）
   if (hw.fan_mode_flag === 'User_Fan_Mode') {
-    hints.push('⚠ 实测这一态满载只有 2320 MHz / 14.7 Mops/s，比「自动」慢 25%'
+    hints.push('⚠ 实测这一态满载只有 2320 MHz，比「自动」慢四分之一'
       + '（没在 Creator Center 里配过曲线时，它是最保守的一档）');
   }
   if (!canWrite) hints.push('功耗墙档位不可写：' + ((ecCh.detail || {}).write_reason || why(ecCh)));
@@ -229,7 +291,16 @@ function renderCaps(s) {
 }
 
 function renderTier(s) {
-  $('tier-now').textContent = s ? (TIERS[s.tier] || s.tier) : '--';
+  const tierName = s ? (TIERS[s.tier] || s.tier) : '--';
+  const it = INTENT_BY_ID[s && s.intent] || INTENT_BY_ID.auto;
+  const locked = !!(s && s.intent && s.intent !== 'auto');
+  // 标题必须同时说清「你选了什么」和「机器现在在哪一档」：
+  // 之前只显示档位，机主选了自适应却看到标题一会儿流畅一会儿性能，以为按键坏了。
+  $('tier-intent').textContent = s
+    ? `控制意图：${it.name}${locked ? '' : '（不锁模式，按负载自动换）'}`
+    : '控制意图：--';
+  $('tier-now').textContent = locked ? `锁定 · ${tierName}` : tierName;
+  $('tier-now').className = 'tier-now' + (locked ? ' locked' : '');
   const x = (s && s.sensor) || {};
   $('tier-clock').textContent = x.cpu_mhz ? (x.cpu_mhz + ' MHz') : '-- MHz';
   $('tier-reason').textContent = s ? (s.reason || '') : '等待数据…';
@@ -237,12 +308,14 @@ function renderTier(s) {
   $('foot-status').textContent = s
     ? `采样 ${new Date(s.ts * 1000).toLocaleTimeString()} · 已运行 ${Math.floor((s.uptime_s || 0) / 60)} 分钟 · 活动方案 ${(s.applied || {}).scheme ? (s.applied.scheme.slice(0, 8)) : '--'}`
     : '未取到数据';
-  $('intent-hint').textContent = s && s.intent === 'auto'
-    ? '自适应：升档快、降档慢；进性能档后 300 秒驻留期内不会因为一时低负载掉档。'
-    : '锁定档位：调度器不再自动漂移，温度保护仍然生效。';
+  $('intent-hint').textContent = locked
+    ? `已锁定「${TIERS[it.tier] || ''}」模式：不会自己换档，标题一直显示这一档；温度保护仍然生效。`
+    : '自适应：升档快、降档慢。标题显示的是现在实际用的模式，会随负载变化——'
+      + '进性能模式后有 300 秒驻留期，不会因为一时低负载就掉回去。';
 }
 
 async function poll() {
+  if (document.hidden) return;   // 页面看不见就不发请求，切回来会立刻补一次
   try {
     const s = await api('/api/state');
     lastState = s;
@@ -269,12 +342,18 @@ function renderBench(v) {
   }
   const running = !!job.running;
   const done = !running && job.step === '完成';
+  clearTimeout(benchTimer);
+  if (running) benchTimer = setTimeout(loadBench, 1000);
   $('bench-run').hidden = !(running || done);
   $('btn-bench-current').disabled = running;
   $('btn-bench-compare').disabled = running;
   if (running || done) {
     $('bench-fill').style.width = (done ? 100 : (job.pct || 0)) + '%';
-    $('bench-step').textContent = done ? '完成，成绩见下表' : `${job.label || ''} ${job.step || ''}`;
+    $('bench-step').textContent = done
+      ? `完成（用了 ${fmtDur(job.elapsed_s || 0)}），成绩见下表`
+      : `${job.pct || 0}% · ${job.step || ''}`;
+    $('bench-eta').textContent = done
+      ? '' : `已用 ${fmtDur(job.elapsed_s || 0)}${job.eta_s != null ? ` · 约剩 ${fmtDur(job.eta_s)}` : ''}`;
   }
   const rows = (v && v.tiers) || [];
   const base = (v && v.baseline) || {};
@@ -285,24 +364,35 @@ function renderBench(v) {
     return;
   }
   const now = lastState ? lastState.tier : null;
-  const cell = (v, unit) => (v == null ? '—' : esc(v) + (unit || ''));
+  // 分数是浮点原始值（CoreMark 能带 6 位小数），直接铺出来是 28531.883342 这种东西——
+  // 看的人分不清哪一位有意义。按列各自定小数位，空值一律显示长破折号。
+  const cell = (v, digits, unit) => (v == null || v === ''
+    ? '—' : (typeof v === 'number' ? v.toFixed(digits == null ? 0 : digits) : esc(v)) + (unit || ''));
   $('bench-table').innerHTML = `<table class="bench"><thead><tr>
-      <th>档位</th><th>总分</th><th>单线程<br><small>Mops/s</small></th>
-      <th>多线程<br><small>Mops/s</small></th><th>短任务<br><small>ms</small></th>
-      <th>内存<br><small>MB/s</small></th>
+      <th>档位</th><th>总分</th>
+      <th>全核压缩<br><small>MB/s</small></th>
+      <th>单核压缩<br><small>MB/s</small></th>
+      <th>核心计算<br><small>CoreMark</small></th>
+      <th>短任务<br><small>ms</small></th>
       <th>实测频率</th><th>最高温</th><th>睿频</th><th>电源方案</th></tr></thead><tbody>
     ${rows.map((r) => {
       const rec = r.record || {}; const sc = r.score || {}; const pf = rec.profile || {};
       return `<tr class="${rec.tier === now ? 'now' : ''}">
         <td>${esc(r.label || r.tier)}${rec.tier === now ? ' <em>当前</em>' : ''}</td>
-        <td class="score">${cell(sc.overall)}</td>
-        <td>${cell(rec.single_mops)}</td><td>${cell(rec.multi_mops)}</td>
-        <td>${cell(rec.burst_ms)}</td>
-        <td>${cell(rec.mem_mb_s)}</td><td>${cell(rec.clock_mhz, ' MHz')}</td>
-        <td>${cell(rec.temp_after_c, '°C')}</td>
+        <td class="score">${cell(sc.overall, 1)}</td>
+        <td>${cell(rec.all_mb_s, 0)}</td><td>${cell(rec.core_mb_s, 1)}</td>
+        <td>${cell(rec.coremark, 0)}</td>
+        <td>${cell(rec.burst_ms, 0)}</td>
+        <td>${cell(rec.clock_mhz, 0, ' MHz')}</td>
+        <td>${cell(rec.temp_after_c, 0, '°C')}</td>
         <td>${esc(BOOST_TEXT[pf.boost] || '—')}</td><td>${esc(pf.scheme || '—')}</td></tr>`;
     }).join('')}</tbody></table>`;
-  $('bench-hint').textContent = `基准（=100 分）：单线程 ${base.single_mops} Mops/s、多线程 ${base.multi_mops} Mops/s、短任务 ${base.burst_ms} ms。`
+  const baseLine = base.all_mb_s || base.core_mb_s || base.burst_ms
+    ? `基准（=100 分）：全核 ${cell(base.all_mb_s, 0)} MB/s、单核 ${cell(base.core_mb_s, 1)} MB/s、`
+      + `核心计算 ${cell(base.coremark, 0)}、短任务 ${cell(base.burst_ms, 0)} ms。`
+    : '还没有基准分：跑一次「四档逐一对比」，面板会以均衡档为 100 分重新钉一个基准。';
+  $('bench-hint').textContent = baseLine
+    + '负载是开源工具的真实工作量：zstd 压缩（数据处理，全核/单核各一次）+ CoreMark（纯计算）+ 短任务延迟。'
     + '总分越高越快；「短任务」是降频后来一下活的耗时，直接对应亮屏回来点东西卡不卡。';
 }
 
@@ -312,8 +402,9 @@ async function loadBench() {
 
 async function startBench(mode) {
   const tip = mode === 'compare'
-    ? '对比跑分会依次锁到省电/均衡/流畅/性能档，每档满载几秒，全程约 1.5 分钟，风扇会明显转起来；结束后自动回到当前档位。现在开始？'
-    : '会在当前档位上满载约 6 秒。现在开始？';
+    ? '对比跑分会依次锁到省电/均衡/流畅/性能档，每档跑一遍 zstd 压缩 + CoreMark + 短任务延迟，'
+      + '全程约 3 分钟（进度条会一直走并显示剩余时间），风扇会明显转起来；结束后自动回到当前档位。现在开始？'
+    : '会在当前档位上跑一遍完整负载，约 40 秒。现在开始？';
   if (!confirm(tip)) return;
   try {
     await api('/api/bench', { mode });
@@ -455,6 +546,7 @@ function renderProfiles(s) {
 }
 
 async function loadHistory() {
+  if (document.hidden) return;
   try {
     const d = await api('/api/history');
     histData = d;
@@ -465,7 +557,9 @@ async function loadHistory() {
   } catch (e) { /* 服务未就绪时静默 */ }
 }
 
-async function loadLogs() {  try {
+async function loadLogs() {
+  if (document.hidden) return;
+  try {
     const d = await api('/api/logs?n=120');
     $('logs').textContent = (d.lines || []).join('\n') || '（暂无日志）';
     $('logs').scrollTop = $('logs').scrollHeight;
@@ -518,6 +612,16 @@ loadHistory();
 setInterval(poll, 2000);
 setInterval(loadLogs, 10000);
 setInterval(loadHistory, 5000);
+setInterval(scheduleProbe, PROBE_EVERY_MS);
+// 切回这个页面时：立刻补一次数据，再顺带探一次通道（都带防抖）。
+// 页面看不见时什么都不发——面板是常驻的，机主可能几天不看一眼，
+// 没必要在后台一直打 HTTP 和读 EC 寄存器。
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  clearTimeout(visibleTimer);
+  visibleTimer = setTimeout(() => { poll(); loadBench(); loadHistory(); scheduleProbe(); },
+                            VISIBLE_DEBOUNCE_MS);
+});
 // 曲线是按像素画的，窗口宽度一变就要重画（不重新拉数据）
 window.addEventListener('resize', () => {
   drawChart('chart-temp', SERIES.temp, histData);

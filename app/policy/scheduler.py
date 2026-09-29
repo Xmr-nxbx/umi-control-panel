@@ -13,6 +13,11 @@ from collections import deque
 TIERS = ('eco', 'bal', 'mid', 'perf')
 TIER_LABELS = {'eco': '省电', 'bal': '均衡', 'mid': '流畅', 'perf': '性能'}
 INTENT_TIER = {'office': 'eco', 'balance': 'bal', 'turbo': 'perf'}
+# 全项目只许这一套模式词：省电/均衡/流畅/性能。
+# 意图是「锁不锁、锁到哪一档」，名字直接复用档位词，不再另造「办公/狂暴」——
+# 机主反馈过两套词并存（网页一套、弹窗一套）根本对不上号。
+INTENT_NAMES = {'auto': '自适应', 'office': '锁定省电',
+                'balance': '锁定均衡', 'turbo': '锁定性能'}
 # 这些来源触发的性能档视为「人工意图」，进入驻留期
 MANUAL_REASONS = ('手动', '面板', '实体按键', '亮屏', '锁定意图')
 

@@ -5,19 +5,24 @@ import time
 from app.act.channels.base import CAP_LABELS, MODE_LABELS
 from app.act.hardware import Hardware
 from app.act.power import PowerExecutor, active_scheme
-from app.bench import Bench, best_of_each_tier, power_verdict, save_record, set_baseline
+from app.bench import (Bench, best_of_each_tier, build_coremark, coremark_missing,
+                       power_verdict, save_record, set_baseline)
 from app.config import SCHED_PROFILES, SCHEME_LABELS, SCHEMES
 from app.history import History
-from app.policy.scheduler import TIER_LABELS, Scheduler
+from app.policy.scheduler import INTENT_NAMES, TIER_LABELS, Scheduler
 from app.sense.clock import ClockSense
 from app.sense.gpu import GpuSense
 from app.sense.system import SystemSense
 from app.sense.thermal import Thermal
+from app.tray import fankey
 
 APPLY_COOLDOWN_S = 3.0
 REASSERT_S = 120.0
 BENCH_SETTLE_S = 5.0
 BENCH_COOLDOWN_S = 8.0
+# 一档大概要多久（两次 zstd + CoreMark + 短任务 + 稳定/降温），只用来估剩余时间。
+# 估错了没关系：ETA 是按「已用时间 ÷ 已完成比例」现场反推的，这个数只当保底。
+BENCH_TIER_EST_S = 38.0
 COMPARE_TIERS = ('eco', 'bal', 'mid', 'perf')
 
 
@@ -55,6 +60,9 @@ class Daemon:
         self.bench = {'running': False, 'mode': None, 'tier': None, 'label': None,
                       'step': '', 'pct': 0, 'results': [], 'error': None,
                       'started_at': None, 'finished_at': None}
+        # 屏幕提示由 cli 挂进来（--no-osd / 配置关掉时保持 None）。
+        # 只有「人动手」的路径会调 _osd：自适应自己换档弹提示是打扰，不是反馈。
+        self.osd = None
 
     # ---------- 生命周期 ----------
     def start(self):
@@ -318,6 +326,32 @@ class Daemon:
         return is_admin()
 
     # ---------- 面板动作 ----------
+    def _osd(self, title, sub=''):
+        """屏幕提示。没挂 OSD（配置关掉/画不出来）时静默跳过——提示不是功能本体。"""
+        if self.osd is None:
+            return
+        try:
+            self.osd.show(title, sub)
+        except Exception as exc:                           # noqa: BLE001
+            self.log.warn('[OSD] 弹提示失败（忽略）：%r' % (exc,))
+
+    def on_fan_key(self, old, new):
+        """实体「造物者模式」键：机主眼里它就是模式键，那就让它真的切模式。
+
+        实测（README 6.2）这个键只改 EC 风扇字节、不动功耗墙，所以以前按下去
+        只有风扇变、标题和意图都不动，机主以为按键坏了。现在把三态翻译成意图：
+        强冷=锁定性能、自动=自适应、自定义曲线=只接管风扇不动电源。
+        """
+        flag = self.hw.ec.fan_flag_name(new)
+        intent = fankey.KEY_INTENT.get(flag)
+        if intent:
+            ok, _ = self.set_intent(intent, announce=False)
+            if not ok:
+                return
+            self.log.info('[实体键] 风扇字节 %s → %s，控制意图跟着切到 %s'
+                          % (old, new, INTENT_NAMES.get(intent, intent)))
+        self._osd(*fankey.key_text(flag))
+
     def set_sched_profile(self, name):
         """调度性格：安静 / 标准 / 性能。给机主的「一个按钮」，
         而不是让他去理解 cpu_perf=60 这种数字。"""
@@ -328,9 +362,11 @@ class Daemon:
         self.sched.p = dict(self.cfg['scheduler'])
         self.log.info('[面板] 调度性格 → %s（%s）' % (
             name, SCHED_PROFILES[name]['label']))
+        self._osd(*fankey.profile_text(SCHED_PROFILES[name]['label'],
+                                       SCHED_PROFILES[name]['desc']))
         return True, SCHED_PROFILES[name]['desc']
 
-    def set_intent(self, intent):
+    def set_intent(self, intent, announce=True):
         if intent not in ('auto', 'office', 'balance', 'turbo'):
             return False, '未知意图'
         self.cfg.set('intent', intent)
@@ -344,6 +380,8 @@ class Daemon:
                                 '手动指定（意图=%s）' % intent, now, forced=True)
             self._apply(self.sched.tier, now)
         self.log.info('[面板] 意图设为 %s' % intent)
+        if announce:
+            self._osd(*fankey.intent_text(intent))
         return True, 'ok'
 
     def note_session(self, kind):
@@ -371,7 +409,10 @@ class Daemon:
 
     def set_fan_mode(self, flag):
         """直接写 EC 风扇模式（自动/强冷/加速）。"""
-        return self.hw.set_fan_mode(flag)
+        ok, detail = self.hw.set_fan_mode(flag)
+        if ok:
+            self._osd(*fankey.fan_text(flag))
+        return ok, detail
 
     def fan_modes(self):
         return self.hw.fan_modes()
@@ -381,6 +422,7 @@ class Daemon:
             return False, '未知档位'
         self.sched.set_tier(tier, '面板锁定档位', time.time(), forced=True)
         self._apply(tier, time.time())
+        self._osd('%s模式' % TIER_LABELS.get(tier, tier), '已锁定，不再自动切换')
         return True, 'ok'
 
     def logs(self, n=100):
@@ -399,6 +441,7 @@ class Daemon:
         self.bench = {
             'running': True, 'mode': mode, 'tiers': tiers, 'tier': tiers[0],
             'label': TIER_LABELS.get(tiers[0], tiers[0]), 'step': '准备中…', 'pct': 0,
+            'phase': '准备中…', 'index': 0, 'intra': 0, 'eta_s': None, 'elapsed_s': 0,
             'results': [], 'error': None, 'started_at': time.time(), 'finished_at': None,
             'restore_tier': self.sched.tier, 'restore_intent': self.cfg.get('intent'),
         }
@@ -406,28 +449,61 @@ class Daemon:
         self.log.info('[跑分] 开始（%s，档位 %s）' % (mode, '→'.join(tiers)))
         return True, 'ok'
 
-    def _bench_progress(self, step, pct):
-        self.bench['step'] = step
-        self.bench['pct'] = pct
+    def _bench_progress(self, phase, intra):
+        """bench 的回调：只记「这一档走到第几步」，条子由 _bench_ticker 按时间刷。"""
+        self.bench['phase'] = phase
+        self.bench['intra'] = max(self.bench.get('intra') or 0, int(intra))
+
+    def _bench_ticker(self, halt):
+        """每 0.5 秒刷一次进度和剩余时间。
+
+        为什么不让 bench 自己报：一步卡住的话，按步骤算的条子就一动不动，
+        机主分不清是在跑还是死了。这里取两个来源的大值——
+        步骤进度（准，但会停）和 已用时间÷预估总时长（粗，但一定在走），
+        所以条子永远往前，剩余秒数则按已用时间现场反推，越跑越准。
+        """
+        n = max(1, len(self.bench.get('tiers') or []))
+        est_total = n * BENCH_TIER_EST_S
+        t0 = time.time()
+        while not halt.wait(0.5):
+            elapsed = time.time() - t0
+            frac = ((self.bench.get('index') or 0)
+                    + (self.bench.get('intra') or 0) / 100.0) / n
+            frac = max(frac, min(0.95, elapsed / est_total))
+            eta = int(elapsed * (1.0 - frac) / frac) if frac > 0.02 else int(est_total)
+            self.bench.update({
+                'pct': min(99, int(frac * 100)),
+                'eta_s': eta,
+                'elapsed_s': int(elapsed),
+                'step': '%s（第 %d/%d 档）· %s' % (
+                    self.bench.get('label') or '', (self.bench.get('index') or 0) + 1, n,
+                    self.bench.get('phase') or ''),
+            })
 
     def _bench_run(self):
         thermal, clock = Thermal(), ClockSense()
         bench = Bench(log=self.log, thermal=thermal, clock=clock)
         results = []
         run_id = int(self.bench.get('started_at') or time.time())
+        halt = threading.Event()
+        threading.Thread(target=self._bench_ticker, args=(halt,),
+                         name='bench-ticker', daemon=True).start()
         try:
+            if coremark_missing():
+                # 第一次跑分会顺手把 CoreMark 编出来（要本机有 gcc/clang）。
+                # 编不出来就算了：CoreMark 是加分项，缺了分数照样按剩下的项算。
+                self._bench_progress('第一次跑分，编译 CoreMark…', 1)
+                ok, detail = build_coremark(self.log)
+                self.log.info('[跑分] CoreMark %s：%s' % ('就绪' if ok else '不可用', detail))
             n = len(self.bench['tiers'])
             for i, tier in enumerate(self.bench['tiers']):
                 label = TIER_LABELS.get(tier, tier)
                 profile = dict(self.cfg['tiers'].get(tier) or {})
-                # 进度只按「档位序号」算：一整套里每档占 100/n，最后再留 1% 给还原。
-                # 之前是几段拼出来的，跑完最多到 98%，看着就像卡住了。
-                pct = lambda frac: min(99, int((i + frac) * 100.0 / n))
-                self.bench.update({'tier': tier, 'label': label})
-                self._bench_progress('应用中…', pct(0.02))
+                self.bench.update({'tier': tier, 'label': label, 'index': i, 'intra': 0})
+                self._bench_progress('应用中…', 2)
                 self.sched.set_tier(tier, '跑分锁定（%s）' % label, time.time(), forced=True)
                 self._apply(tier, time.time())
-                self._bench_progress('稳定中…', pct(0.10))
+                self._bench_progress('等散热稳定 %ds…' % BENCH_SETTLE_S, 6)
                 time.sleep(BENCH_SETTLE_S)
                 record = bench.run(
                     label=label, tier=tier,
@@ -435,27 +511,29 @@ class Daemon:
                            'profile': {k: profile.get(k) for k in
                                        ('scheme', 'min_ac', 'max_ac', 'boost', 'cool', 'epp')},
                            'throttled': self.sched.throttle},
-                    progress=lambda msg, p: self._bench_progress(
-                        msg, pct(0.15 + 0.80 * p / 100.0)))
+                    progress=self._bench_progress)
                 save_record(record)
                 results.append(record)
                 self.bench['results'] = list(results)
                 if i + 1 < n:
-                    self._bench_progress('测完，降温 %ds…' % BENCH_COOLDOWN_S, pct(0.98))
+                    self._bench_progress('测完，降温 %ds…' % BENCH_COOLDOWN_S, 97)
                     time.sleep(BENCH_COOLDOWN_S)
             if self.bench['mode'] == 'compare':
                 anchor = next((r for r in results if r.get('tier') == 'bal'), results[0])
                 set_baseline(anchor)
-                self.log.info('[跑分] 基准设为 %s 档：单线程 %s Mops/s，多线程 %s Mops/s' % (
-                    anchor.get('label'), anchor.get('single_mops'), anchor.get('multi_mops')))
+                self.log.info('[跑分] 基准设为 %s 档：全核 %s MB/s，单核 %s MB/s，CoreMark %s'
+                              % (anchor.get('label'), anchor.get('all_mb_s'),
+                                 anchor.get('core_mb_s'), anchor.get('coremark') or '未测'))
         except Exception as exc:                            # noqa: BLE001
             self.bench['error'] = repr(exc)
             self.log.error('[跑分] 失败：%r' % (exc,))
         finally:
+            halt.set()
             thermal.close()
             clock.close()
             self._bench_restore()
-            self.bench.update({'running': False, 'step': '完成', 'pct': 100,
+            self.bench.update({'running': False, 'step': '完成', 'phase': '完成',
+                               'pct': 100, 'eta_s': 0, 'intra': 100,
                                'finished_at': time.time()})
             self.log.info('[跑分] 结束，已回到 %s 档' % TIER_LABELS.get(
                 self.bench.get('restore_tier'), self.bench.get('restore_tier')))

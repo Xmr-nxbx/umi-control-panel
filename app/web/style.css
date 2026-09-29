@@ -36,7 +36,9 @@ header {
 
 .head-right { display: flex; align-items: center; gap: 20px; }
 .tier-box { text-align: right; }
+.tier-intent { font-size: 11px; color: var(--dim); letter-spacing: .04em; }
 .tier-now { font-size: 22px; font-weight: 700; color: var(--cyan); line-height: 1.1; }
+.tier-now.locked { color: var(--amber); }
 .tier-clock { font-size: 12px; color: var(--amber); font-variant-numeric: tabular-nums; }
 .tier-reason { font-size: 12px; color: var(--dim); max-width: 340px; }
 

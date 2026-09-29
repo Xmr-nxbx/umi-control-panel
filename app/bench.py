@@ -1,46 +1,148 @@
-"""内置跑分：不下载任何第三方软件，纯标准库量出档位之间的真实差距。
+"""跑分：负载用**开源 zstd 的真实压缩**，指标由本机现测，不写死结论。
 
-设计取舍：
-  * 单线程用纯 Python 紧循环，对频率最敏感——这正是「卡顿」的体感来源；
-  * 多线程不能用 threading（GIL 会把并行吃掉），改为拉起 N 个 python 子进程，
-    便携运行时的 python.exe 就够用，不依赖 multiprocessing；
-  * 频率/温度用后台线程旁路采样，避免拖慢被测负载；
-  * 分数是「相对基准的指数」，基准存在 data/bench.json 里，
-    没有基准时第一次跑分自动成为 100，用户看到的是「办公 72 / 狂暴 118」这种能懂的数。
+为什么不用自己写的数学循环（上一版就是）：
+  * 纯 Python 紧循环只压 CPU 整数单元，噪声大、和真实使用没关系，
+    实测四档差距本来就只有 5~9%，噪声一盖就出现「省电档分数比性能档高」；
+  * zstd 的 -b 基准模式是官方自带的真实负载（CPU + 内存带宽 + 多线程调度），
+    输出直接是 MB/s，机主看得懂、也没法被我们的解析代码编出来。
+工具来源：facebook/zstd v1.5.7 官方 GitHub Release（BSD-3-Clause / GPL-2.0 双许可），
+便携单文件放在 tools/bin/，不进仓库、不装系统、不写注册表。
+输入文件用固定随机种子生成，每次跑的内容完全一样，档位之间才可比。
 """
 import json
 import os
+import random
+import re
 import subprocess
 import threading
 import time
+import urllib.request
+import zipfile
 
 from app.paths import ROOT_DIR, data_path
 from app.sense.clock import ClockSense
 
 BENCH_NAME = 'bench.json'
 HISTORY_LIMIT = 60
-REF_SECONDS = {'single': 2.0, 'multi': 2.0, 'memory': 1.5}
-CAL_ITERS = 300000
-MEM_BLOCK = 8 * 1024 * 1024
-MEM_TARGET_S = 1.5
-CHILD_SPIN = (
-    "import sys\n"
-    "n=int(sys.argv[1]);x=123456789;m=0xFFFFFFFF\n"
-    "for _ in range(n):\n"
-    "    x=(x*1103515245+12345)&m\n"
-    "    x^=x>>13\n"
-    "print(x&7)\n"
-)
 NO_WINDOW = 0x08000000
 
+BIN_DIR = os.path.join(ROOT_DIR, 'tools', 'bin')
+ZSTD_EXE = os.path.join(BIN_DIR, 'zstd.exe')
+INPUT_FILE = os.path.join(BIN_DIR, 'bench_input.bin')
+ZSTD_VERSION = '1.5.7'
+ZSTD_URL = ('https://github.com/facebook/zstd/releases/download/v%s/'
+            'zstd-v%s-win64.zip' % (ZSTD_VERSION, ZSTD_VERSION))
+ZSTD_MEMBER = 'zstd-v%s-win64/zstd.exe' % ZSTD_VERSION
+INPUT_MB = 44
+SPEED_RE = re.compile(r'\),\s+([\d.]+) MB/s')
 
-def _spin(n):
-    x = 123456789
-    mask = 0xFFFFFFFF
-    for _ in range(n):
-        x = (x * 1103515245 + 12345) & mask
-        x ^= x >> 13
-    return x
+# CoreMark（EEMBC 官方，Apache-2.0）：量的是「纯计算」——链表/矩阵/状态机/CRC，
+# 不吃内存带宽，正好补上 zstd 覆盖不到的那一半。没有官方 Windows 二进制，
+# 只能用 tools\build_coremark.py 从官方源码现编，编不出来就跳过这一项（不影响其它分数）。
+COREMARK_EXE = os.path.join(BIN_DIR, 'coremark.exe')
+COREMARK_BUILD = os.path.join(ROOT_DIR, 'tools', 'build_coremark.py')
+COREMARK_SCORE_RE = re.compile(r'CoreMark 1\.0\s*:\s*([\d.]+)')
+COREMARK_TIME_RE = re.compile(r'total_time \(secs\):\s*([\d.]+)')
+# 跑不满 10 秒 CoreMark 就拒给分数（只打印 Iterations/Sec），标定靠这一行就够。
+COREMARK_IPS_RE = re.compile(r'Iterations/Sec\s*:\s*([\d.]+)')
+COREMARK_CAL_ITERS = 20000
+# 官方规则：单次跑不满 10 秒不算有效成绩、不吐分数。所以目标时长必须压在 10 秒以上，
+# 留 2 秒余量给「这一档比标定时快」的情况。
+COREMARK_TARGET_S = 12.0
+
+
+def zstd_missing():
+    """没下载就跑不了外部跑分，但面板要能明确说出缺什么、怎么补。"""
+    if os.path.exists(ZSTD_EXE):
+        return None
+    return '缺少开源跑分工具 zstd（tools\\bin\\zstd.exe）：运行 scripts\\下载跑分工具.bat'
+
+
+def ensure_zstd(log=None, timeout=60.0):
+    """从 GitHub 官方 Release 取 zstd.exe；已存在就不重复下载。"""
+    if os.path.exists(ZSTD_EXE):
+        return True, '已就绪'
+    try:
+        os.makedirs(BIN_DIR, exist_ok=True)
+        zip_path = os.path.join(BIN_DIR, 'zstd.zip')
+        if log:
+            log.info('[跑分] 下载 zstd v%s（官方 GitHub Release，约 1.7MB）' % ZSTD_VERSION)
+        with urllib.request.urlopen(ZSTD_URL, timeout=timeout) as resp, \
+                open(zip_path, 'wb') as f:
+            f.write(resp.read())
+        with zipfile.ZipFile(zip_path) as z:
+            with z.open(ZSTD_MEMBER) as src, open(ZSTD_EXE, 'wb') as dst:
+                dst.write(src.read())
+        try:
+            os.remove(zip_path)          # 杀软正在扫时会拒绝，删不掉不影响跑分
+        except OSError:
+            pass
+        return True, 'zstd v%s 已下载' % ZSTD_VERSION
+    except Exception as exc:                        # noqa: BLE001
+        return False, '下载失败：%r' % exc
+
+
+def ensure_input(log=None):
+    """固定种子的 44MB 输入：一半高重复文本、一半低熵随机。
+
+    重复文本模拟日志/代码这类真实可压数据，随机尾巴防止压缩器靠跳过常量取巧；
+    种子写死，所以任何一次跑分的输入字节完全一致。
+    """
+    if os.path.exists(INPUT_FILE) and os.path.getsize(INPUT_FILE) > 1024 * 1024:
+        return os.path.getsize(INPUT_FILE)
+    rnd = random.Random(20260929)
+    words = [b'power', b'thermal', b'scheduler', b'umi', b'panel', b'0x10',
+             b'fan', b'boost', b'ADDR_MAFAN_CONTROL_BYTE']
+    buf = bytearray()
+    while len(buf) < INPUT_MB * 1024 * 1024:
+        buf += b' '.join(rnd.choice(words) for _ in range(2048)) + b'\n'
+    buf += bytes(rnd.getrandbits(8) for _ in range(4 * 1024 * 1024))
+    tmp = INPUT_FILE + '.tmp'
+    with open(tmp, 'wb') as f:
+        f.write(bytes(buf))
+    os.replace(tmp, INPUT_FILE)
+    if log:
+        log.info('[跑分] 生成基准输入 %.1fMB（固定种子，可复现）' % (len(buf) / 1048576.0))
+    return len(buf)
+
+
+def _best_speed(text):
+    """zstd -b 每次迭代都重打一行，取压缩速度里最好的那个。
+
+    只匹配「x倍数), 速度 MB/s」前半段，所以不会把解压速度混进来。
+    """
+    vals = [float(x) for x in SPEED_RE.findall(text or '')]
+    return (max(vals) if vals else None), vals
+
+
+def coremark_missing():
+    """CoreMark 是加分项不是必需项：缺了只跳过，不许把整轮跑分带崩。"""
+    if os.path.exists(COREMARK_EXE):
+        return None
+    return '没有 CoreMark（tools\\bin\\coremark.exe）：运行 scripts\\编译CoreMark.bat'
+
+
+def build_coremark(log=None, timeout=900.0):
+    """调 tools/build_coremark.py 现场编译（需要本机有 gcc/clang）。"""
+    if os.path.exists(COREMARK_EXE):
+        return True, '已就绪'
+    if not os.path.exists(COREMARK_BUILD):
+        return False, '缺少编译脚本 tools\\build_coremark.py'
+    if log:
+        log.info('[跑分] 开始编译 CoreMark（EEMBC 官方源码，约 1 分钟）')
+    try:
+        proc = subprocess.run(
+            [os.path.join(ROOT_DIR, 'runtime', 'python.exe'), COREMARK_BUILD],
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
+            creationflags=NO_WINDOW, timeout=timeout,
+            env=dict(os.environ, PYTHONIOENCODING='utf-8'))
+        text = (proc.stdout or '') + (proc.stderr or '')
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, '编译脚本没跑起来：%r' % exc
+    if proc.returncode == 0 and os.path.exists(COREMARK_EXE):
+        tail = [ln for ln in text.splitlines() if ln.strip()][-1:]
+        return True, tail[0] if tail else 'CoreMark 编译完成'
+    return False, (text.strip().splitlines() or ['编译失败'])[-1][:300]
 
 
 class _Monitor(threading.Thread):
@@ -82,96 +184,144 @@ class _Monitor(threading.Thread):
         }
 
 
+def _spin(n):
+    x = 123456789
+    mask = 0xFFFFFFFF
+    for _ in range(n):
+        x = (x * 1103515245 + 12345) & mask
+        x ^= x >> 13
+    return x
+
+
 class Bench:
-    def __init__(self, log=None, thermal=None, clock=None, python_exe=None):
+    def __init__(self, log=None, thermal=None, clock=None):
         self.log = log
         self.thermal = thermal
         self.clock = clock or ClockSense()
-        self.python_exe = python_exe or os.path.join(ROOT_DIR, 'runtime', 'python.exe')
-        if not os.path.exists(self.python_exe):
-            import sys
-            self.python_exe = sys.executable
         self._ips = None
+        self._cm_ips = None
+        self._zstd_ips = None
 
-    # ---------- 负载 ----------
-    def _calibrate(self):
+    # ---------- 外部负载：开源 zstd ----------
+    def zstd(self, level, threads, iterations=3):
+        """跑一次 `zstd -b<level> -T<threads> -i<迭代>`，返回最高的压缩速度。
+
+        -T0 = 用满所有线程（吃 CPU + 内存带宽，最能反映散热/功耗限制）；
+        -T1 = 单线程（最能反映频率上限，也就是「点东西卡不卡」那部分）。
+        zstd 自己每轮迭代重打一行速度，取最好的那个，和它官方报告的口径一致。
+        """
+        missing = zstd_missing()
+        if missing:
+            raise RuntimeError(missing)
+        args = [ZSTD_EXE, '-b%d' % level, '-T%s' % threads,
+                '-i%d' % iterations, INPUT_FILE]
+        mon = _Monitor(self.clock, self.thermal)
+        mon.start()
+        t0 = time.perf_counter()
+        try:
+            proc = subprocess.run(args, capture_output=True, text=True, encoding='utf-8',
+                                  errors='replace', creationflags=NO_WINDOW, timeout=300)
+            text = (proc.stdout or '') + (proc.stderr or '')
+            err = 'zstd 退出码 %s' % proc.returncode if proc.returncode else None
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            text, err = '', 'zstd 调用失败：%r' % exc
+        dt = time.perf_counter() - t0
+        mon.halt()
+        mon.join(timeout=1.0)
+        best, vals = _best_speed(text)
+        out = {'mb_s': best, 'runs': len(vals), 'elapsed_s': round(dt, 2), 'error': err}
+        out.update(mon.result())
+        return out
+
+    def load(self, workers=None, target_s=2.5, level=3):
+        """给 EC 实验用的「全核负载 + 一个可比的吞吐数」，大约跑 target_s 秒。
+
+        用低压缩档 -b3：一遍 44MB 只要 0.1 秒左右，所以能按 target_s 折算迭代次数，
+        误差小，也不会像高档位那样一跑十几秒把机器烤热、干扰后面的测量。
+        """
+        workers = workers or (os.cpu_count() or 4)
+        if self._zstd_ips is None:                 # 每秒能压多少 MB，标定一次就够
+            res = self.zstd(level, str(workers), iterations=3)
+            if not res.get('mb_s'):
+                raise RuntimeError(res.get('error') or 'zstd 没吐出速度，负载不可用')
+            self._zstd_ips = res['mb_s']
+        size_mb = os.path.getsize(INPUT_FILE) / 1048576.0
+        iters = max(1, int(self._zstd_ips * target_s / size_mb))
+        res = self.zstd(level, str(workers), iterations=iters)
+        res['workers'] = workers
+        return res
+
+    # ---------- 外部负载：EEMBC CoreMark ----------
+    def _coremark_once(self, iterations):
+        args = [COREMARK_EXE, '0x0', '0x0', '0x66', str(iterations), '0']
+        mon = _Monitor(self.clock, self.thermal)
+        mon.start()
+        t0 = time.perf_counter()
+        try:
+            proc = subprocess.run(args, capture_output=True, text=True, encoding='utf-8',
+                                  errors='replace', creationflags=NO_WINDOW, timeout=300)
+            text = (proc.stdout or '') + (proc.stderr or '')
+            err = 'coremark 退出码 %s' % proc.returncode if proc.returncode else None
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            text, err = '', 'coremark 调用失败：%r' % exc
+        dt = time.perf_counter() - t0
+        mon.halt()
+        mon.join(timeout=1.0)
+        score = COREMARK_SCORE_RE.search(text)
+        secs = COREMARK_TIME_RE.search(text)
+        out = {'score': float(score.group(1)) if score else None,
+               'iterations': iterations,
+               'reported_s': float(secs.group(1)) if secs else None,
+               'elapsed_s': round(dt, 2),
+               'text': text,
+               'error': err or (None if score else 'coremark 没吐出分数')}
+        out.update(mon.result())
+        return out
+
+    def run_coremark(self):
+        """迭代次数按本机速度现算，目标跑 COREMARK_TARGET_S 秒。
+
+        CoreMark 的分数就是「每秒迭代次数」，所以给多少次不影响分数，只影响测得准不准。
+        标定那次只跑 0.7 秒、官方不给分数，但会给 Iterations/Sec，拿它折算就够；
+        正式跑必须满 10 秒才吐分数，所以目标时长定在 12 秒。万一还是没分数
+        （比如这一档比标定时快太多），迭代数加半再补跑一次。
+        """
+        if self._cm_ips is None:
+            cal = self._coremark_once(COREMARK_CAL_ITERS)
+            ips = COREMARK_IPS_RE.search(cal.get('text') or '')
+            if ips:
+                self._cm_ips = float(ips.group(1))
+            else:
+                secs = cal.get('reported_s') or cal.get('elapsed_s') or 0.0
+                if secs <= 0:
+                    return cal
+                self._cm_ips = COREMARK_CAL_ITERS / secs
+        iters = max(2000, int(self._cm_ips * COREMARK_TARGET_S))
+        res = self._coremark_once(iters)
+        if not res.get('score'):
+            res = self._coremark_once(iters * 3 // 2)
+        return res
+
+    def calibrate(self):
+        """短任务用的循环次数标定一次就够（只为量延迟，不当分数）。"""
         if self._ips:
             return self._ips
         best = 0.0
         for _ in range(2):
             t0 = time.perf_counter()
-            _spin(CAL_ITERS)
+            _spin(200000)
             dt = time.perf_counter() - t0
-            best = max(best, CAL_ITERS / max(dt, 1e-6))
+            best = max(best, 200000 / max(dt, 1e-6))
         self._ips = best
         return best
 
-    def run_single(self, target_s=None):
-        ips = self._calibrate()
-        n = max(50000, int(ips * (target_s or REF_SECONDS['single'])))
-        mon = _Monitor(self.clock, self.thermal)
-        mon.start()
-        t0 = time.perf_counter()
-        _spin(n)
-        dt = time.perf_counter() - t0
-        mon.halt()
-        mon.join(timeout=1.0)
-        out = {'mops': round(n / dt / 1e6, 2), 'iters': n, 'elapsed_s': round(dt, 3)}
-        out.update(mon.result())
-        return out
-
-    def run_multi(self, workers=None, target_s=None):
-        workers = workers or (os.cpu_count() or 4)
-        ips = self._calibrate()
-        per = max(50000, int(ips * (target_s or REF_SECONDS['multi'])))
-        mon = _Monitor(self.clock, self.thermal)
-        mon.start()
-        procs = []
-        t0 = time.perf_counter()
-        for _ in range(workers):
-            procs.append(subprocess.Popen(
-                [self.python_exe, '-c', CHILD_SPIN, str(per)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                creationflags=NO_WINDOW))
-        for p in procs:
-            try:
-                p.wait(timeout=120)
-            except subprocess.TimeoutExpired:
-                p.kill()
-        dt = time.perf_counter() - t0
-        mon.halt()
-        mon.join(timeout=1.0)
-        out = {'mops': round(workers * per / dt / 1e6, 2), 'workers': workers,
-               'iters': workers * per, 'elapsed_s': round(dt, 3)}
-        out.update(mon.result())
-        return out
-
-    def run_memory(self, block=MEM_BLOCK):
-        buf = bytearray(block)
-        view = bytes(block)
-        copies = 0
-        mon = _Monitor(self.clock, self.thermal)
-        mon.start()
-        t0 = time.perf_counter()
-        deadline = t0 + MEM_TARGET_S
-        while time.perf_counter() < deadline:
-            buf[:] = view
-            copies += 1
-        dt = time.perf_counter() - t0
-        mon.halt()
-        mon.join(timeout=1.0)
-        out = {'mb_s': round(copies * block / dt / 1048576.0, 1), 'copies': copies,
-               'elapsed_s': round(dt, 3)}
-        out.update(mon.result())
-        return out
-
-    def run_burst(self, repeats=3, idle_s=2.0, work_s=0.25):
+    def run_burst(self, repeats=3, idle_s=1.2, work_s=0.25):
         """短任务延迟：空转降频后突然来一下活，看多久能干完。
 
-        这正是「息屏回来点什么都卡一下」的量纲——满载吞吐看不出这个差别，
+        这正是「息屏回来点什么都卡一下」的量纲——zstd 的满载吞吐看不出这个差别，
         最低处理器状态和 EPP 的作用全体现在这里。
         """
-        ips = self._calibrate()
+        ips = self.calibrate()
         n = max(20000, int(ips * work_s))
         lat, before, after = [], [], []
         mon = _Monitor(self.clock, self.thermal, interval=0.2)
@@ -191,7 +341,6 @@ class Bench:
         out = {
             'burst_ms': round(sum(lat) / len(lat), 1),
             'burst_worst_ms': round(max(lat), 1),
-            'burst_idle_mhz': round(sum(nums(before)) / len(nums(before))) if nums(before) else None,
             'repeats': repeats,
             'elapsed_s': round(sum(lat) / 1000.0 + idle_s * repeats, 2),
         }
@@ -201,7 +350,15 @@ class Bench:
         return out
 
     # ---------- 一次完整跑分 ----------
+    STEPS = ((9, '0', '全核压缩（zstd -b9 -T0）', 'all_mb_s'),
+             (12, '1', '单核压缩（zstd -b12 -T1）', 'core_mb_s'))
+
     def run(self, label='', tier='', extra=None, progress=None):
+        """跑一整轮。进度百分比按「这一步大概占多少时间」给，保证条子匀速往前走。
+
+        上一版的进度是按步骤号算的，一步卡住条子就完全不动，机主只能干等；
+        而且最后停在 98%，看着就像没跑完。
+        """
         def step(msg, pct):
             if progress:
                 progress(msg, pct)
@@ -212,34 +369,66 @@ class Bench:
                 temp_before, _ = self.thermal.read()
             except Exception:                            # noqa: BLE001
                 temp_before = None
-        step('单线程负载…', 8)
-        single = self.run_single()
-        step('多线程负载…', 34)
-        multi = self.run_multi()
-        step('内存带宽…', 60)
-        memory = self.run_memory()
-        step('短任务延迟…', 78)
+        if not os.path.exists(ZSTD_EXE):
+            step('下载开源跑分工具 zstd…', 2)
+            ok, detail = ensure_zstd(self.log)
+            if not ok:
+                raise RuntimeError('外部跑分工具不可用：%s' % detail)
+        step('准备基准数据…', 4)
+        ensure_input(self.log)
+
+        out, clocks, temps = {}, [], []
+        total_s = 0.0
+        for i, (level, threads, msg, key) in enumerate(self.STEPS):
+            step(msg + '…', 8 + 24 * i)
+            res = self.zstd(level, threads)
+            if res.get('error') or not res.get('mb_s'):
+                raise RuntimeError(res.get('error') or 'zstd 没吐出速度，结果不可信')
+            out[key] = res['mb_s']
+            total_s += res['elapsed_s']
+            clocks.append(res.get('clock_mhz'))
+            temps.append(res.get('temp_c'))
+
+        # CoreMark 是加分项：编不出来/没装就跳过这一项，分数按剩下的项重新归一化，
+        # 绝不因为少一项就把整轮跑分判失败。
+        coremark, note = None, coremark_missing()
+        if note is None:
+            step('核心计算（CoreMark）…', 8 + 24 * len(self.STEPS))
+            res = self.run_coremark()
+            if res.get('score'):
+                coremark = res['score']
+                total_s += res['elapsed_s']
+                clocks.append(res.get('clock_mhz'))
+                temps.append(res.get('temp_c'))
+                note = None
+            else:
+                note = res.get('error') or 'CoreMark 没跑出分数'
+        if self.log and note:
+            self.log.info('[跑分] 跳过核心计算项：%s' % note)
+
+        step('短任务延迟…', 82)
         burst = self.run_burst()
-        step('完成', 100)
+        total_s += burst['elapsed_s']
+        step('完成', 96)
+        tools = ['zstd v%s（开源，BSD-3/GPL-2）' % ZSTD_VERSION]
+        if coremark is not None:
+            tools.append('CoreMark（EEMBC，Apache-2.0）')
         record = {
             'ts': round(time.time(), 1),
             'tier': tier,
             'label': label,
-            'single_mops': single['mops'],
-            'multi_mops': multi['mops'],
-            'mem_mb_s': memory['mb_s'],
+            'tool': ' + '.join(tools),
+            'all_mb_s': out['all_mb_s'],
+            'core_mb_s': out['core_mb_s'],
+            'coremark': coremark,
+            'coremark_note': note,
             'burst_ms': burst['burst_ms'],
             'burst_worst_ms': burst['burst_worst_ms'],
-            'clock_mhz': max(filter(None, [single.get('clock_mhz'), multi.get('clock_mhz')]),
-                             default=None),
-            'clock_peak_mhz': max(filter(None, [single.get('clock_peak_mhz'),
-                                                multi.get('clock_peak_mhz')]), default=None),
+            'clock_mhz': max(filter(None, clocks + [burst.get('clock_mhz')]), default=None),
+            'clock_peak_mhz': max(filter(None, clocks), default=None),
             'temp_before_c': temp_before,
-            'temp_after_c': max(filter(None, [single.get('temp_c'), multi.get('temp_c'),
-                                              memory.get('temp_c')]), default=None),
-            'workers': multi.get('workers'),
-            'elapsed_s': round(single['elapsed_s'] + multi['elapsed_s'] + memory['elapsed_s']
-                               + burst['elapsed_s'], 2),
+            'temp_after_c': max(filter(None, temps + [burst.get('temp_c')]), default=None),
+            'elapsed_s': round(total_s, 2),
         }
         if extra:
             record.update(extra)
@@ -256,8 +445,15 @@ def load_history():
         return {'baseline': None, 'runs': []}
     if not isinstance(raw, dict):
         return {'baseline': None, 'runs': []}
-    return {'baseline': raw.get('baseline'),
-            'runs': raw.get('runs') if isinstance(raw.get('runs'), list) else []}
+    runs = raw.get('runs') if isinstance(raw.get('runs'), list) else []
+    # 换成开源负载之前（2026-09-29）的成绩是自己写的 Python 数学循环量的，
+    # 和 zstd/CoreMark 没有可比性；混进同一张表只会得出假结论，所以整批丢掉。
+    # 基准同理：字段对不上就当作没有基准，下一次对比跑分会重新钉一个。
+    runs = [r for r in runs if isinstance(r, dict) and r.get('all_mb_s')]
+    baseline = raw.get('baseline')
+    if not (isinstance(baseline, dict) and baseline.get('all_mb_s')):
+        baseline = None
+    return {'baseline': baseline, 'runs': runs}
 
 
 def _write(data):
@@ -274,10 +470,19 @@ def _write(data):
 
 
 def _metrics(record):
-    return {'single_mops': record.get('single_mops'),
-            'multi_mops': record.get('multi_mops'),
-            'mem_mb_s': record.get('mem_mb_s'),
+    return {'all_mb_s': record.get('all_mb_s'),
+            'core_mb_s': record.get('core_mb_s'),
+            'coremark': record.get('coremark'),
             'burst_ms': record.get('burst_ms')}
+
+
+# (记录字段, 输出名, 权重, 方向)：延迟类越低越好，按 ref/got 反算。
+# 权重加起来是 1，但 score_of 只按「这次真测到的项」重新归一化——
+# 机器上没装 CoreMark 时，剩下三项照样能给出总分，不会凭空掉分。
+SCORE_KEYS = (('all_mb_s', 'all', 0.30, 'higher'),
+              ('core_mb_s', 'core', 0.20, 'higher'),
+              ('coremark', 'cpu', 0.25, 'higher'),
+              ('burst_ms', 'burst', 0.25, 'lower'))
 
 
 def save_record(record, make_baseline=False):
@@ -295,13 +500,6 @@ def set_baseline(record):
     data = load_history()
     data['baseline'] = _metrics(record)
     return _write(data)
-
-
-# (记录字段, 输出名, 权重, 方向)：延迟类越低越好，按 ref/got 反算
-SCORE_KEYS = (('single_mops', 'single', 0.30, 'higher'),
-              ('multi_mops', 'multi', 0.30, 'higher'),
-              ('burst_ms', 'burst', 0.30, 'lower'),
-              ('mem_mb_s', 'mem', 0.10, 'higher'))
 
 
 def score_of(record, baseline):
@@ -364,7 +562,8 @@ def power_verdict():
             return None
         return (hi[key] - lo[key]) * 100.0 / lo[key]
 
-    gains = [g for g in (gain('single_mops'), gain('multi_mops')) if g is not None]
+    gains = [g for g in (gain('all_mb_s'), gain('core_mb_s'), gain('coremark'))
+             if g is not None]
     spread = (max(clocks) - min(clocks)) * 100.0 / max(clocks) if clocks else None
     best_gain = max(gains) if gains else None
     effective = (best_gain is not None and best_gain >= 8.0) or \
@@ -385,6 +584,11 @@ def power_verdict():
             'tiers_measured': len(rows), 'reason': reason}
 
 
+def _rank(record):
+    """「哪次跑得更好」的排序键：优先看全核吞吐，缺项退到单核，再缺就 0。"""
+    return record.get('all_mb_s') or record.get('core_mb_s') or 0
+
+
 def best_of_each_tier():
     """每个档位取最好成绩，按 省电→均衡→流畅→性能 排列，便于横向对比。"""
     data = load_history()
@@ -393,7 +597,7 @@ def best_of_each_tier():
     for r in data['runs']:
         tier = r.get('tier') or 'unknown'
         cur = best.get(tier)
-        if cur is None or (r.get('single_mops') or 0) > (cur.get('single_mops') or 0):
+        if cur is None or _rank(r) > _rank(cur):
             best[tier] = r
     out = [{'tier': tier, 'label': r.get('label') or tier, 'record': r,
             'score': score_of(r, baseline), 'ts': r.get('ts')}

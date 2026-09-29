@@ -245,6 +245,10 @@ class EcChannel:
         self.hold_until = 0.0
         self.hold_by = None
         self.hold_last = None
+        # 外部改风扇字节时的回调 fn(old, new)：由上层（cli）挂屏幕提示，
+        # 通道本身不认识任何 UI，免得硬件层反过来依赖界面。
+        # 注意回调跑在 EC 轮询线程里，必须不阻塞（屏幕提示用 PostMessage 就满足）。
+        self.on_key = None
 
     # ---------- 人工意图优先 ----------
     def fan_lock_left(self, now=None):
@@ -400,6 +404,12 @@ class EcChannel:
                 # 上一版没有这个让步，实测到按键改完 0 秒就被面板写回去。
                 self.take_fan_control('实体按键')
                 self.hold_last = {'old': old, 'new': value, 'ts': entry['ts']}
+                if self.on_key:
+                    try:
+                        self.on_key(old, value)
+                    except Exception as exc:               # noqa: BLE001
+                        if self.log:
+                            self.log.warn('[EC变化] 按键回调异常（忽略）：%r' % (exc,))
             if self.log:
                 self.log.info('[EC变化] %s: %s → %s（不是本面板写的：实体按键或其它软件在改）'
                               % (name, old, value))
@@ -440,7 +450,7 @@ class EcChannel:
             'fan_duty_l': self._duty_pct(fan.get('ADDR_EC_MAIN_FAN_L_DUTY_BYTE')),
             'fan_duty_r': self._duty_pct(fan.get('ADDR_EC_MAIN_FAN_R_DUTY_BYTE')),
             'fan_ctl_byte': ctl,
-            'fan_mode_flag': self._fan_flag_name(ctl),
+            'fan_mode_flag': self.fan_flag_name(ctl),
             'fan_alert': fan.get('ADDR_FAN_ALERT_BYTE'),
             'pl1_setting': power.get('ADDR_PL1_SETTING_VALUE'),
             'pl2_setting': power.get('ADDR_PL2_SETTING_VALUE'),
@@ -491,7 +501,7 @@ class EcChannel:
             return None
         return round(raw / 10.0, 1) if raw >= 100 else float(raw)
 
-    def _fan_flag_name(self, value):
+    def fan_flag_name(self, value):
         """用 OEM 自己的枚举名解 fan 控制字节，不自己发明叫法。"""
         if value is None:
             return None
@@ -558,7 +568,7 @@ class EcChannel:
         if ok and who:
             self.take_fan_control(who)
         msg = '风扇模式 %s(0x%02X) → %s(0x%02X)，回读 %s' % (
-            self._fan_flag_name(before) or '?', before or 0, flag_name, value,
+            self.fan_flag_name(before) or '?', before or 0, flag_name, value,
             ('0x%02X 一致' % after) if ok else ('%s 不一致' % after))
         if self.log:
             (self.log.info if ok else self.log.warn)('[EC写] ' + msg)

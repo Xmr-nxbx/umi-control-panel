@@ -91,7 +91,7 @@ def main(argv):
             aborted = True
             break
 
-    out('\n还原原值 %s(%s) …' % (original, ch._fan_flag_name(original)))
+    out('\n还原原值 %s(%s) …' % (original, ch.fan_flag_name(original)))
     ok2, msg2 = ch.write_register('ADDR_MAFAN_CONTROL_BYTE', original)
     out('还原结果：%s → %s' % ('成功' if ok2 else '失败', msg2))
     if not ok2:

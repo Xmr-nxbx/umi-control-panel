@@ -102,9 +102,9 @@ def main(argv):
         out('[停止] 目标值与原值相同，无需实验。')
         return _finish(lines, thermal, clock, ch, 1)
 
-    base = bench.run_multi(workers=8, target_s=2.5)
-    out('\n写入前全核跑分：%.2f Mops/s @%s MHz（峰值 %s），最高 %s°C'
-        % (base['mops'], base.get('clock_mhz'), base.get('clock_peak_mhz'), base.get('temp_c')))
+    base = bench.load(workers=8, target_s=2.5)
+    out('\n写入前全核跑分：%.1f MB/s @%s MHz（峰值 %s），最高 %s°C'
+        % (base['mb_s'], base.get('clock_mhz'), base.get('clock_peak_mhz'), base.get('temp_c')))
 
     out('\n=== 写入 %s = %d ===' % (reg, value))
     ok, msg = ch.write_register(reg, value)
@@ -130,20 +130,20 @@ def main(argv):
 
     snap1 = snapshot(ch)
     diff(snap0, snap1, out, '写入后 EC 全表差分')
-    limited = bench.run_multi(workers=8, target_s=2.5)
-    out('\n写入后全核跑分：%.2f Mops/s @%s MHz（峰值 %s），最高 %s°C'
-        % (limited['mops'], limited.get('clock_mhz'), limited.get('clock_peak_mhz'),
+    limited = bench.load(workers=8, target_s=2.5)
+    out('\n写入后全核跑分：%.1f MB/s @%s MHz（峰值 %s），最高 %s°C'
+        % (limited['mb_s'], limited.get('clock_mhz'), limited.get('clock_peak_mhz'),
            limited.get('temp_c')))
 
     _restore(ch, reg, original, out)
     time.sleep(2.0)
     snap2 = snapshot(ch)
     diff(snap0, snap2, out, '还原后与原状态的差分（理想情况应为空）')
-    restored = bench.run_multi(workers=8, target_s=2.5)
-    out('\n还原后全核跑分：%.2f Mops/s @%s MHz' % (restored['mops'], restored.get('clock_mhz')))
+    restored = bench.load(workers=8, target_s=2.5)
+    out('\n还原后全核跑分：%.1f MB/s @%s MHz' % (restored['mb_s'], restored.get('clock_mhz')))
 
     out('\n--- 判读 ---')
-    delta = (limited['mops'] - base['mops']) * 100.0 / max(base['mops'], 0.001)
+    delta = (limited['mb_s'] - base['mb_s']) * 100.0 / max(base['mb_s'], 0.001)
     clock_delta = (limited.get('clock_mhz') or 0) - (base.get('clock_mhz') or 0)
     out('全核跑分 %+0.1f%%，频率 %+d MHz' % (delta, clock_delta))
     # 以吞吐为准：频率会随机器冷热漂几百 MHz，单看频率会误判（上一版就误报过一次）

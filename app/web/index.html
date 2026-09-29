@@ -15,6 +15,7 @@
   </div>
   <div class="head-right">
     <div class="tier-box">
+      <div class="tier-intent" id="tier-intent">--</div>
       <div class="tier-now" id="tier-now">--</div>
       <div class="tier-clock" id="tier-clock">-- MHz</div>
       <div class="tier-reason" id="tier-reason">等待数据…</div>
@@ -59,14 +60,15 @@
   </section>
 
   <section class="card span-2">
-    <h2>跑分对比 <span class="tag">内置负载，不下载任何软件</span></h2>
+    <h2>跑分对比 <span class="tag">开源负载：zstd 压缩 + CoreMark</span></h2>
     <div class="btn-row">
-      <button id="btn-bench-current">测当前档位</button>
-      <button id="btn-bench-compare" class="primary">四档逐一对比（约 1.5 分钟）</button>
+      <button id="btn-bench-current">测当前档位（约 40 秒）</button>
+      <button id="btn-bench-compare" class="primary">四档逐一对比（约 3 分钟）</button>
     </div>
     <div class="bench-run" id="bench-run" hidden>
       <div class="bar"><div class="fill" id="bench-fill"></div></div>
       <span id="bench-step">准备中…</span>
+      <span class="tag" id="bench-eta"></span>
     </div>
     <div id="bench-table"></div>
     <div class="verdict" id="bench-verdict" hidden></div>

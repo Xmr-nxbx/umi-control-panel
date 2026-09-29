@@ -59,12 +59,12 @@ def measure(bench, ch, out, label, workers=8):
     ch._last_fast = 0.0
     ch.tick()
     pre = ch.read()
-    result = bench.run_multi(workers=workers, target_s=2.5)
+    result = bench.load(workers=workers, target_s=2.5)
     ch._last_fast = 0.0
     ch.tick()
     post = ch.read()
-    out('  [%s] 全核 %.2f Mops/s @%s MHz（峰值 %s MHz），最高 %s°C' % (
-        label, result['mops'], result.get('clock_mhz'), result.get('clock_peak_mhz'),
+    out('  [%s] 全核 %.1f MB/s @%s MHz（峰值 %s MHz），最高 %s°C' % (
+        label, result['mb_s'], result.get('clock_mhz'), result.get('clock_peak_mhz'),
         result.get('temp_c')))
     for key, text in (('pl1_setting', 'PL1设置值'), ('pl2_setting', 'PL2设置值'),
                       ('vrm_limit', 'VRM限流'), ('vrm_max_limit', 'VRM上限'),
@@ -136,10 +136,10 @@ def main(argv):
     restored = measure(bench, ch, out, '还原后')
 
     out('\n--- 判读 ---')
-    out('全核对照 %.2f Mops/s @%s MHz → 限功耗 %.2f Mops/s @%s MHz → 还原后 %.2f Mops/s @%s MHz'
-        % (base['mops'], base.get('clock_mhz'), limited['mops'], limited.get('clock_mhz'),
-           restored['mops'], restored.get('clock_mhz')))
-    gain = (base['mops'] - limited['mops']) * 100.0 / max(base['mops'], 0.001)
+    out('全核对照 %.1f MB/s @%s MHz → 限功耗 %.1f MB/s @%s MHz → 还原后 %.1f MB/s @%s MHz'
+        % (base['mb_s'], base.get('clock_mhz'), limited['mb_s'], limited.get('clock_mhz'),
+           restored['mb_s'], restored.get('clock_mhz')))
+    gain = (base['mb_s'] - limited['mb_s']) * 100.0 / max(base['mb_s'], 0.001)
     clock_drop = ((base.get('clock_mhz') or 0) - (limited.get('clock_mhz') or 0))
     if gain >= 8.0 or clock_drop >= 200:
         out('结论：EC 功耗墙**确实生效**（跑分低 %.1f%%，频率低 %d MHz）。'
