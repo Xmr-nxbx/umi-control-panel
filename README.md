@@ -242,6 +242,7 @@ tests/test_oem_status.py     7 个 GCUBridge 状态解析场景（盯 UNLOCK 被
 tests/test_battery_winlock.py 7 个解码场景（把 6.8 那张表的字节值逐条钉住）
 tests/test_write_gates.py     10 个写入闸门场景（跨站 Origin 一律 403、allow_write=false 一律拒发）
 tests/test_fan_curve.py       12 个风扇表解码场景（拿本机实测基线钉住布局、三个坑与「只读」自检）
+tests/test_rom_fv.py          12 个固件卷解析场景（合成镜像，钉住 DataOffset 差 4、LZMA_Alone 13 字节头与错位重对齐）
 scripts/                    setup_runtime.ps1、make_bats.py（bat 生成器）、17 个入口 bat（GBK+CRLF）
 tools/                      逆向与验证工具，产物落 tools/out（已 gitignore）。默认只读；
                             带写的那些都自带「存原值→温度保险→还原回读」，脚本自检 writes 计数
@@ -266,6 +267,8 @@ tools/                      逆向与验证工具，产物落 tools/out（已 gi
   build_coremark.py         从 EEMBC 官方源码现编 coremark.exe，编完必须自检出分数才算成功
   wmi_scan.ps1              只读扫本机 ACPI/WMI 设备与 root\wmi 类（普通权限看不见 GUID 类，见 6.5）
   wmi_guid_probe.ps1        只读探测同方 MIFS 那个 GUID 在不在本机（需管理员权限才有意义）
+  rom_fv_dump.py            只读解开 UEFI ROM 的固件卷（_FVH/FFS/段 + 自带 lzma 解压），
+                            找机型名、OEM 模块名、厂商字符串表；不刷写、不碰任何设备，见 6.11 第九节
 ```
 
 **设计原则**
@@ -863,12 +866,9 @@ PROJECT_ID 15 不在 `CommercialProjectIDs` 里，所以只要 CustomizeTarget �
   `ecflash.nsh` + `IFUX64.efi` 在 UEFI shell 里 dump 出来了。
   `N109` = BIOS 1.09，`MRO` 是机械革命的构建后缀，`A08` 是另一变体。
 
-**仍然没解开的**：ROM 内部的机型名字符串。47 个 `_FVH` 固件卷里的 BIOS 主体是
-LZMA 压缩的，手上没有 UEFITool 也没有解压工具链，所以
-`cannot update bios with different platform name` 到底卡在哪个字段仍未查明。
-ROM 里 ASCII 全是 0xFF 填充（49.1%）之外的少量表头，
-`GM5MG0Y`/`MECHREVO`/`PowerMode`/`INOU` 的 UTF-16 检索全部零命中。
-这条要等有机可解卷的时候再说，**不影响任何已落地的功能**。
+**当时写着"仍然没解开的"那条，已经解开了**：ROM 内部的机型名找到了，47 个 `_FVH`
+里那 19 个真卷和 33 段 LZMA 全部解开，答案是 **`Taitan Series GM7MG0M`**——
+这份客服 ROM 根本不是本机（GM5MG0Y）的。过程与全部产物见 6.11 第九节。
 
 #### 六、当场只读复核：前面那套推理的两个前提，在本机都成立
 
@@ -1012,6 +1012,126 @@ EC 在 USER 模式下是从**自己 CODE 里的两张表**选一张用（按 `0x
    但自动跟随可能在同一窗口里改风扇字节，那种情况 `writes_during > 0`，
    面板会照实写「这不是同一时刻的快照」，不假装是原子读到的。
 
+#### 九、把客服 ROM 的固件卷解开了：这份 ROM 不是本机的，但顺带挖出厂商自己写的一整套命令面（2026-09-30）
+
+工具 `tools/rom_fv_dump.py`：**只 open 一个磁盘文件**，不刷写、不碰 EC、不碰 UEFI 变量、
+不调用任何驱动。12 个用例 `tests/test_rom_fv.py` 用合成镜像钉住（不需要真 ROM 就能跑）。
+
+**没有 UEFITool 也能解**，Python 自带的 `lzma` 就够。两个坑都是在这份 ROM 上真栽过才修对的：
+
+1. GUID_DEFINED 段的 `DataOffset` 是**从段头算起**的，而代码里的 data 已经去掉了 4 字节
+   Size/Type，所以要减 4。忘了减，LZMA 试 74 次**全失败**，而且失败得毫无提示。
+2. LZMA 段是**标准 LZMA_Alone 13 字节头**（props + dict + 8 字节长度 + 裸流），
+   不是"只有 props"。`5d 00 00 00 01` + `10 e0 99 00 00 00 00 00` 声明 0x99E010，
+   解出来正好 10,084,368 字节。`dict_size` 不夹范围（0xFFFFFFFF）会让解压器直接 Internal error。
+
+还有两条对齐/校验规则，少一条就会静默丢文件：47 个 `_FVH` 里只有 **19 个是真卷**
+（其余是压缩数据里的巧合，卷头合法性检查不能省）；从空闲区错位读出的假文件头会让
+长度冲出卷尾，这时必须**退回按 8 字节重新对齐**，不能把假头当真文件收下——
+收下就等于把后面所有真文件一起吞掉。
+
+解开后的规模：19 个顶层卷 + 3 个内层卷、**651 个 FFS 文件、33 段 LZMA 共 12.0 MiB、
+356 个模块名**。
+
+**① 内部机型名找到了：`Taitan Series GM7MG0M`——这份客服 ROM 不是本机的。**
+SMBIOS 字符串池（DXE 卷里 `daf4bf89-ce71-4917-b522-c89d32fbc59f` 的 FREEFORM_GUID 段，+0x49 起）：
+
+```
+American Megatrends Inc. / N.1.09MRO06 / 03/16/2021          ← Type 0
+MECHREVO / Taitan Series GM7MG0M / Standard / Standard / 0001 / CML   ← Type 1
+MECHREVO / GM7MG0M / Standard / Standard                     ← Type 2 主板
+MECHREVO / Standard / Standard / Standard                    ← Type 3 机箱
+```
+
+**这是泰坦（Taitan）系列 GM7MG0M 的 ROM，不是本机 GM5MG0Y（无界 Umi Pro 3）的。**
+机主当初那句"用起来不太对劲"是对的；`cannot update bios with different platform name`
+卡的就是这个字段——AMI 刷写时比对 SMBIOS 的产品名/主板名。同为 CML 平台、同为
+13,631,488 字节、EC 侧又高度同源（6.11 第一节），所以读起来处处像，**但不能刷**。
+这条从"待查"变成定案：不刷，永久（6.3 第 8 条）。
+
+**② 顺带挖出厂商自己写在 BIOS 里的一整套 UEFI shell 命令面。** 下面每一条都是 ROM 里的
+原始字符串，不是我推的；它把 Windows 侧的能力名和固件侧的实现一一对上了。
+
+- **APCtrl 功能位**（`Current APCtrl Configuration: 0x%04X 0x%02X 0x%02X 0x%02X`）：
+  `/AP` 飞行模式、`/GS` GPU 切换、`/OC` 超频、`/MK` 宏键、`/SK` 快捷键、
+  **`/WK` Win Key Lock**、`/BL` 呼吸灯、**`/FB` FanBoost**、**`/SM` Silent Mode**、
+  `/UC` USB 充电、`/RGBKB` RGB 键盘、`/RGBLG` RGB Logo、`/CHINA`（中国区键盘背光默认开）、
+  `/PB` Power battery。
+  → 我们唯一验证过的写操作 **Win 锁**，在固件侧叫 `/WK`，是 APCtrl 的一个**功能位**，
+  不是 EC 里的独立开关；`FanBoost` / `Silent Mode` 说明档位语义在 BIOS 侧本来就有名字。
+- **SW Board ID**：`BIT0: LCD Q-key`、`BIT1: EC Battery Boost`。设置项帮助原文：
+  `1, FAN BOOST: Q-KEY will be defined as enable/disable fan boost function;
+   2, Q-KEY will be defined as mode switch function, that between office mode and gaming mode`
+  → **Q 键（造物者键）的行为本身是 BIOS 可配的**。这正好解释 6.4 里机主观察到的
+  "按几次之后只剩全亮/不亮两种状态"——那一下切的是 Q 键的**定义**，不是档位。
+- **Notebook Type / Mode / Table**，存在独立变量 `OemMyfanOption` 里：
+  Type = `Standard` / `Commercial`；Mode 是 8 个枚举
+  （`FanOfficeMode`、`FanGamingMode`、`SwitchOfficeMode`、`SwitchGamingMode`、
+  `SwitchTable1Office`、`SwitchTable1Gaming`、`SwitchTable2Office`、`SwitchTable2Gaming`）；
+  `/Table : Set Myfan3 Mode`。
+  → 出现 **Table1 / Table2 两套风扇表**。这直接给待办 #31 那个悬着的问题
+  （"换个档位再转储一次，看 `0x0F00-0x0F5F` 会不会跟着变"）提供了固件侧旁证：
+  EC 很可能有两套表在切，我们读到的那一套不一定是**当前生效**的那套——
+  和面板上那句 note 说的一致。
+  → 也印证了 6.2 那条老结论：PL 寄存器 `0x783-0x785` 是 **MyFan3 一代**的落点，
+  厂商自己的命令就叫 `Set Myfan3 Mode` / `Set Myfan3 Table`。
+- **键盘灯（LEDKB）**：`/GetStatus` 读当前设置，`/SetData <8 字节>`，格式串 `%02X`×8 与 ×9。
+  厂商自己给的样例：
+  `/SetData 0x08 0x03 0x0A 0x05 0x32 0x04 0x00 0xAF` 与
+  `/SetData 0x08 0x03 0x0A 0x05 0x32 0x04 0x00 0x00`。
+  → 与我们从 HID 逆出的 9 字节 Feature Report
+  （`[报告ID, opcode, Control, Effect, Speed, Light, ColorIndex, Direction, Save]`）**同形**，
+  而且第 5 个数据字节 `0x32 = 50` 正是实测亮度五档 `0/8/22/36/50` 的顶档。
+  这是待办 #29 目前最硬的一份旁证——**厂商自己写的样例值**。
+- **USB 灯条（USB Light Bar）**：三条命令 `1AH / 14H / 08H`，样例
+  `/SetMode 0x1A 0x05 0x01 0x14 0x00 0x00 0x00 0x00`、
+  `/SetMode 0x14 0x00 0x01 0xff 0xff 0xff 0x00 0x00`、
+  `/SetMode 0x08 0x02 0x03 0x05 0x24 0x00 0x00 0x00`。
+  → 首字节即 opcode；`0x14` 那条第 4-6 字节 `ff ff ff` = RGB 白；
+  `0x08` 那条第 5 字节 `0x24 = 36` 又是亮度档之一。
+- **RGBKB 颜色等级**：`/Set <6-digits>: 000000 ~ 505050`，
+  `Sample1: /Set 494847 => Set Red:49 Green:48 Blue:47`，`Current RGB Configuration: R:%d, G:%d, B:%d`。
+  → **每通道 0-50**，与 EC 侧 `RGBKB_LEVEL_R/G/B` 三个寄存器名、以及亮度五档的 0-50 刻度对上。
+- **适配器功率表**：`330W / 230W / 180W / 150W / 120W / 90W / 65W / 40W`，`/Type` 读、`/Set` 写。
+  → 待办 #27（功耗墙）多一条线索：**BIOS 认适配器瓦数**，PL 很可能按它缩放。
+- **`/SetKBL`**：`The KB Board ID: Four light=1, Single light=2, common light=3`、
+  `Sample: /SetKBL 1 => Set KB Four Light Board ID`、`KB language type is 0x%02X`、
+  `This command is not applicable for this keyboard`、`(Your setting will be applied after restart.)`。
+  → 键盘背光板只有三种：**四区 / 单色 / 普通**，与 GCUBridge 报回的
+  `solution=ITE, type=FourZone` 对上。
+- **`OemTdr`**：`/SetTDR: Set OemTDR value from 0 to 255`，存在 `UniWillVariable` 里，打印 `%03d`。
+  语义没查出来，只记存在，**不猜**。
+
+**③ OEM DXE/SMM 模块清单**（356 个模块名里属于 OEM 的那批），每个都是 Windows 侧某项能力的
+固件对家：`OemACPIDriverDxe` / `OemACPIDriverSmm` / `OemACPIDriverHookDxe`
+（就是我们 EC 通道用的 `\\.\ACPIDriver` 的固件侧）、`OemPowerModeDxe`、`OemTurboModeDxe`、
+`OemKbLightDxe`、`OemUsbLightBarDxe`、`OemKbLightSupportDxe`、`OemQkeyDxe`、
+`OemSWBoardIDDxe`、`OemDgpuBoardIDDxe`、`OemApControlDxe`、`OemDDSSupportDxe`、
+`OemOcDxe` / `OemOcPei` / `DxeOverClock` / `OverclockInterface` / `OverClockSmiHandler` /
+`PeiOverClock`、`OemUniWillVariableDxe`、`OemVariableHookDxe`、`OemGlobalNvsDxe` /
+`OemGlobalNvsSmm`、`OemServiceDxe` / `OemServiceSmm`、`OemManufactureModeDxe`、
+`OemACRecoveryDxe` / `OemACRecoveryPei`、`OemDisplayModeDxe`、`OemNetworkDxe`、
+`OemI2cDevices`、`OemHddHeadParkSmm`、`OemHooks` / `OemHooksPei` / `OemHooksSmm`、`EcPs2Kbd`。
+（导出的 25 个模块段体在 `tools/out/rom-mods/`；它们本体是被剥过字符串的桩，
+2-7 KiB，字符串都在共享的命令面里。）
+
+**④ 一件让 6.3 第 8 条红线更硬的事**：把导出的 25 个 OEM 模块挨个抽字符串，
+**10 个引用同一个 `UniWillVariable`**——`OemPowerModeDxe`、`OemTurboModeDxe`、
+`OemKbLightDxe`、`OemUsbLightBarDxe`、`OemOcDxe`、`OemServiceDxe`、`OemACRecoveryDxe`、
+`OemDgpuBoardIDDxe`、`OemDisplayModeDxe`，加上 `OemUniWillVariableDxe` 自己。
+也就是电源模式、Turbo、键盘背光、USB 灯条、超频、AC 恢复、dGPU 板 ID、显示模式、OEM 服务
+**九个子系统共用这一个运行时可写变量做持久化**。原来不写它的理由是"里面有 VDDQ 电压项、
+写 `0x33` 会放出内存超频菜单"，现在多一条更朴素的理由：**写它就是同时改九个子系统，
+其中任何一个的读-改-写都能把我们盖掉，而且盖掉之后我们无从察觉。**
+
+ROM 里还躺着一个 `MeUnlock` 命令面（`/Set 1 => Unlock ME region (only one time)`，关机后生效）。
+它同样走 UEFI 变量，落在 6.3 第 8 条"不写 UEFI 变量"里，**不碰**，只记一笔。
+
+**⑤ 没做的事**：没刷写、没运行 `AFUWINx64.EXE` / `F.bat`、没进 UEFI shell、没写任何变量、
+没碰 ME 区、没执行 ROM 里的任何代码。产物全在 `tools/out/`（gitignore）：
+`rom-fv-report.txt`、`rom-fv-find.txt`、`rom-fv-modules.txt`、`dxe_fv.bin`（10 MiB 解出的 DXE 卷）、
+`rom-mods/*.pe32`（25 个）。
+
 ## 7. 运行方式（目标是"不用盯着"）
 
 - 开机自启：`HKCU\...\Run\UmiControlPanel` → `UmiPanel.exe main.py --supervise --no-browser`；
@@ -1084,7 +1204,13 @@ EC 在 USER 模式下是从**自己 CODE 里的两张表**选一张用（按 `0x
 - [ ] **`OPERATING_*_MODE` 的可逆验证还没做**：动作名来自 OEM 自己的动作表，
       但本机还没做过「写 → 观察哪个寄存器/跑分变了 → 还原」。
       验证之前 `mode.write` 保持「待验证」，面板不点亮那组按钮（6.3 第 2 条）。
-      既然 Win 锁那条链已经走通，这一步只差一次带跑分对照的实测
+      既然 Win 锁那条链已经走通，这一步只差一次带跑分对照的实测。
+      **固件侧新增旁证**（见 6.11 第九节②）：BIOS 自己的 `/Mode` 枚举是
+      `FanOfficeMode`/`FanGamingMode`/`SwitchOfficeMode`/`SwitchGamingMode`，
+      APCtrl 另有 `/FB FanBoost` 与 `/SM Silent Mode` 两个功能位——
+      说明"档位"在固件里是**风扇模式 + 开关模式**两件独立的事，
+      和仓库记的 `OperatingMode` `{Office:0, Gaming:1, Turbo:2}` 不是同一根轴，
+      验证时要连 `0x0751` 的 bit 一起看，别只对一个整数
 - [x] **PL 自清零的原因查明了，而且和我们原先的猜测相反**（见 6.11 第二节）。
       原先归因于"自定义模式激活链没置齐"——**那条链不存在**，是外部资料的误传
       （`0x0706` 是倒计时器，`0x0726`/`0x0727` 在 EC 镜像里零引用，厂商服务侧零命中）。
@@ -1102,6 +1228,9 @@ EC 在 USER 模式下是从**自己 CODE 里的两张表**选一张用（按 `0x
       只发给 UI 当 Maximum/Minimum、不参与 clamp（发 300 会静默变成 44W）。
       所以护栏**必须由我们自己夹**，下发前拿 `Fan/Status` 的上下限过一遍，
       再走可逆验证（存原值 → 写 → 回读 → 还原 + 85°C 温度保险），验证前不进白名单。
+      **固件侧新增线索**（见 6.11 第九节②）：BIOS 里有一张适配器功率表
+      `330W/230W/180W/150W/120W/90W/65W/40W`，`/Type` 读 `/Set` 写——
+      **固件认适配器瓦数**，PL 很可能按它缩放，夹上限时该把它一起算进来。
       另注：PL1/PL2/PL4 是三个独立 `if`，其余 GPU/TCC/电压项全是 `else-if` 链，
       **一条消息只能改一个非 PL 项**
       （注意 `Fan/Status` 不是随时都有：本机现在只在被 GETSTATUS 问到时才报，
@@ -1122,6 +1251,14 @@ EC 在 USER 模式下是从**自己 CODE 里的两张表**选一张用（按 `0x
       亮度 5 档 `0/8/22/36/50`、速度 5 档 `10/7/5/3/1`，关灯 `(1,0,0,0,0,0,0)`。
       好处是不碰 EC、不碰内核驱动、天然可逆；但它是**新的写通道**，
       得按 6.3 第 2 条重新走一遍「语义佐证 + 可逆 + 温度保险」，本轮没做。
+      **语义佐证这一条已经拿到最硬的一份证据了**（见 6.11 第九节②）：厂商自己写在 BIOS
+      命令面里的样例值，与 HID Feature Report 同形、同刻度——
+      LEDKB `/SetData 0x08 0x03 0x0A 0x05 0x32 0x04 0x00 0xAF`（第 5 字节 `0x32 = 50`
+      正是实测亮度五档 `0/8/22/36/50` 的顶档）、USB Light Bar 三条 opcode `1AH/14H/08H`
+      配样例（`0x14` 那条第 4-6 字节 `ff ff ff` = RGB 白，`0x08` 那条第 5 字节 `0x24 = 36`
+      又是亮度档之一）、RGBKB `/Set <6-digits>: 000000 ~ 505050`（**每通道 0-50**）。
+      还差的是「可逆」那半：Feature Report 大多没有读回，可逆性得换个方式论证
+      （先存一份已知的良好设置，写完能还原成它）。
       **前提已只读钉死**：`Get-PnpDevice` 枚举确认本机 `VID_048D&PID_CE00`（键盘）
       与 `VID_048D&PID_6005`（灯条）都在、各有 MI_00/MI_01 两个接口、Status OK
       （见 6.11 第六节）
@@ -1156,7 +1293,12 @@ EC 在 USER 模式下是从**自己 CODE 里的两张表**选一张用（按 `0x
       **单写 `0x0751` 不会让 EC 自动加载表或 PL**，方向上一致，但本机没测过，暂不写。
       写入之前还有一件更便宜的事该先做：**在不同档位各转储一次**，看 `0x0F00-0x0F5F`
       会不会跟着变——这才能区分「host 写入区」和「此刻真正在管风扇的表」
-      （6.11 第八节末尾那个局限）。需要一次档位写入，按 6.3 第 2 条等机主在场
+      （6.11 第八节末尾那个局限）。需要一次档位写入，按 6.3 第 2 条等机主在场。
+      **固件侧给这个前提加了旁证**（见 6.11 第九节②）：BIOS 的 `/Mode` 枚举里
+      `SwitchTable1Office`/`SwitchTable1Gaming`/`SwitchTable2Office`/`SwitchTable2Gaming`
+      四个值明摆着**存在 Table1 / Table2 两套风扇表**，命令名还叫 `Set Myfan3 Table`。
+      所以我们读到的那 92 个字节很可能只是其中一套，另一套在别处——
+      换档转储这件事从"值得做"升级成"必须先做"，否则写入可能落在没生效的那套表上
 - [ ] `ADDR_MYFAN2_L1~L5_PWM` 与 `User_Fan_Level1~5(0x81~0x85)` 看着是一对，
       全表观察也抓到按硬件模式时 `MYFAN2_L1/L4_PWM` 会跟着换（3↔7、5↔15）。
       EC 侧真正吃「用户风扇模式」的是 **`0x0751` bit7(USER)**：bank1 `0x9432` 的
@@ -1175,6 +1317,14 @@ EC 在 USER 模式下是从**自己 CODE 里的两张表**选一张用（按 `0x
 - [x] 外部逆向资料交叉核对完毕（见 6.10）：BIOS 那条路是死的（无解锁版、刷写被拒、
       降级被拒），GM5MG0Y 的 DSDT/EC 转储公网不存在；但同家族近亲板的三份实测
       与我们的 OEM 常量表逐个地址对得上，并当场只读复测了 12 个地址
+- [x] **客服 ROM 的固件卷解开了，内部机型名是 `Taitan Series GM7MG0M`——它不是本机的**
+      （见 6.11 第九节）。工具 `tools/rom_fv_dump.py` + 12 个合成镜像用例
+      `tests/test_rom_fv.py`，只 open 磁盘文件，Python 自带 `lzma` 就够，不需要 UEFITool。
+      规模：19 个顶层卷 + 3 个内层卷、651 个 FFS 文件、33 段 LZMA 共 12.0 MiB、356 个模块名。
+      `cannot update bios with different platform name` 卡的就是 SMBIOS 的产品名/主板名。
+      **这条从"待查"变成定案：不刷，永久**（6.3 第 8 条）。
+      顺带挖出厂商自己写在 BIOS 里的一整套 UEFI shell 命令面，已分别补进
+      待办 #25（档位）/#27（功耗墙）/#29（灯效 HID）/#31（风扇曲线写入）四条里
 - [ ] 独显直连（MUX）：`DiscreteGpuDirectConnectionSwitch_Status=ON / Support`，
       而 `DGpu=NV_CTRL_PANEL_AUTOSELECT`。现在倾向于这是**两层不同的东西**
       （直连开关 vs NVIDIA 控制面板的输出偏好），旁证是 Hackintosh 工程里 dGPU 的电源
