@@ -151,9 +151,9 @@ function renderHardware(s) {
           ? (hw.battery_pct_ec + '% · ' + (hw.battery_temp_c != null ? hw.battery_temp_c + '°C' : '?')
              + (hw.battery_cycles != null ? ' · ' + hw.battery_cycles + ' 次循环' : ''))
           : '未知', hw.battery_pct_ec != null),
-    hwRow('充电阈值', hw.charge_limit_up != null
-          ? (hw.charge_limit_up + '% / 回落 ' + hw.charge_limit_down + '%') : '未知',
-          verified('battery.limit')),
+    hwRow('充电阈值', hw.charge_limit_up
+          ? (hw.charge_limit_up + '% / 回落 ' + (hw.charge_limit_down || '?') + '%')
+          : '未设限（寄存器读到 0）', hw.charge_limit_up != null),
     hwRow('机型标识', hw.project_id != null ? ('ProjectID ' + hw.project_id
           + (hw.module_id != null ? ' · Module ' + hw.module_id : '')) : '未知',
           hw.project_id != null),
@@ -201,6 +201,11 @@ function renderHardware(s) {
   const hints = [];
   if (lockLeft) hints.push(`${lockBy || '人工'}优先，${Math.round(lockLeft)} 秒内面板不自动改风扇`);
   else if (owned) hints.push('当前是自定义曲线，面板不会自动改风扇（点上面的按钮可接管）');
+  // 实测：没配过曲线的自定义档满载只有 2320 MHz，比自动档慢四分之一（README 6.4）
+  if (hw.fan_mode_flag === 'User_Fan_Mode') {
+    hints.push('⚠ 实测这一态满载只有 2320 MHz / 14.7 Mops/s，比「自动」慢 25%'
+      + '（没在 Creator Center 里配过曲线时，它是最保守的一档）');
+  }
   if (!canWrite) hints.push('功耗墙档位不可写：' + ((ecCh.detail || {}).write_reason || why(ecCh)));
   if (!canFan) hints.push('风扇模式不可写：' + ((ecCh.detail || {}).fan_mode_reason || why(ecCh)));
   $('hw-hint').textContent = hints.join('；');

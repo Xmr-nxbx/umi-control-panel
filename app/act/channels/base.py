@@ -22,12 +22,14 @@ ALL_CAPS = (CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ, CAP_PL_WRITE,
             CAP_DGPU, CAP_RGB)
 
 CAP_LABELS = {
-    CAP_MODE_READ: '读取硬件档位',
-    CAP_MODE_WRITE: '切换硬件档位',
+    # 措辞跟着实测走：按键那三态是风扇模式，不是功耗墙档位（见 README 6.2），
+    # 所以两件事必须用两个名字说，不能都叫「硬件档位」。
+    CAP_MODE_READ: '读取功耗墙档位（办公/均衡/狂暴）',
+    CAP_MODE_WRITE: '切换功耗墙档位',
     CAP_PL_READ: '读取功耗墙 PL1/PL2/PL4',
     CAP_PL_WRITE: '写入功耗墙',
     CAP_FAN_RPM: '风扇转速',
-    CAP_FAN_MODE: '风扇模式（自动/强冷）',
+    CAP_FAN_MODE: '造物者模式按键（风扇三态）',
     CAP_FAN_CURVE: '风扇曲线',
     CAP_TEMP_EC: 'EC 温度传感器',
     CAP_BATTERY_LIMIT: '电池充电阈值',

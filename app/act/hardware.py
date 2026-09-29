@@ -17,7 +17,7 @@ STATE_KEYS = ('mode', 'pl1', 'pl2', 'pl4', 'fan_rpm', 'fan2_rpm', 'fan_boost', '
               'fan_duty_l', 'fan_duty_r', 'fan_ctl_byte', 'fan_mode_flag', 'kb_backlight',
               'pl1_setting', 'pl2_setting', 'pl4_setting', 'vrm_max_limit',
               'battery_pct_ec', 'battery_temp_c', 'battery_cycles', 'charge_limit_up',
-              'charge_limit_down', 'project_id', 'vrm_limit', 'silent_mode',
+              'charge_limit_down', 'project_id', 'module_id', 'vrm_limit', 'silent_mode',
               'mode_index', 'ec_power_source')
 
 
