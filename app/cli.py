@@ -185,8 +185,13 @@ def cmd_bench_local(cfg, log, mode):
     return 0
 
 
-def cmd_health(cfg, log):
-    """一键体检：把「装好了没、跑起来没、硬件通道通不通」一次性查清并给出结论。"""
+def health_rows(cfg, log, state=None):
+    """体检的判定部分。CLI 的 --health 和面板的 /api/health 共用这一份，
+    免得两边各写一遍、结论还不一样。
+
+    state 由服务进程直接传进来（自己给自己发 HTTP 请求没意义），
+    命令行跑时留空，函数会自己按端口去问正在跑的面板。
+    """
     rows = []
 
     def check(name, ok, detail='', optional=False):
@@ -209,11 +214,11 @@ def cmd_health(cfg, log):
     check('便携运行时', os.path.exists(exe),
           exe if os.path.exists(exe) else '缺 runtime\\UmiPanel.exe，请跑 scripts\\setup_runtime.ps1')
 
-    # 3) 面板是否在跑
+    # 3) 面板是否在跑。面板自己请求 /api/health 时 state 已经在外面取好了，
+    #    再发一次 HTTP 是自问自答，跳过。
     port = _current_port(cfg)
     running = _port_open('127.0.0.1', port)
-    state = None
-    if running:
+    if state is None and running:
         try:
             state = _http_json(port, '/api/state', timeout=8)
         except Exception as exc:                           # noqa: BLE001
@@ -269,23 +274,38 @@ def cmd_health(cfg, log):
     check('EC 寄存器表', os.path.exists(map_path),
           map_path if os.path.exists(map_path) else '缺失，运行 scripts\\生成EC寄存器表.bat')
 
-    print('\n===== Umi Control Panel 体检 =====')
+    return rows
+
+
+def health_text(rows, head=''):
+    """把体检结果压成一小段文本——面板上「复制诊断信息」用的就是它，
+    机主不用截图也不用描述「我点了什么」，粘过来就能看出问题在哪。"""
+    lines = ['Umi Control Panel 体检  %s' % time.strftime('%Y-%m-%d %H:%M:%S')]
+    if head:
+        lines.append(head)
     bad = 0
     for name, ok, detail, optional in rows:
-        tag = '通过' if ok else ('可选未启用' if optional else '未通过')
-        print('  [%s] %-12s %s' % (tag, name, detail))
+        tag = 'OK  ' if ok else ('可选' if optional else '未通过')
+        lines.append('[%s] %s：%s' % (tag, name, detail))
         if not ok and not optional:
             bad += 1
-    print('\n结论：%s' % ('全部通过，可以放着不管。' if not bad
-                          else '%d 项未通过，按上面的提示处理。' % bad))
+    lines.append('结论：%s' % ('全部通过，可以放着不管。' if not bad
+                              else '%d 项未通过。' % bad))
+    return '\n'.join(lines)
+
+
+def cmd_health(cfg, log):
+    """一键体检：把「装好了没、跑起来没、硬件通道通不通」一次性查清并给出结论。"""
+    rows = health_rows(cfg, log)
+    text = health_text(rows)
+    print('\n===== Umi Control Panel 体检 =====')
+    print('\n'.join(text.splitlines()[1:]))
+    bad = sum(1 for _n, ok, _d, opt in rows if not ok and not opt)
     out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools', 'out')
     try:
         os.makedirs(out_dir, exist_ok=True)
         with open(os.path.join(out_dir, 'health.txt'), 'w', encoding='utf-8') as f:
-            f.write('%s\n' % time.strftime('%Y-%m-%d %H:%M:%S'))
-            for name, ok, detail, optional in rows:
-                f.write('[%s] %s: %s\n' % ('OK' if ok else ('SKIP' if optional else 'NG'),
-                                           name, detail))
+            f.write(text + '\n')
     except OSError:
         pass
     return 0 if not bad else 1

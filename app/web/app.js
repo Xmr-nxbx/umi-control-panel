@@ -455,6 +455,33 @@ async function loadLogs() {  try {
 }
 
 $('btn-refresh-logs').onclick = loadLogs;
+$('btn-diag').onclick = async () => {
+  // 机主不用截图、也不用描述「我点了什么」：体检结果 + 最近日志一次拷走
+  try {
+    const h = await api('/api/health');
+    const logs = await api('/api/logs?n=40');
+    const text = `${h.text}\n\n—— 最近日志 ——\n${(logs.lines || []).join('\n')}`;
+    let copied = false;
+    try { await navigator.clipboard.writeText(text); copied = true; }
+    catch (e) { /* http 页面或非安全上下文会被拒绝，下面退回手动选中文本 */ }
+    if (!copied) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      copied = document.execCommand('copy');
+      ta.remove();
+    }
+    toast(copied ? '诊断信息已复制，直接粘给助手就行' : '剪贴板不可用，已下载 umi-diag.txt');
+    if (!copied) {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+      a.download = 'umi-diag.txt';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    }
+  } catch (e) { toast('取诊断信息失败：' + e.message, true); }
+};
 $('btn-bench-current').onclick = () => startBench('current');
 $('btn-bench-compare').onclick = () => startBench('compare');
 $('btn-stop').onclick = async () => {

@@ -82,6 +82,13 @@ def make_handler(daemon, cfg, on_shutdown):
                 self._send(200, {'channels': [c.status() for c in daemon.hw.channels],
                                  'state': daemon.hw.snapshot(),
                                  'caps': daemon.hw.capability_map()})
+            elif path == '/api/health':
+                # 机主不是开发者：出问题时要能一行字讲清楚现状，所以体检结果直接给面板
+                from app.cli import health_rows, health_text    # 延迟导入：cli 也 import 了本模块
+                rows = health_rows(cfg, daemon.log, state=daemon.state())
+                self._send(200, {'text': health_text(rows),
+                                 'rows': [{'name': n, 'ok': o, 'detail': d, 'optional': p}
+                                          for n, o, d, p in rows]})
             elif path == '/api/history':
                 minutes = None
                 try:
