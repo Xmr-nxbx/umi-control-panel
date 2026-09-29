@@ -68,9 +68,13 @@ FAST_GROUPS = (
     ('battery', ('ecBt1RSOC', 'ecBt1Temperature')),
 )
 SLOW_GROUPS = (
+    # ADDR_SUPPORT_BYTE6(0x78E) bit6 = IsSuportRamFan1p5：厂商服务就是靠它决定
+    # 走不走 MyFanManager_RamFan1p5 那套 16 点风扇表（另两个判据是 0x740 的
+    # PROJECT_ID 与注册表 CustomizeTarget）。这一位为 0 的话，GM7MG7P 那份
+    # 风扇表逆向对本机就不适用，所以必须能看到它，而不是靠推。
     ('identity', ('ADDR_PROJECT_ID_BYTE', 'ADDR_ModuleID', 'ADDR_SUPPORT_BYTE1',
-                  'ADDR_SUPPORT_BYTE2', 'ADDR_BIOS_INFO_3_BYTE', 'ADDR_EC_BIOS_INFO5',
-                  'ADDR_OEMSERVICE_PROJECT_ID_BYTE')),
+                  'ADDR_SUPPORT_BYTE2', 'ADDR_SUPPORT_BYTE6', 'ADDR_BIOS_INFO_3_BYTE',
+                  'ADDR_EC_BIOS_INFO5', 'ADDR_OEMSERVICE_PROJECT_ID_BYTE')),
     ('defaults', ('ADDR_GAMING_PL1_DEFAULT_VALUE', 'ADDR_GAMING_PL2_DEFAULT_VALUE',
                   'ADDR_GAMING_PL4_DEFAULT_VALUE', 'ADDR_OFFICE_PL1_DEFAULT_VALUE',
                   'ADDR_OFFICE_PL2_DEFAULT_VALUE', 'ADDR_OFFICE_PL4_DEFAULT_VALUE',
