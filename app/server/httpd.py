@@ -28,6 +28,30 @@ def _scrub(node):
     return node
 
 
+LOOPBACK_HOSTS = ('127.0.0.1', 'localhost', '[::1]', '::1')
+
+
+def is_local_same_origin(headers):
+    """写操作只接受「本机页面发来的、打在本机回环地址上的」请求。
+
+    面板只绑 127.0.0.1，但这挡不住 CSRF：机主浏览器里随便一个网页都能往
+    http://127.0.0.1:8747/api/action 发 POST，而那个接口能下发 OEM 硬件命令、
+    还能把面板关掉。所以规矩是两条：
+      * 带了 Origin/Referer 的，必须与本次请求的 Host 完全一致（浏览器发起的
+        跨站请求 Origin 一定是对方站点，直接挡掉）；
+      * Host 本身必须是回环地址（挡 DNS rebinding：把域名解析到 127.0.0.1 再打过来）。
+    curl、我们自己的工具不发这两个头，照常放行——不影响任何脚本。
+    """
+    host = (headers.get('Host') or '').strip()
+    if host.split(':')[0] not in LOOPBACK_HOSTS:
+        return False
+    origin = (headers.get('Origin') or headers.get('Referer') or '').strip()
+    if not origin:
+        return True
+    netloc = origin.split('://', 1)[-1].split('/', 1)[0].split('@')[-1]
+    return netloc == host
+
+
 def make_handler(daemon, cfg, on_shutdown):
 
     class Handler(BaseHTTPRequestHandler):
@@ -56,7 +80,17 @@ def make_handler(daemon, cfg, on_shutdown):
 
         def _read_json(self):
             length = int(self.headers.get('Content-Length') or 0)
-            if length <= 0 or length > MAX_BODY:
+            if length <= 0:
+                return {}
+            if length > MAX_BODY:
+                # 超长也得把字节读干净：连接是 HTTP/1.1 长连接，留在流里
+                # 会被下一个请求当成请求行解析（表现为一串莫名的 400）
+                left = length
+                while left > 0:
+                    chunk = self.rfile.read(min(left, 65536))
+                    if not chunk:
+                        break
+                    left -= len(chunk)
                 return {}
             raw = self.rfile.read(length)
             try:
@@ -118,7 +152,12 @@ def make_handler(daemon, cfg, on_shutdown):
 
         def do_POST(self):
             path = self.path.split('?', 1)[0]
+            # 先读体再判来源：挡掉的请求也得把字节收干净，否则长连接会错位
             body = self._read_json()
+            if not is_local_same_origin(self.headers):
+                # 所有会改状态的接口都在 POST 上，宁可挡错也不放行跨站写入
+                self._send(403, {'error': '拒绝：写操作只接受本机面板页面发起的请求'})
+                return
             if path == '/api/intent':
                 ok, detail = daemon.set_intent(str(body.get('intent', '')))
                 self._send(200 if ok else 400, {'ok': ok, 'detail': detail})

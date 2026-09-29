@@ -17,7 +17,8 @@ import threading
 import time
 
 from app.act.channels.base import (Channel, CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ,
-                                   CAP_RGB, CAP_DGPU)
+                                   CAP_RGB, CAP_DGPU, CAP_WINKEY_WRITE,
+                                   CAP_BATTERY_MODE_WRITE)
 
 ACTIONS_PATH = os.path.join(os.path.dirname(__file__), 'gcu_actions.json')
 STATUS_TOPICS = ('Tray/Status', 'Fan/Status', 'Setting/Status', 'Keyboard/Status',
@@ -164,7 +165,8 @@ class MqttChannel(Channel):
         self.last_mode = None
         self._last_probe_ts = 0.0
         self._kick_reason = None
-        for cap in (CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ, CAP_RGB, CAP_DGPU):
+        for cap in (CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ, CAP_RGB, CAP_DGPU,
+                    CAP_WINKEY_WRITE, CAP_BATTERY_MODE_WRITE):
             self.caps[cap] = 'unsupported'
         self.detail = {'enabled': self.enabled, 'broker': '%s:%s' % (self.host, self.port)}
 
@@ -206,6 +208,8 @@ class MqttChannel(Channel):
                 self.alive = False
                 self._kick_reason = repr(exc)
                 self.caps[CAP_MODE_READ] = 'unsupported'
+                # 掉线就把已验证的写能力收回：否则面板还亮着按钮，点了只会失败
+                self.caps[CAP_WINKEY_WRITE] = 'unsupported'
                 self.detail['reason'] = '未连接：%s' % self._kick_reason
                 for _ in range(int(backoff * 10)):
                     if self._stop.is_set():
@@ -226,6 +230,18 @@ class MqttChannel(Channel):
         self.caps[CAP_MODE_WRITE] = 'unknown'
         self.detail['mode_write_reason'] = ('未做可逆验证：动作名来自 OEM 动作表，'
                                             '但本机还没实测过它到底改了什么，验证前不点亮')
+        # Win 键锁定是唯一做完完整可逆验证的写操作（2026-09-30 01:43）：
+        # 下发 WINKEY_UNLOCK 后 EC 的 ADDR_STAUTS_BYTE 由 1 变 0（面板日志 01:43:16 抓到，
+        # 延迟约 6 秒），再下发 WINKEY_LOCK 又回到 1，EC 直读与 Setting/Status 两条通道
+        # 读数一致。天然可逆、无温度风险，所以升成 verified，面板可以点亮这个开关。
+        self.caps[CAP_WINKEY_WRITE] = 'verified'
+        # 电池充电三档：动作名和 EC 落点都对上了（README 6.8），但没做过可逆验证，
+        # 而且上游 Linux 驱动因为 2020 年前后的机型出过「开充电限制把电池搞坏」的事故，
+        # 直接封死了强开路径（CVE-2026-64143）。本机正是那一代，所以保持 unknown。
+        self.caps[CAP_BATTERY_MODE_WRITE] = 'unknown'
+        self.detail['battery_write_reason'] = ('档位语义已确认，但充电门控在同代机型上有'
+                                               '损坏电池的前例（CVE-2026-64143），'
+                                               '机主点头之前不下发')
         self.detail['reason'] = '已连接 GCUBridge'
         cli.publish('Setting/Control', json.dumps({'Action': 'GETSTATUS'}))
         last_ping = time.time()
@@ -279,6 +295,12 @@ class MqttChannel(Channel):
             return {k: dict(v) for k, v in self._payloads.items()}
 
     def send_action(self, action, extra=None, note=''):
+        # 白名单只管「这个命令 OEM 认不认」，能不能发是另一道闸：
+        # 6.3 第 3 条要求所有写入都挂在 config.hardware.ec.allow_write 上。
+        # 之前这里没查，等于 /api/action 成了不设防的硬件写入口。
+        if not self.allow_write:
+            return False, ('写操作未在配置中允许（config.hardware.ec.allow_write=false），'
+                           '拒绝下发 %s' % action)
         spec = self.actions['actions'].get(action)
         if not spec:
             return False, 'Action "%s" 不在白名单里，拒绝发送' % action

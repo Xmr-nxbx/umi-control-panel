@@ -311,6 +311,7 @@ function renderOem(s) {
   if (!mqCh.alive || !oem) {
     box.innerHTML = [hwRow('GCUBridge', '未连接', false),
       hwRow('OEM 状态', '拿不到（要 GCUService 在跑，且 clientId 没被别人占用）', false)].join('');
+    if ($('oem-buttons')) $('oem-buttons').innerHTML = '';   // 通道掉了，按钮也得跟着收走
     hint.classList.add('err');
     hint.textContent = '原因：' + ((mqCh.detail || {}).reason || '未探测')
       + '。这一卡片只读，连上后会自动填。';
@@ -364,9 +365,29 @@ function renderOem(s) {
           ? onOff(oem.ac_recovery_on, '开', '关') : '不支持（OEM 报 NotSupport）', true),
   ].join('');
 
+  // Win 键锁定是目前唯一做完可逆验证的 OEM 写操作（2026-09-30 01:43：下发 UNLOCK
+  // 后 EC 的 ADDR_STAUTS_BYTE 1→0，再下发 LOCK 又回到 1，EC 与 Setting/Status 两条
+  // 通道读数一致），所以整张卡片只给它一个按钮，其余照旧只读。
+  const btns = $('oem-buttons');
+  if (btns) {
+    const canWin = ((s.capabilities || {})['winkey.write'] || {}).state === 'verified'
+      && oem.win_key_locked != null;
+    btns.innerHTML = canWin
+      ? `<button id="btn-winkey">${oem.win_key_locked ? '解锁 Win 键' : '锁定 Win 键'}</button>` : '';
+    const b = $('btn-winkey');
+    if (b) {
+      b.onclick = async () => {
+        const act = oem.win_key_locked ? 'WINKEY_UNLOCK' : 'WINKEY_LOCK';
+        try { const r = await api('/api/action', { action: act }); toast(r.detail || '已下发'); }
+        catch (e) { toast('下发失败：' + e.message, true); }
+        poll();
+      };
+    }
+  }
+
   hint.textContent = '数据来自 GCUBridge 的 Setting/Status · HidLightbar/Status · Fan/Status · Keyboard/Status'
-    + '，全是 OEM 自己报的读数，面板在这一块一个字都不写。'
-    + '认不出来的值照实写「未知」，不猜。'
+    + '，全是 OEM 自己报的读数。只有做过「下发 → EC 回读 → 还原」可逆验证的开关才给按钮，'
+    + '其余一律只读；认不出来的值照实写「未知」，不猜。'
     + '「OEM 允许范围」是 Fan/Status 里 OEM 自己写的上下限，以后任何写入都拿它当护栏。';
 }
 
@@ -375,7 +396,7 @@ function renderCaps(s) {
   const labels = META.cap_labels || {};
   const shown = ['mode.read', 'mode.write', 'power_limit.read', 'power_limit.write',
                  'fan.rpm', 'fan.mode', 'fan.curve', 'ec.temp', 'battery.limit',
-                 'gpu.mux', 'lighting.rgb'];
+                 'battery.mode.write', 'winkey.write', 'gpu.mux', 'lighting.rgb'];
   const stateText = { verified: '可用', unknown: '待验证', blocked: '受限',
                       missing: '缺本机配置', unsupported: '不支持' };
   $('caps').innerHTML = shown.map((cap) => {

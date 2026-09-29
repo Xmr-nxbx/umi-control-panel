@@ -40,8 +40,8 @@
 | 风扇转速 / 占空比 | **可用** | 性能档实测 4123 RPM / 自适应 3663 RPM / 省电档 3019 RPM |
 | 电池电量 / 温度 / 循环 | **可用** | 电量与系统 API 互相印证（100% = 100%）、循环 83 次、电池温度 24.4°C |
 | 电池充电档（平衡 / 健康 / 长效） | **可读，语义已确认** | EC `ADDR_AP_OEM_BYTE4` 高半字节 1/2/0，与 GCUBridge 的 `BALANCEDMODE`/`HEALTHYMODE`/`PERFORMANCEDMODE` 逐条对齐（见 6.8）。**写入未验证**，具体充电百分比也还没实测 |
-| Win 键锁定 | **可读，语义已确认** | EC `ADDR_STAUTS_BYTE` 0/1，与 `WINKEY_LOCK`/`WINKEY_UNLOCK` 三次点击三次跳变对齐（见 6.8）；两条通道现在互相印证同一个状态。写入未验证 |
-| 充电阈值寄存器 | **读到 0，不在这条路上** | `CHARGE_LIMIT_UP/DOWN` 三次观察全是 0，切电池档时也不动 —— 阈值不由这张 EC 表执行，面板照实显示「未设限」，不做写入 |
+| Win 键锁定 | **可读可写，已做完可逆验证** | EC `ADDR_STAUTS_BYTE` 0/1，与 `WINKEY_LOCK`/`WINKEY_UNLOCK` 三次点击三次跳变对齐（见 6.8）；2026-09-30 又走通了「下发 → EC 变化 → 两条通道回读 → 还原」整条链（见 6.9），面板上有按钮 |
+| 充电阈值寄存器 | **读到 0，原因已查明** | `CHARGE_LIMIT_UP/DOWN` 读到 0 不是读不到，是充电限制**没启用**：EC 的门控要求 `0x7C3` 或 `0x770` 等于 4/5，否则要求存储上限 `0x87F` 落在 1–100，而本机 `0x770=0xFF`、`0x87F=0xFF`（见 6.10）。门控字节属永久禁区（6.3 第 8 条），面板照实显示「未设限」 |
 | 各模式出厂 PL 默认值、机型 ID | **可用（只读）** | 办公 35W / 均衡 60W / 省电档 75W；ProjectID=15 |
 | 实时 PL1/PL2 写入 | **未生效，已找到原因** | 写进去会自清、性能无变化（见 6.2）；离线核对 OEM 代码后确认那一组寄存器是 MyFan3 一代机型的落点，本机是 CML 平台。改功耗墙走风扇字节，不裸写 PL |
 | 风扇曲线 | **未验证** | 只有 EC 通道能提供；不做任何驱动穷举（见第 6 节） |
@@ -239,6 +239,7 @@ tests/test_config_profile.py 6 个调度性格读写场景（盯「补丁漏进 
 tests/test_singleton_port.py 6 个单实例与端口场景（盯 2026-09-30 那个双实例并跑）
 tests/test_oem_status.py     7 个 GCUBridge 状态解析场景（盯 UNLOCK 被 endswith 判成 LOCK 那个坑）
 tests/test_battery_winlock.py 7 个解码场景（把 6.8 那张表的字节值逐条钉住）
+tests/test_write_gates.py     9 个写入闸门场景（跨站 Origin 一律 403、allow_write=false 一律拒发）
 scripts/                    setup_runtime.ps1、make_bats.py（bat 生成器）、17 个入口 bat（GBK+CRLF）
 tools/                      全部离线只读的逆向与验证工具，产物落 tools/out（已 gitignore）
   gen_ec_map.py             从本机 Creator Center 生成 data/ec_map.local.json（不入仓库）
@@ -374,6 +375,20 @@ tools/                      全部离线只读的逆向与验证工具，产物�
 6. 只读轮询也要限速：观察器每轮的读请求数 = 寄存器数 ÷ 轮询间隔，
    全表模式（125 项）固定 2 秒一轮（≈62 次/秒），和 21 项 × 0.5 秒是同一个量级——
    实测这个速率跑了 4000+ 次读没有任何异常。不许为了快而把间隔调小。
+7. HTTP 上的每个写接口都要过两道闸：**来源闸**（只收本机面板页面发起的请求）+
+   **配置闸**（`allow_write`）。两道都得在**执行层**里查，不能只在某一个接口上查——
+   漏一个入口就等于开了一个不设防的硬件写口（见 6.9）。
+8. **永久禁区**（不是"待验证"，是不做）：
+   - 不写充电门控字节 `0x7C3` / `0x770` / `0x87F`。上游 Linux 驱动因为
+     **2020 年前后的机型开充电限制会把电池永久搞坏**，直接把强开路径封死了
+     （CVE-2026-64143，*platform/x86: uniwill-laptop: Do not enable the charging
+     limit even when forced*）。本机正是那一代。要改充电档只走 OEM 自己的
+     `BatteryProtection/Control` 动作，而且要先经机主同意。
+   - 不刷 BIOS、不写 UEFI NVRAM（`UEFI_Firmware.dll` 的 `WriteUefi` 一律不碰）。
+     GM5MG0Y 是 AMI 板，公开记录里**降级被拒、改版刷入失败、有人警告会黑屏变砖**。
+   - 不写自定义风扇模式的激活链（`0x706=0x41`、`0x726 bit7`、`0x727 bit5/6`）。
+     按外部资料，置齐这条链之后 EC 才会去执行风扇表；万一表是空的，
+     等于让风扇不再跟温度走。这条必须机主在场 + 温度保险 + 可即时还原才谈得上做。
 
 ### 6.4 造物者模式按键三态实测（2026-09-29 测，2026-09-30 补上原因）
 
@@ -570,6 +585,101 @@ powercfg 那一层压不住频率（2 节）。
 以及 `SSDT-RMCF-PS2Map` 只屏蔽了 PrtScn/Pause——说明**实体「造物者模式」键不是 PS/2 键**，
 和它直连 EC 的实测结果一致。
 
+### 6.9 接上写通道之前先自查，结果真查出一个口子（2026-09-30）
+
+准备做第一次可逆写验证（6.3 第 2 条）之前先把写入口捋了一遍，发现两处漏闸，
+都在**能改硬件状态**的路径上，都已修好并由 `tests/test_write_gates.py` 钉住：
+
+| 口子 | 后果 | 修法 |
+| --- | --- | --- |
+| `MqttChannel.send_action()` 只查白名单、**不查 `allow_write`** | `/api/action` 成了不设防的硬件写入口：即使配置里 `allow_write=false`，白名单里的 OEM 命令照样能发下去 | 函数开头补 `if not self.allow_write: return False, ...`（和 `set_mode()` 一样，EC 侧本来就有这道闸） |
+| `do_POST` **完全不校验来源** | 面板只绑 127.0.0.1 挡不住 CSRF：机主浏览器里随便一个网页都能往 `http://127.0.0.1:8747/api/action` 发 POST，下发 OEM 命令，或者 `/api/shutdown` 把面板关掉 | `is_local_same_origin(headers)`：带了 Origin/Referer 就必须与本次 Host 完全一致；Host 本身必须是回环地址（顺带挡 DNS rebinding）；不满足直接 403 |
+
+来源闸对**脚本零影响**：curl 和我们自己的工具都不发 Origin/Referer，照常放行
+（这也是 `main.py --stop` 还能用的原因）。真正的浏览器跨站请求 Origin 必然是对方站点，一律挡掉。
+
+教训是这条：白名单管的是「**这个命令 OEM 认不认**」，配置开关管的是「**这台机器允不允许写**」，
+来源校验管的是「**这个请求是不是本机面板发来的**」——三件事，谁也不能替谁。
+以后新增任何 POST 接口，先问这三个问题，别等写完再补。
+
+**顺带把第一次可逆写验证做完了**（本来是下一步计划，被这次自查提前触发）：
+用 curl 验闸门时误把 `WINKEY_UNLOCK` 当探针发了出去，而本机 `allow_write` 是**开着**的，
+命令真的下去了——面板日志 01:43:16 记下 `ADDR_STAUTS_BYTE: 1 → 0`，
+也就是说机主原本锁着的 Win 键被解开了；随后下发 `WINKEY_LOCK`，EC 回读 1、
+`Setting/Status` 回读 `WINKEY_STATUS_LOCK`，两条通道一致，状态已还原。
+这一次意外等于把 6.3 第 2 条要求的整条链走通了：**MQTT 下发 → GCUService →
+EC 寄存器变化 → 两条通道回读一致 → 写回还原**，而且证明写入到 EC 生效有约 6 秒延迟。
+据此 `winkey.write` 从 unknown 升为 **verified**，面板「OEM 开关状态」卡片
+第一次出现了按钮（只有这一个）。教训也记下来了：**验闸门只能用不在白名单里的假动作名**，
+拿真命令当探针，等于拿机主的硬件当探针。
+
+### 6.10 拿外部逆向资料交叉核对，并且当场只读复测了一遍（2026-09-30）
+
+机主提示"多找找 umi pro 3 bios 等关键字"之后做了一轮外部资料检索。**GM5MG0Y 本板的
+DSDT / EC 转储在公网上不存在**（GitHub 搜 `GM5MG0Y` 零结果），BIOS 那条路也是死的：
+它是 AMI 板，bios-mods 上的解锁请求没人接，有人用 AFUWIN64 刷改版报
+`cannot update bios with different platform name`，WinRAID 那边**连降级都被拒**。
+所以别再去搜 BIOS 了，这条记在这里就是为了不用再搜一遍。
+
+有用的是**同家族近亲板**的三份实测资料，它们的寄存器地址和我们从本机
+`GCUService.exe` 反射出来的常量表**逐个对得上**——这比任何单一来源都可信：
+
+| 地址 | 我们自己的 OEM 常量名 | 外部资料说它是什么 | 本机只读实测（Turbo 档、AC、电量 100%） |
+| --- | --- | --- | --- |
+| 0x741 | `ADDR_AP_OEM_BYTE` / `ADDR_FAN_ALERT_BYTE` | bit0 = ap_exist，激活链第一步 | **1**（bit0 已置） |
+| 0x706 | 不在我们的表里 | 自定义模式要写 0x41 | **0**（未进自定义模式） |
+| 0x726 | 不在我们的表里 | bit7 = 自定义模式；bit3 = AC Recovery | **0** |
+| 0x727 | 不在我们的表里 | bit5（一说 bit6）= 自定义模式 | **0** |
+| 0x7C5 | `ADDR_AP_OEM_BYTE5` | bit7 不置，EC 会**完全忽略**风扇表 | **0x80**（bit7 已置） |
+| 0x7C6 | `ADDR_AP_OEM_BYTE6` | bit2 是激活链一环 | **0x04**（bit2 已置） |
+| 0x783 | `ADDR_PL1_SETTING_VALUE` | PL1，可写且持久 | **75**（与面板读数一致） |
+| 0x78C | `ADDR_SINGLEKBL_ENABLE` / `ADDR_AP_OEM_BYTE2` | 单色键盘背光：开 0x01 / 关 0x03 | **0**（两个值都不是） |
+| 0x7B9 | `ADDR_BATTERY_CHARGE_LIMIT_UP` | EC 充电环每秒读的**实时**上限 | **0** |
+| 0x87F | 不在我们的表里 | **存储**的充电上限，要求 1–100 | **0xFF**（未设） |
+| 0x7C3 | 不在我们的表里 | 充电限制门控 | **7** |
+| 0x770 | 不在我们的表里 | ROMID[0]，门控要求 = 4 或 5 | **0xFF** |
+
+从这张表能落下四条结论，其中两条**修正了我们自己早先的判断**：
+
+1. **「裸写 PL 自清零」的原因很可能不是"寄存器是别代机型的"**（6.2 里那么写的）。
+   按 `uniwill-laptop-mr` 的实测，0x783/0x784/0x785 是可写且持久的，**前提是先置齐
+   自定义模式激活链** `0x741 bit0 → 0x706=0x41 → 0x726 bit7 → 0x727 bit5/6 →
+   0x7C5 bit7 → 0x7C6 bit2`；缺链的话 EC 直接把写入当没看见。本机现在这条链
+   **六个环节只置了三个**（0x741 bit0、0x7C5 bit7、0x7C6 bit2 已置，
+   0x706/0x726/0x727 全是 0），正好是"不在自定义模式"的样子——和写入自清的现象自洽。
+   这条链**不许自己写**（6.3 第 8 条）：置齐之后 EC 会开始执行风扇表，
+   万一表是空的风扇就不跟温度走了。
+2. **`CHARGE_LIMIT_UP` 读到 0 现在有机制解释了**：EC 的门控条件是
+   `0x7C3` 或 `0x770` 等于 4/5，否则要求存储上限 `0x87F` 落在 1–100。
+   本机 `0x770=0xFF`、`0x87F=0xFF`，两个条件都不满足 → 实时上限就是 0。
+   也就是说这个 0 不是"读不到"，是"充电限制根本没启用"。
+3. **电池三档的百分比有了两份独立旁证，但本机仍未实测**：`open-revo` 明写
+   长效 100% / 日常均衡 80% / 工作站长寿养护 60%；另一份无界 14XA 的实测给出
+   `0x7A6` = 0x08 长效 / 0x18 均衡 / 0x28 工作站，即 **bits[5:4]=0/1/2 + bit3 恒置**——
+   和我们抓到的 0x09 / 0x19 / 0x29 只差 bit0，档位顺序完全一致。
+   结论：我们的**解码是对的**（顺序 0=长效、1=平衡、2=健康），
+   百分比是**别人机器上的数**，面板继续只显示档位名、不显示百分比。
+4. **键盘背光那条阴性结论维持不变**：`0x78C` 在我们的表里确实叫 `SINGLEKBL_ENABLE`，
+   但本机灯灭着的时候它读 0，既不是外部的"开 0x01"也不是"关 0x03"。
+   本机是 FourZone / ITE 方案，真实通路仍然是 `Keyboard/Ctrl {"function":"SetPower"}`。
+
+另外三条**线索**（都还没验证，别当成能力）：
+
+- **免驱动的 EC 通道**：有 DSDT 里带 `\_SB.INOU.ECRR(addr)` / `ECRW(addr,val)`，
+  也就是不装 OEM 驱动、直接调 AML 方法就能读写 EC。可以作为 `UWACPIDriver` 不在时的备胎。
+- **WMI 邮箱**：`uniwill-laptop` 用 GUID `ABBC0F6F-8EA1-11D1-00A0-C90629100000` 的
+  `AcpiTest_MULong`（GetULong=1/SetULong=2/FireULong=3/GetSetULong=4/GetButton=5，
+  Data = 16bit addr + 16bit data + 16bit op，读 op=0x0100，`0xFEFEFEFE` 表示超时），
+  Linux 侧靠它做出了 `charge_control_end_threshold`。
+- **`tongfang-mifs-wmi` 这条线索可以关掉了**：它是纯 GUID 匹配、没有 DMI 机型表，
+  命令集里**不含风扇曲线写入、不含 PL1/2/4、不含充电阈值**（只有模式/GPU/键盘类型/
+  Fn 锁/触摸板锁/风扇转速/RGB/温度/功耗这几类），对本项目最想要的三件事一件都帮不上。
+
+还有一处**外部资料自己打架**、留待实测裁定的：风扇表布局。一份说是 16 点分块
+（CPU 升温阈值 0xF00–0xF0F、降温 0xF10–0xF1F、占空比 0xF20–0xF2F，GPU 0xF30/0xF40/0xF50），
+另一份说是每风扇 48 字节的 (up, down, duty) **交错三元组**，并警告 0xF5D–0xF5F 是
+RamFan 状态寄存器、不是占空比槽。占空比编码两份倒是一致：原始值 = 百分比 × 2。
+
 ## 7. 运行方式（目标是"不用盯着"）
 
 - 开机自启：`HKCU\...\Run\UmiControlPanel` → `UmiPanel.exe main.py --supervise --no-browser`；
@@ -624,13 +734,23 @@ powercfg 那一层压不住频率（2 节）。
 - [x] 机主给的 `UmiPro3-Hackintosh`（OpenCore 工程）核过了：确认本机是同方 GM5MG0Y，
       但 19 个 SSDT 全是通用热补丁、没有 EC 字段定义，对本项目只有 dGPU 走 ACPI 这一条旁证（见 6.8）
 - [ ] **电池三档对应的充电百分比还没实测**：`CHARGE_LIMIT_UP/DOWN` 全程 0，
-      切档时 PL1 与风扇字节都不动（说明与性能档正交）。open-revo 的 100/80/60 是别的机型的说法，
-      不能直接搬。要定这个数只能实测：切到某一档、把电充到停、看停在百分之几
-- [ ] **MQTT 写通道的可逆验证**：`OPERATING_OFFICE_MODE / OPERATING_TURBO_MODE` 这些动作名
-      来自 OEM 自己的动作表，但本机还没做过「写 → 观察哪个寄存器/跑分变了 → 还原」。
+      切档时 PL1 与风扇字节都不动（说明与性能档正交）。现在有**两份独立旁证**指向
+      长效 100% / 平衡 80% / 健康 60%（open-revo 明写；另一份无界 14XA 实测的
+      `0x7A6` 编码 0x08/0x18/0x28 与我们抓到的 0x09/0x19/0x29 只差 bit0，档位顺序一致，
+      见 6.10），但都是别人机器上的数。要定这个数只能实测：切到某一档、把电充到停、
+      看停在百分之几。**在实测出来之前面板只显示档位名，不显示百分比**
+- [x] **MQTT 写通道的第一次可逆验证做完了**（Win 键锁定）：`WINKEY_UNLOCK` 下发后
+      EC `ADDR_STAUTS_BYTE` 1→0，`WINKEY_LOCK` 写回后又回到 1，EC 直读与 `Setting/Status`
+      两条通道一致，写入到生效约 6 秒延迟。`winkey.write` 已升为 verified，
+      面板第一次给出了 OEM 写按钮（见 6.9）
+- [ ] **`OPERATING_*_MODE` 的可逆验证还没做**：动作名来自 OEM 自己的动作表，
+      但本机还没做过「写 → 观察哪个寄存器/跑分变了 → 还原」。
       验证之前 `mode.write` 保持「待验证」，面板不点亮那组按钮（6.3 第 2 条）。
-      Win 锁是最安全的突破口：命令名（`WINKEY_LOCK/UNLOCK`）和 EC 落点都已确认，
-      状态可逆、无温度风险，适合当「第一次自己下发写命令」的验证对象
+      既然 Win 锁那条链已经走通，这一步只差一次带跑分对照的实测
+- [ ] **PL 自清零这件事要重测**：6.2 记的"这组寄存器是别代机型的落点"很可能不对。
+      外部实测显示 0x783/0x784/0x785 可写且持久，**前提是先置齐自定义模式激活链**，
+      而本机现在链上六环只置了三个（见 6.10）。但激活链属 6.3 第 8 条的永久禁区，
+      要动必须机主在场 + 温度保险 + 可即时还原
 - [ ] 改功耗墙的正路已经看到了：`Fan/Control {"Action":"SET_OPERATING_MODE_DETAIL","PL1","PL2","PL4"}`，
       而且 `Fan/Status` 给出了 OEM 自己的边界（PL1 10~120W、PL4 ≤165W、TGP 80~115、
       目标温度 75~87°C）。要做可逆验证 + 拿这组边界当护栏，验证前不进白名单
@@ -643,15 +763,30 @@ powercfg 那一层压不住频率（2 节）。
       `Setting/Status`），命令名也在 OEM 字符串表里，缺的还是「下发 → 回读 → 还原」那一次实测
 - [ ] 键盘背光的写入：命令已知（`Keyboard/Ctrl {"function":"SetPower","light","speed"}`），
       状态也已知（`Keyboard/Status.powerStatus` 才是真开关，`SingleColorKBBL` 是另一件事），
-      同样等一次可逆验证
+      同样等一次可逆验证。「灯效不在 EC 上」这条阴性结论 6.10 又复测过一次：
+      `0x78C`（我们的表里叫 `SINGLEKBL_ENABLE`）在灯灭时读 0，既不是外部资料的
+      开 0x01 也不是关 0x03 —— 本机 FourZone/ITE 方案确实不走这个字节
 - [ ] 风扇曲线读写：`ADDR_MYFAN2_L1~L5_PWM` 与 `User_Fan_Level1~5(0x81~0x85)` 看着是一对，
       而且全表观察抓到按硬件模式时 `MYFAN2_L1/L4_PWM` 会跟着换（3↔7、5↔15），
-      但「写单个 PWM 会不会被 EC 覆盖」没实测过，暂不写
-- [ ] **同方 WMI 接口（`B60BFB48-…`）在不在本机**：查不到也否不掉——普通权限连微软自己的
+      但「写单个 PWM 会不会被 EC 覆盖」没实测过，暂不写。
+      而且它多半要先过自定义模式激活链那一关（见 6.10 第 1 条）；
+      0xF00 段的表布局两份外部资料还互相打架，得实测裁定
+- [ ] **同方 WMI 接口在不在本机**：查不到也否不掉——普通权限连微软自己的
       GUID 类都看不见（见 6.5）。需要用管理员权限跑一次 `tools\wmi_guid_probe.ps1`（只读）。
-      优先级已经降低：GCUBridge 这条路通了之后，大部分功能都有 OEM 背书，不用赌 WMI
+      优先级已经降低：GCUBridge 这条路通了之后，大部分功能都有 OEM 背书，不用赌 WMI。
+      另外查清了两件事（见 6.10）：`tongfang-mifs-wmi` 那条线索**可以关掉了**
+      （命令集里没有风扇曲线、没有 PL、没有充电阈值）；真正带
+      `charge_control_end_threshold` 的是另一个 GUID `ABBC0F6F-…` 的 `AcpiTest_MULong` 邮箱
+- [x] 两道写入闸门补齐（见 6.9）：`send_action` 之前不查 `allow_write`、
+      `do_POST` 之前不校验来源，等于任何网页都能 CSRF 本机面板下发 OEM 命令。
+      现已修好并由 `tests/test_write_gates.py` 10 条盯着
+- [x] 外部逆向资料交叉核对完毕（见 6.10）：BIOS 那条路是死的（无解锁版、刷写被拒、
+      降级被拒），GM5MG0Y 的 DSDT/EC 转储公网不存在；但同家族近亲板的三份实测
+      与我们的 OEM 常量表逐个地址对得上，并当场只读复测了 12 个地址
 - [ ] 独显直连（MUX）：`DiscreteGpuDirectConnectionSwitch_Status=ON / Support`，
-      但 `DGpu=NV_CTRL_PANEL_AUTOSELECT`，两个字段互相矛盾，等一次点击观察分辨
+      而 `DGpu=NV_CTRL_PANEL_AUTOSELECT`。现在倾向于这是**两层不同的东西**
+      （直连开关 vs NVIDIA 控制面板的输出偏好），旁证是 Hackintosh 工程里 dGPU 的电源
+      挂在 ACPI `\_SB.PCI0.PEG0.PEGP._OFF/_ON` 上（见 6.8）。面板两个值都报，等一次点击观察
 - [ ] 托盘图标的桌面可见性需本机确认（沙箱内截不到图）
 
 ## 9. 协议与许可参考
@@ -662,3 +797,11 @@ EC/ACPI 交互的设计思路参考社区项目 [OpenRevo](https://github.com/fa
 
 机械革命/同方（Uniwill）相关硬件行为来自本机实测与离线静态分析记录，
 不保证适用于其它模具；在其他机型上开启 EC 写入前，请先只做只读验证。
+
+6.10 那轮交叉核对引用到的社区资料（均为第三方机型上的实测，本机只当线索用）：
+[Terabinaryte/uniwill-laptop-mr](https://github.com/Terabinaryte/uniwill-laptop-mr)（自定义模式激活链、PL、风扇表）、
+[roj234/mechrevo_ec_api](https://github.com/roj234/mechrevo_ec_api)（同法反射 GCUService 得到的寄存器表与 NVRAM 结构）、
+[losewayy/uniwill-ec-charge-limit](https://github.com/losewayy/uniwill-ec-charge-limit)（H2RAM 窗口模型、IOCTL 表、充电限制的坑）、
+[w568w 的无界 14XA 逆向记录](https://gist.github.com/w568w/b2fc5f9d1f4dff13efe751abec27b396)（`0x7A6` 三档编码、`\_SB.INOU.ECRR/ECRW`）、
+以及内核文档 [uniwill-laptop WMI device](https://docs.kernel.org/wmi/devices/uniwill-laptop.html)
+与 [CVE-2026-64143](https://security-tracker.debian.org/tracker/CVE-2026-64143)（6.3 第 8 条那条禁令的依据）。
