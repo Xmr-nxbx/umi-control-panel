@@ -247,7 +247,7 @@ async function poll() {
     const s = await api('/api/state');
     lastState = s;
     META = Object.assign(META, s.meta || {});
-    renderTier(s); renderPills(s); renderIntents(); renderMeters(s);
+    renderTier(s); renderPills(s); renderIntents(); renderProfiles(s); renderMeters(s);
     renderHardware(s); renderCaps(s);
     if ((s.bench || {}).running || benchWasRunning) loadBench();
     benchWasRunning = !!(s.bench || {}).running;
@@ -432,6 +432,26 @@ function drawChart(canvasId, series, data) {
         + ` ~ ${hi == null ? '—' : Math.round(hi) + esc(s.unit)}）</span></span>`;
     }).join('');
   }
+}
+
+function renderProfiles(s) {
+  const meta = (s.meta || {}).sched_profiles || {};
+  const names = ['quiet', 'standard', 'performance'].filter((n) => meta[n]);
+  const cur = s.sched_profile || 'standard';
+  $('profile-buttons').innerHTML = names.map((n) => `
+    <button data-profile="${n}" class="${n === cur ? 'primary' : ''}">${esc(meta[n].label)}</button>`).join('');
+  document.querySelectorAll('#profile-buttons button').forEach((b) => {
+    b.onclick = async () => {
+      try {
+        const r = await api('/api/sched-profile', { name: b.dataset.profile });
+        toast(r.ok ? `${meta[b.dataset.profile].label}：${r.detail}` : `没改成：${r.detail}`, !r.ok);
+      } catch (e) { toast('设置失败：' + e.message, true); }
+      poll();
+    };
+  });
+  const d = (meta[cur] || {}).desc;
+  $('profile-desc').textContent = d || '';
+  $('profile-desc').hidden = !d;
 }
 
 async function loadHistory() {

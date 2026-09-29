@@ -6,7 +6,7 @@ from app.act.channels.base import CAP_LABELS, MODE_LABELS
 from app.act.hardware import Hardware
 from app.act.power import PowerExecutor, active_scheme
 from app.bench import Bench, best_of_each_tier, power_verdict, save_record, set_baseline
-from app.config import SCHEME_LABELS, SCHEMES
+from app.config import SCHED_PROFILES, SCHEME_LABELS, SCHEMES
 from app.history import History
 from app.policy.scheduler import TIER_LABELS, Scheduler
 from app.sense.clock import ClockSense
@@ -267,6 +267,7 @@ class Daemon:
             'uptime_s': round(now - self.started_at),
             'tick_age_s': round(now - self._last_tick_ts, 1),
             'intent': self.cfg.get('intent'),
+            'sched_profile': self.cfg.get('scheduler', 'profile'),
             'tier': tier,
             'tier_label': TIER_LABELS.get(tier),
             'reason': decision['reason'],
@@ -299,7 +300,9 @@ class Daemon:
             'bench': {k: self.bench.get(k) for k in
                       ('running', 'mode', 'tier', 'label', 'step', 'pct', 'error')},
             'meta': {'cap_labels': CAP_LABELS, 'mode_labels': MODE_LABELS,
-                     'tier_labels': TIER_LABELS},
+                     'tier_labels': TIER_LABELS,
+                     'sched_profiles': {k: {'label': v['label'], 'desc': v['desc']}
+                                        for k, v in SCHED_PROFILES.items()}},
         }
         if self.history:
             self.history.record(self._state, tier, decision.get('throttle'), now)
@@ -315,6 +318,18 @@ class Daemon:
         return is_admin()
 
     # ---------- 面板动作 ----------
+    def set_sched_profile(self, name):
+        """调度性格：安静 / 标准 / 性能。给机主的「一个按钮」，
+        而不是让他去理解 cpu_perf=60 这种数字。"""
+        if name not in SCHED_PROFILES:
+            return False, '未知性格：%s（可用：%s）' % (name, '/'.join(SCHED_PROFILES))
+        self.cfg.set_profile(name)
+        self.cfg.save()
+        self.sched.p = dict(self.cfg['scheduler'])
+        self.log.info('[面板] 调度性格 → %s（%s）' % (
+            name, SCHED_PROFILES[name]['label']))
+        return True, SCHED_PROFILES[name]['desc']
+
     def set_intent(self, intent):
         if intent not in ('auto', 'office', 'balance', 'turbo'):
             return False, '未知意图'

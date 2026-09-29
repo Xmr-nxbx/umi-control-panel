@@ -113,6 +113,9 @@ def make_handler(daemon, cfg, on_shutdown):
             if path == '/api/intent':
                 ok, detail = daemon.set_intent(str(body.get('intent', '')))
                 self._send(200 if ok else 400, {'ok': ok, 'detail': detail})
+            elif path == '/api/sched-profile':
+                ok, detail = daemon.set_sched_profile(str(body.get('name', '')))
+                self._send(200 if ok else 400, {'ok': ok, 'detail': detail})
             elif path == '/api/mode':
                 ok, detail = daemon.set_mode_now(str(body.get('mode', '')))
                 self._send(200 if ok else 409, {'ok': ok, 'detail': detail})

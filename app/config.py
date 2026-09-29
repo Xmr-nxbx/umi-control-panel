@@ -47,6 +47,9 @@ DEFAULTS = {
         'min_up_dwell_s': 20.0, 'min_down_dwell_s': 45.0, 'big_jump_levels': 2,
         'allow_perf_on_battery': True,
         'sleep_guard_idle_s': 60.0,
+        # 调度性格：面板上给的三个按钮，而不是 12 个阈值数字。
+        # 见 SCHED_PROFILES；'standard' 就是上面这些默认值本身。
+        'profile': 'standard',
     },
     # 四档必须在「实际频率」上拉开差距，否则用户体感不到。本机 2026-09-29 实测结论：
     #   * 睿频开关（PERFBOOSTMODE）在这台机器上不管用：省电档写了 boost=0，
@@ -114,6 +117,49 @@ SCHEMES = {
 
 SCHEME_LABELS = {'balanced': '平衡', 'high_perf': '高性能', 'power_saver': '节能'}
 
+# 调度性格预设：机主不需要理解 cpu_perf=60 是什么意思，只需要说「我要安静」
+# 或「我要性能」。每一项是覆盖在 scheduler 默认值上的增量，标准档就是空覆盖。
+# 只动判定阈值与防抖时长，不动风扇映射——档位性格不该改变会写进硬件的东西。
+SCHED_PROFILES = {
+    'quiet': {'label': '安静优先',
+              'desc': '更少进性能档、更早降回去，风扇高转的时间最短',
+              'patch': {'cpu_perf': 70, 'gpu_perf': 55, 'perf_hold_s': 5.0,
+                        'cpu_perf_exit': 30, 'perf_exit_hold_s': 6.0,
+                        'cpu_perf_soft_exit': 62, 'perf_soft_hold_s': 25.0,
+                        'cpu_mid': 40, 'cpu_bal_exit': 24,
+                        'min_down_dwell_s': 30.0,
+                        'temp_rise_deg': 6.0, 'temp_rise_min_c': 78.0}},
+    'standard': {'label': '标准', 'desc': '默认调校：升档快、降档慢，兼顾噪音',
+                 'patch': {}},
+    'performance': {'label': '性能优先',
+                    'desc': '中等负载就给劲、掉档更晚，风扇会更吵',
+                    'patch': {'cpu_perf': 45, 'gpu_perf': 25, 'perf_hold_s': 1.5,
+                              'cpu_perf_exit': 40, 'perf_exit_hold_s': 15.0,
+                              'cpu_perf_soft_exit': 45, 'perf_soft_hold_s': 120.0,
+                              'cpu_mid': 30,
+                              'min_up_dwell_s': 10.0, 'min_down_dwell_s': 90.0,
+                              'temp_rise_deg': 3.0, 'temp_rise_min_c': 68.0}},
+}
+
+
+def apply_sched_profile(cfg):
+    """把性格预设作为**只读叠层**盖到 scheduler 上。
+
+    关键点是补丁不写进 cfg.sched_base（用户自己的那份），也不落盘：
+    上一版直接在 cfg.data 上原地改，换回标准档时旧性格的阈值留在了内存里，
+    下一次 save() 就把 cpu_perf=70 这类值写进了 config.json ——
+    面板显示「标准」，实际跑的是「安静」，而且再也回不去。
+    """
+    if cfg.sched_base is None:
+        cfg.sched_base = dict(cfg.data.get('scheduler') or {})
+    patch = ((SCHED_PROFILES.get(cfg.sched_base.get('profile'))
+              or SCHED_PROFILES['standard']).get('patch')) or {}
+    sched = dict(cfg.sched_base)
+    sched.update(patch)
+    cfg.data['scheduler'] = sched
+    cfg.profile_keys = sorted(patch)
+    return cfg
+
 
 def _deep_merge(dst, src):
     """把已保存的配置盖到默认值上。
@@ -178,6 +224,8 @@ class Config:
         self.raw_tier_tuning = (data or {}).get('tier_tuning') if isinstance(data, dict) else None
         self.path = path
         self.bad_file = None
+        self.profile_keys = []
+        self.sched_base = None      # 用户自己的 scheduler 原值，性格叠层不写这里
 
     # --- 访问 ---
     def get(self, *keys, default=None):
@@ -195,6 +243,14 @@ class Config:
             node = node.setdefault(k, {})
         node[keys[-1]] = value
 
+    def set_profile(self, name):
+        """换调度性格。写进 sched_base（用户那份）再重算叠层，
+        否则 data['scheduler'] 里会留着上一任性格的值。"""
+        if self.sched_base is None:
+            self.sched_base = dict(self.data.get('scheduler') or {})
+        self.sched_base['profile'] = name
+        apply_sched_profile(self)     # 幂等：每次都是从 sched_base 重算，不累加
+
     def __getitem__(self, k):
         return self.data[k]
 
@@ -204,12 +260,20 @@ class Config:
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix='.tmp')
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                json.dump(self.data, f, ensure_ascii=False, indent=2)
+                json.dump(self._for_disk(), f, ensure_ascii=False, indent=2)
             os.replace(tmp, path)
         finally:
             if os.path.exists(tmp):
                 os.remove(tmp)
         self.path = path
+
+    def _for_disk(self):
+        """落盘的是用户自己那份 scheduler，不含性格叠层 ——
+        叠层每次启动重算，写进文件就分不清是谁的值了。"""
+        data = json.loads(json.dumps(self.data))
+        if isinstance(self.sched_base, dict) and isinstance(data.get('scheduler'), dict):
+            data['scheduler'] = dict(self.sched_base)
+        return data
 
     @classmethod
     def load(cls):
@@ -229,4 +293,5 @@ class Config:
         cfg = cls(raw if isinstance(raw, dict) else None, path=path)
         _strip_unknown(cfg.data)
         _migrate(cfg)
+        apply_sched_profile(cfg)
         return _apply_local_identity(cfg), None, None
