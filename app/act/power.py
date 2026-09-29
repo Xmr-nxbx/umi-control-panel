@@ -78,6 +78,7 @@ class PowerExecutor:
         self.log = log
         self.epp_supported = None
         self.baseline = {}          # {scheme: {key: ac/dc 原值}}
+        self.origin_scheme = None   # 面板启动时的活动方案，退出时还回去
         self.applied = None
         self.last_apply_ts = 0.0
         self.last_result = None
@@ -88,6 +89,8 @@ class PowerExecutor:
         return {'active_scheme': scheme, 'epp_supported': self.epp_supported}
 
     def capture_baseline(self, schemes):
+        if self.origin_scheme is None:
+            self.origin_scheme = active_scheme()
         for name in schemes:
             guid = SCHEMES.get(name)
             if not guid or guid in self.baseline:
@@ -152,6 +155,7 @@ class PowerExecutor:
     def restore(self, tiers):
         """退出时把改过的属性写回原始值，并恢复原方案。"""
         ok = True
+        origin = self.origin_scheme
         for guid, snap in self.baseline.items():
             for key, sg in SETTINGS.items():
                 for suffix, is_dc in (('', False), ('_dc', True)):
@@ -160,8 +164,11 @@ class PowerExecutor:
                         continue
                     if read_setting(guid, sg, dc=is_dc) != want:
                         ok = set_setting(guid, sg, want, dc=is_dc) and ok
+        if origin and active_scheme() != origin:
+            ok = _run(['powercfg', '/setactive', origin])[0] == 0 and ok
         self.baseline = {}
-        self.log.info('[还原] 电源设置已%s' % ('恢复' if ok else '部分失败'))
+        self.log.info('[还原] 电源设置已%s（方案 %s）' % (
+            '恢复' if ok else '部分失败', (origin or '?')[:8]))
         return ok
 
     def external_scheme(self):

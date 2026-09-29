@@ -133,11 +133,14 @@ class Hardware:
             return False, '没有可用通道支持写档位（EC 未验证 / GCUBridge 未连接）'
         return False, '; '.join('%s:%s' % (n, d) for n, _, d in results)
 
-    def set_fan_mode(self, flag):
-        """写 EC 风扇模式字节（取值来自 OEM 枚举，语义已确认）。"""
+    def set_fan_mode(self, flag, who='面板按钮'):
+        """写 EC 风扇模式字节（取值来自 OEM 枚举，语义已确认）。
+
+        who=None 表示这是自动跟随在写，不算人工意图。
+        """
         for ch in self.channels:
             if hasattr(ch, 'set_fan_mode') and ch.caps.get(CAP_FAN_MODE) == 'verified':
-                ok, detail = ch.set_fan_mode(flag)
+                ok, detail = ch.set_fan_mode(flag, who=who)
                 if ok:
                     self.log.info('[硬件] 风扇模式 → %s' % flag)
                     with self.lock:

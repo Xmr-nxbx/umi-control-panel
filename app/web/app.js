@@ -9,11 +9,17 @@ const INTENTS = [
 const TIERS = { perf: '性能', mid: '流畅', bal: '均衡', eco: '省电' };
 const BOOST_TEXT = { 0: '禁用', 1: '启用', 2: '激进', 3: '高效', 4: '高效激进', 5: '保证频率' };
 // 风扇模式字节取值来自 OEM 自己的枚举（MyFanCTLByteFlag），这里只做中文注解
+// 实体「造物者模式」按键循环的三态（实测见 README 第 6.2 节）。LED 与哪一态对应
+// 还没确认，所以这里只写 OEM 枚举自己的语义：自动调速 / 用自定义曲线 / 强冷。
+const FAN_KEY_FLAGS = ['Normal_Mode', 'User_Fan_Mode', 'Turbo_Mode'];
 const FAN_FLAG_TEXT = { Normal_Mode: '自动', Turbo_Mode: '强冷', FanBoost_Mode: '风扇加速',
-  User_Fan_Mode: '手动', User_Fan_HiMode: '手动高' };
+  User_Fan_Mode: '自定义曲线', User_Fan_HiMode: '自定义·高',
+  User_Fan_Level1: '自定义 1 档', User_Fan_Level2: '自定义 2 档', User_Fan_Level3: '自定义 3 档',
+  User_Fan_Level4: '自定义 4 档', User_Fan_Level5: '自定义 5 档' };
 
 let META = { cap_labels: {}, mode_labels: {} };
 let lastState = null;
+let benchWasRunning = false;
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
@@ -66,6 +72,8 @@ function renderPills(s) {
   pills.push(`<span class="pill ${s.admin ? 'ok' : ''}">${s.admin ? '管理员' : '普通权限'}</span>`);
   if (s.throttle) pills.push('<span class="pill bad">温度保护中</span>');
   if (s.dwell_left > 0) pills.push(`<span class="pill warn">驻留 ${Math.round(s.dwell_left)}s</span>`);
+  if (s.pending) pills.push(`<span class="pill warn">换挡防抖：${Math.round(s.pending.in_s)}s 后 → `
+    + `${esc((META.tier_labels || {})[s.pending.tier] || s.pending.tier)}</span>`);
   if (s.resume_left > 0) pills.push(`<span class="pill warn">亮屏缓冲 ${Math.round(s.resume_left)}s</span>`);
   if (s.guard_hits) pills.push(`<span class="pill ok">掉档拦截 ${s.guard_hits} 次</span>`);
   if (s.external_hits) pills.push(`<span class="pill warn">外部改动 ${s.external_hits} 次</span>`);
@@ -120,15 +128,19 @@ function renderHardware(s) {
   const caps = s.capabilities || {};
   const hw = s.hardware || {};
   const verified = (cap) => (caps[cap] || {}).state === 'verified';
-  const ecAlive = (((s.channels || []).find((c) => c.name === 'ec') || {}).alive) === true;
-  // EC 通了但档位寄存器语义没确认 → 说「未确认」，不要说「不可控」（那是通道死了的意思）
-  const modeText = hw.mode ? ((META.mode_labels || {})[hw.mode] || hw.mode)
-    : (ecAlive ? '未确认' : '不可控');
+  const ecCh = (s.channels || []).find((c) => c.name === 'ec') || {};
+  const ecAlive = ecCh.alive === true;
+  const keyFlag = FAN_KEY_FLAGS.indexOf(hw.fan_mode_flag) >= 0 ? hw.fan_mode_flag : null;
+  // 实测（2026-09-29，tools/ec_watch.py）：实体「造物者模式」按键只改风扇模式字节，
+  // PL1/PL2/PL4 与 MyFanCCI_Mode_Index 一动不动 —— 所以这里按「按键三态」显示，
+  // 功耗墙那一行仍然如实写「未确认」，不把风扇档说成性能档。
+  const keyText = keyFlag ? (FAN_FLAG_TEXT[keyFlag] || keyFlag)
+    : (ecAlive ? (FAN_FLAG_TEXT[hw.fan_mode_flag] || hw.fan_mode_flag || '未知') : '不可读');
   const plNote = hw.pl1_setting ? '' : '（出厂默认）';
   const rows = [
-    hwRow('硬件档位', modeText, !!hw.mode),
-    hwRow('风扇模式', FAN_FLAG_TEXT[hw.fan_mode_flag] || hw.fan_mode_flag || '未知',
-          verified('fan.rpm')),
+    hwRow('造物者模式按键', keyText + (keyFlag ? '' : '（非三态取值）'), ecAlive),
+    hwRow('功耗墙档位', hw.mode ? ((META.mode_labels || {})[hw.mode] || hw.mode)
+          : (ecAlive ? '未确认（实测按键不动功耗墙）' : '不可控'), !!hw.mode),
     hwRow('风扇转速', hw.fan_rpm != null
           ? (fmtRpm(hw.fan_rpm) + ' / ' + fmtRpm(hw.fan2_rpm)) : '未知', verified('fan.rpm')),
     hwRow('风扇占空比', hw.fan_duty_l != null ? (hw.fan_duty_l + '% / ' + (hw.fan_duty_r != null ? hw.fan_duty_r + '%' : '?'))
@@ -151,14 +163,19 @@ function renderHardware(s) {
 
   const canFan = (caps['fan.mode'] || {}).state === 'verified';
   const available = Object.keys(s.fan_modes || {});
-  const flags = ['Normal_Mode', 'Turbo_Mode', 'FanBoost_Mode'].filter((f) => available.indexOf(f) >= 0);
+  // 只放实体按键真正会循环的那三态；User_Fan_Level1~5 是自定义曲线的子档，
+  // 放上来只会让面板看起来比实际能控的东西多。
+  const flags = FAN_KEY_FLAGS.filter((f) => available.indexOf(f) >= 0);
+  const lockLeft = (ecCh.detail || {}).fan_lock_left || 0;
+  const lockBy = (ecCh.detail || {}).fan_lock_by;
+  const owned = !!(ecCh.detail || {}).fan_user_owned;
   const fanButtons = canFan ? flags.map((f) => `
     <button data-fan="${f}" class="${hw.fan_mode_flag === f ? 'primary' : ''}">${esc(FAN_FLAG_TEXT[f] || f)}</button>`).join('') : '';
   const canWrite = (caps['mode.write'] || {}).state === 'verified';
   const modes = ['office', 'balance', 'turbo'];
   $('hw-buttons').innerHTML = fanButtons
-    + modes.map((m) => `
-    <button data-mode="${m}" ${canWrite ? '' : 'disabled'}>${esc((META.mode_labels || {})[m] || m)}</button>`).join('')
+    + (canWrite ? modes.map((m) => `
+    <button data-mode="${m}">${esc((META.mode_labels || {})[m] || m)}</button>`).join('') : '')
     + `<button class="ghost" id="btn-refresh-hw">重新探测通道</button>`;
   document.querySelectorAll('#hw-buttons button[data-fan]').forEach((b) => {
     b.onclick = async () => {
@@ -179,11 +196,12 @@ function renderHardware(s) {
     catch (e) { toast('EC 探测失败：' + e.message, true); }
     poll();
   };
-  const ecCh = (s.channels || []).find((c) => c.name === 'ec') || {};
   const mqCh = (s.channels || []).find((c) => c.name === 'mqtt') || {};
   const why = (c) => (c.detail || {}).reason || '未探测';
   const hints = [];
-  if (!canWrite) hints.push('硬件档位不可写：' + ((ecCh.detail || {}).write_reason || why(ecCh)));
+  if (lockLeft) hints.push(`${lockBy || '人工'}优先，${Math.round(lockLeft)} 秒内面板不自动改风扇`);
+  else if (owned) hints.push('当前是自定义曲线，面板不会自动改风扇（点上面的按钮可接管）');
+  if (!canWrite) hints.push('功耗墙档位不可写：' + ((ecCh.detail || {}).write_reason || why(ecCh)));
   if (!canFan) hints.push('风扇模式不可写：' + ((ecCh.detail || {}).fan_mode_reason || why(ecCh)));
   $('hw-hint').textContent = hints.join('；');
   $('hw-hint').classList.toggle('err', !canWrite && !canFan);
@@ -225,7 +243,8 @@ async function poll() {
     META = Object.assign(META, s.meta || {});
     renderTier(s); renderPills(s); renderIntents(); renderMeters(s);
     renderHardware(s); renderCaps(s);
-    if ((s.bench || {}).running || (s.bench || {}).step === '完成') loadBench();
+    if ((s.bench || {}).running || benchWasRunning) loadBench();
+    benchWasRunning = !!(s.bench || {}).running;
   } catch (e) {
     $('foot-status').textContent = '取数失败：' + e.message;
   }
@@ -243,12 +262,13 @@ function renderBench(v) {
     vEl.hidden = true;
   }
   const running = !!job.running;
-  $('bench-run').hidden = !running;
+  const done = !running && job.step === '完成';
+  $('bench-run').hidden = !(running || done);
   $('btn-bench-current').disabled = running;
   $('btn-bench-compare').disabled = running;
-  if (running) {
-    $('bench-fill').style.width = (job.pct || 0) + '%';
-    $('bench-step').textContent = `${job.label || ''} ${job.step || ''}`;
+  if (running || done) {
+    $('bench-fill').style.width = (done ? 100 : (job.pct || 0)) + '%';
+    $('bench-step').textContent = done ? '完成，成绩见下表' : `${job.label || ''} ${job.step || ''}`;
   }
   const rows = (v && v.tiers) || [];
   const base = (v && v.baseline) || {};

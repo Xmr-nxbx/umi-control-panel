@@ -91,6 +91,14 @@ WATCH_REGS = ('ADDR_MAFAN_CONTROL_BYTE', 'ADDR_MyFanCCI_Mode_Index', 'ADDR_TRIGG
               'ADDR_FAN_ALERT_BYTE', 'ADDR_BATTERY_ALERT_BYTE', 'ADDR_SUPPORT_BYTE1',
               'ADDR_SUPPORT_BYTE2', 'ADDR_AP_OEM_BYTE', 'ADDR_BIOS_OEM_BYTE')
 WATCH_HISTORY = 60
+# 实体「造物者模式」按键就是在这个字节上循环：
+#   Normal_Mode(0x00) → User_Fan_Mode(0x80) → Turbo_Mode(0x10) → 回到 0x00
+# 2026-09-29 用 tools/ec_watch.py 实测：按一次键只有这一个字节变，
+# 其余 20 个语义寄存器（含 PL1/PL2/PL4、MyFanCCI_Mode_Index）纹丝不动。
+FAN_KEY = 'ADDR_MAFAN_CONTROL_BYTE'
+# MyFanCTLByteFlag 里带这个位的全是「用户自己的曲线」：
+# User_Fan_Mode=0x80、User_Fan_HiMode=0xA0、User_Fan_Level1~5=0x81~0x85
+USER_FAN_BIT = 0x80
 
 
 def load_map(path=None):
@@ -232,6 +240,32 @@ class EcChannel:
         self._last_reprobe = 0.0
         self._validated = False
         self.allow_write = bool(cfg.get('hardware', 'ec', 'allow_write', default=False))
+        # 人工意图优先窗口：见 FAN_KEY / USER_FAN_BIT 的说明
+        self.respect_s = float(cfg.get('hardware', 'ec', 'respect_external_s', default=900.0))
+        self.hold_until = 0.0
+        self.hold_by = None
+        self.hold_last = None
+
+    # ---------- 人工意图优先 ----------
+    def fan_lock_left(self, now=None):
+        """还有多少秒不允许面板自动改风扇字节（0 = 可以自由跟随）。"""
+        left = self.hold_until - (now or time.time())
+        return round(left, 1) if left > 0 else 0.0
+
+    def take_fan_control(self, who='面板'):
+        """人工动作（按键或点按钮）之后的一阵别让自动跟随去抢方向盘。"""
+        self.hold_until = time.time() + self.respect_s
+        self.hold_by = who
+
+    def fan_user_owned(self):
+        """当前风扇字节是不是用户自己选的自定义曲线。
+
+        这一条和优先窗口是两回事：窗口只在「运行中观察到按键」时生效，
+        而重启后面板一上来读到的就是 0x80，照样会把它写掉——实测过。
+        自定义曲线属于用户，只有用户点面板按钮才算交还控制权。
+        """
+        raw = (self.values.get('fan') or {}).get(FAN_KEY)
+        return raw is not None and bool(raw & USER_FAN_BIT)
 
     # ---------- 地址表 ----------
     def addr(self, name):
@@ -274,7 +308,7 @@ class EcChannel:
         self._validated = (sys_soc is not None and sys_soc >= 0 and abs(ec_soc - sys_soc) <= 2)
         self.alive = True
         if self._validated:
-            fan_reg = self.addr('ADDR_MAFAN_CONTROL_BYTE')
+            fan_reg = self.addr(FAN_KEY)
             fan_enum = (self.map or {}).get('enums', {}).get('MyFanCTLByteFlag') or {}
             self.caps.update({
                 CAP_FAN_RPM: 'verified', CAP_PL_READ: 'verified', CAP_TEMP_EC: 'verified',
@@ -361,6 +395,11 @@ class EcChannel:
             entry = {'ts': round(time.time(), 1), 'name': name, 'old': old, 'new': value}
             self.changes.append(entry)
             del self.changes[:-WATCH_HISTORY]
+            if name == FAN_KEY:
+                # 实体按键刚被按过：一段时间内把风扇交给用户，面板不再自动跟随。
+                # 上一版没有这个让步，实测到按键改完 0 秒就被面板写回去。
+                self.take_fan_control('实体按键')
+                self.hold_last = {'old': old, 'new': value, 'ts': entry['ts']}
             if self.log:
                 self.log.info('[EC变化] %s: %s → %s（不是本面板写的：实体按键或其它软件在改）'
                               % (name, old, value))
@@ -392,7 +431,7 @@ class EcChannel:
                           fan.get('ADDR_EC_SECOND_FAN_RPM_BYTE2'))
         cycles = self._word(static.get('ADDR_EC_BT1CycleCount_BYTE2'),
                             static.get('ADDR_EC_BT1CycleCount_BYTE1'))
-        ctl = fan.get('ADDR_MAFAN_CONTROL_BYTE')
+        ctl = fan.get(FAN_KEY)
         out = {
             'fan_rpm': rpm if self._plausible_rpm(rpm) else None,
             'fan_rpm_raw': rpm,
@@ -492,29 +531,32 @@ class EcChannel:
         """OEM 枚举里可用的风扇模式名 → 值。"""
         return dict((self.map or {}).get('enums', {}).get('MyFanCTLByteFlag') or {})
 
-    def set_fan_mode(self, flag_name):
-        """写风扇模式字节（Normal_Mode / Turbo_Mode / FanBoost_Mode …）。
+    def set_fan_mode(self, flag_name, who='面板按钮'):
+        """写风扇模式字节（Normal_Mode / Turbo_Mode / User_Fan_Mode …）。
 
-        这是目前唯一语义确认过的写操作：取值直接来自 OEM 自己的枚举，
-        寄存器就是当前读出 Turbo_Mode 的那个，写完立刻回读校验。
+        这个字节就是实体「造物者模式」按键写的同一个寄存器，取值直接来自
+        OEM 自己的枚举 MyFanCTLByteFlag，写完立刻回读校验。
+        人工点按钮算一次人工意图：随后一段时间内自动跟随不许再来抢方向盘。
         """
         if not self.allow_write:
             return False, 'EC 写入未开启（config.hardware.ec.allow_write=false）'
-        addr = self.addr('ADDR_MAFAN_CONTROL_BYTE')
+        addr = self.addr(FAN_KEY)
         if addr is None:
-            return False, '寄存器表里没有 ADDR_MAFAN_CONTROL_BYTE'
+            return False, '寄存器表里没有 %s' % FAN_KEY
         table = self.fan_modes()
         if flag_name not in table:
             return False, '未知风扇模式：%s（可用：%s）' % (
                 flag_name, '/'.join(sorted(table)) or '无')
         value = int(table[flag_name])
-        self._expect['ADDR_MAFAN_CONTROL_BYTE'] = value
-        before = self._read_named('ADDR_MAFAN_CONTROL_BYTE')
+        self._expect[FAN_KEY] = value
+        before = self._read_named(FAN_KEY)
         result = self.dev.write(int(addr), value)
         if result is None:
             return False, '写入失败：%s' % self.dev.error
-        after = self._read_named('ADDR_MAFAN_CONTROL_BYTE')
+        after = self._read_named(FAN_KEY)
         ok = (after == value)
+        if ok and who:
+            self.take_fan_control(who)
         msg = '风扇模式 %s(0x%02X) → %s(0x%02X)，回读 %s' % (
             self._fan_flag_name(before) or '?', before or 0, flag_name, value,
             ('0x%02X 一致' % after) if ok else ('%s 不一致' % after))
@@ -545,6 +587,10 @@ class EcChannel:
                        'error': self.dev.error, 'allow_write': self.allow_write,
                        'registers': len(self.registers),
                        'fan_modes': sorted(self.fan_modes()),
+                       'fan_lock_left': self.fan_lock_left(),
+                       'fan_lock_by': self.hold_by if self.fan_lock_left() else None,
+                       'fan_user_owned': self.fan_user_owned(),
+                       'fan_hold_last': self.hold_last,
                        'changes': self.recent_changes()})
         return {'name': self.name, 'label': self.label, 'alive': self.alive,
                 'caps': dict(self.caps), 'detail': detail}

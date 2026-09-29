@@ -13,7 +13,7 @@ CONFIG_NAME = 'config.json'
 
 DEFAULTS = {
     # 档位调校版本：改 tiers 默认值时把它 +1，老配置会自动换用新档位（见 _migrate）
-    'tier_tuning': 3,
+    'tier_tuning': 4,
     'server': {
         'bind': '127.0.0.1',
         'port': 8747,
@@ -39,6 +39,12 @@ DEFAULTS = {
         'dwell_s': 300.0,
         'dwell_idle_s': 30.0, 'dwell_hold_s': 45.0,
         'resume_buffer_s': 15.0,
+        # 换挡防抖（秒）：本机实测过不防抖时性能/流畅互相切了 14 分钟，比不切还烦。
+        #   min_down_dwell_s：降档之间至少隔这么久（降档要慢，避免刚闲下来就掉）；
+        #   min_up_dwell_s ：刚从哪一档掉下来，这么久内不许原样爬回去。
+        # 注意升档只对「爬回来路」设限，升到更高档永远放行 —— 游戏刚开、
+        # 任务刚点火这些还是立刻给满，掐死的只有来回跳。
+        'min_up_dwell_s': 20.0, 'min_down_dwell_s': 45.0, 'big_jump_levels': 2,
         'allow_perf_on_battery': True,
         'sleep_guard_idle_s': 60.0,
     },
@@ -50,8 +56,13 @@ DEFAULTS = {
     #     85% ≈ 锁 1.96GHz（标称 2304 MHz）。
     # 所以省电档用 max 上限做主闸，其余档位靠最低频率/EPP 改善响应速度。
     # boost 取值：0=禁用 1=启用 2=激进 3=高效启用 4=高效激进 5=保证频率激进
+    #
+    # 2026-09-29 第二次调校（tier_tuning 4）：四档统一写在「平衡」这一个方案里。
+    # 之前性能档单独用「高性能」方案，实测四档吞吐差异仍在噪声范围内，
+    # 但方案 GUID 每切一次就顺带改掉硬盘睡眠/PCIe 省电这些无关设置，
+    # 而且 Windows 会弹方案变更提示——只留下噪声，没有收益。
     'tiers': {
-        'perf': {'scheme': 'high_perf', 'min_ac': 100, 'max_ac': 100,
+        'perf': {'scheme': 'balanced', 'min_ac': 100, 'max_ac': 100,
                  'min_dc': 60, 'max_dc': 100, 'cool': 0, 'boost': 2, 'epp': 0},
         'mid':  {'scheme': 'balanced', 'min_ac': 50, 'max_ac': 100,
                  'min_dc': 30, 'max_dc': 100, 'cool': 0, 'boost': 2, 'epp': 25},
@@ -76,7 +87,11 @@ DEFAULTS = {
                # 取值必须来自 OEM 枚举 MyFanCTLByteFlag，别的名字一律不下发。
                'fan_follow_tier': True, 'fan_cooldown_s': 10.0,
                'fan_map': {'eco': 'Normal_Mode', 'bal': 'Normal_Mode',
-                           'mid': 'Normal_Mode', 'perf': 'Turbo_Mode'}},
+                           'mid': 'Normal_Mode', 'perf': 'Turbo_Mode'},
+               # 实体「造物者模式」按键优先：观察到按键改了风扇字节后，
+               # 这段时间内面板一律不自动跟随，免得把用户的自定义曲线覆盖掉。
+               # 上一版没有这条，实测到按键改完 0 秒就被面板写回去。
+               'respect_external_s': 900.0},
         # OEM GCUBridge MQTT（兜底通道）：服务活着才启用
         # 身份（clientId/username/password）不入库，放 data/mqtt_identity.json（已 gitignore）
         'mqtt': {'enabled': True, 'host': '127.0.0.1', 'port': 13688,

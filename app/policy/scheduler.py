@@ -34,6 +34,8 @@ class Scheduler:
         self.dwell_until = 0.0
         self.resume_until = 0.0
         self.last_change_ts = 0.0
+        self._back_to = None
+        self.pending = None
         self.history = []
 
     # ---------- 基础工具 ----------
@@ -53,6 +55,33 @@ class Scheduler:
     def _ok(self, key, cond, now, need_s):
         return self._held(key, cond, now) >= need_s
 
+    def _try(self, tier, reason, now):
+        """自动漂移的唯一出口：带防抖。
+
+        本机 2026-09-29 实测：不防抖时性能档和流畅档每 10~30 秒互相切一次，
+        用户看到的是「电源方案一直在变」，比永远不给性能档还烦。
+
+        两条规则，都只针对「来回跳」：
+          * 降档后隔太久才允许再降（min_down_dwell_s）——降档本身要慢；
+          * 刚从哪一档掉下来，短时间内不许原样爬回去（min_up_dwell_s）——
+            这一条专门掐死 perf↔mid 的循环；升到**更高**的目标档不拦，
+            所以游戏刚开、任务刚点火这些情况仍然是立刻给满。
+        """
+        target, cur = _idx(tier), _idx(self.tier)
+        gap = now - self.last_change_ts
+        big = abs(target - cur) >= int(self.p.get('big_jump_levels', 2))
+        if target > cur:
+            need = float(self.p.get('min_up_dwell_s', 20.0))
+            if self._back_to == tier and gap < need:
+                self.pending = {'tier': tier, 'reason': reason, 'up': True,
+                                'in_s': round(need - gap, 1)}
+                return False
+        elif not big and gap < float(self.p.get('min_down_dwell_s', 45.0)):
+            self.pending = {'tier': tier, 'reason': reason, 'up': False,
+                            'in_s': round(float(self.p.get('min_down_dwell_s', 45.0)) - gap, 1)}
+            return False
+        return self.set_tier(tier, reason, now)
+
     def set_tier(self, tier, reason, now, forced=False):
         if tier == self.tier and not forced:
             return False
@@ -60,6 +89,8 @@ class Scheduler:
         self.tier = tier
         self.reason = reason
         if changed:
+            # 只有「降档」要记住来路：防抖掐的是刚掉下来又原样爬回去，不是升档本身
+            self._back_to = self.tier if _idx(tier) < _idx(self.tier) else None
             self.last_change_ts = now
             self._clear_holds(keep=('perf_enter', 'mid_enter'))
             self.history.append((now, tier, reason))
@@ -109,6 +140,7 @@ class Scheduler:
         idle = snap.get('idle_s') or 0.0
         on_ac = snap.get('on_ac', True)
         fg = (snap.get('foreground') or '').lower()
+        self.pending = None
 
         self._update_throttle(temp, now)
         light = fg in set(a.lower() for a in self.apps.get('light', []))
@@ -135,14 +167,14 @@ class Scheduler:
         # ---- 升档 ----
         if _idx(self.tier) < _idx('perf') and cap_perf_allowed:
             if boost_app:
-                self.set_tier('perf', '性能应用前台（%s）' % fg, now)
+                self._try('perf', '性能应用前台（%s）' % fg, now)
                 return self._out(now, snap)
             if hot_rising:
-                self.set_tier('perf', '温度趋势预判（%s°C 快速上冲）' % temp, now)
+                self._try('perf', '温度趋势预判（%s°C 快速上冲）' % temp, now)
                 return self._out(now, snap)
             enter_perf = (cpu >= float(self.p['cpu_perf']) or gpu >= float(self.p['gpu_perf']))
             if self._ok('perf_enter', enter_perf, now, float(self.p['perf_hold_s'])):
-                self.set_tier('perf', '持续高负载 CPU%s%%/GPU%s%%' % (round(cpu), round(gpu)), now)
+                self._try('perf', '持续高负载 CPU%s%%/GPU%s%%' % (round(cpu), round(gpu)), now)
                 return self._out(now, snap)
         else:
             self._hold.pop('perf_enter', None)
@@ -150,7 +182,7 @@ class Scheduler:
         if _idx(self.tier) < _idx('mid'):
             enter_mid = (cpu >= float(self.p['cpu_mid']) or gpu >= float(self.p['gpu_mid']))
             if self._ok('mid_enter', enter_mid, now, float(self.p['mid_hold_s'])):
-                self.set_tier('mid', '中等负载 CPU%s%%/GPU%s%%' % (round(cpu), round(gpu)), now)
+                self._try('mid', '中等负载 CPU%s%%/GPU%s%%' % (round(cpu), round(gpu)), now)
                 return self._out(now, snap)
         else:
             self._hold.pop('mid_enter', None)
@@ -165,17 +197,17 @@ class Scheduler:
                 need_hold = float(self.p.get('dwell_hold_s', 45.0))
                 cond = low and idle >= float(self.p.get('dwell_idle_s', 30.0))
             if self._ok('perf_exit', cond, now, need_hold):
-                self.set_tier('mid', '性能档退出（%s）' % ('驻留期宽松退出' if in_dwell else '低负载'), now)
+                self._try('mid', '性能档退出（%s）' % ('驻留期宽松退出' if in_dwell else '低负载'),
+                          now)
                 return self._out(now, snap)
             if not in_dwell and self._ok('perf_soft', soft, now, float(self.p['perf_soft_hold_s'])):
-                self.set_tier('mid', '性能档软退出（长时间中等负载，不给满）', now)
+                self._try('mid', '性能档软退出（长时间中等负载，不给满）', now)
                 return self._out(now, snap)
 
         elif self.tier == 'mid':
-            floor = 'mid' if in_resume else None
             low = cpu < float(self.p['cpu_bal_exit']) and gpu < float(self.p['gpu_bal_exit'])
             if self._ok('mid_exit', low and not in_resume, now, float(self.p['bal_exit_hold_s'])):
-                self.set_tier('bal', '负载回落', now)
+                self._try('bal', '负载回落', now)
                 return self._out(now, snap)
 
         elif self.tier == 'bal':
@@ -183,18 +215,18 @@ class Scheduler:
             low = cpu < float(self.p['cpu_eco']) and gpu < float(self.p.get('gpu_eco', 5))
             if (self._ok('eco_enter', low, now, float(self.p['eco_hold_s']) * factor)
                     and idle >= float(self.p['eco_idle_s']) * factor):
-                self.set_tier('eco', '空闲且低负载（%ss 空闲）' % round(idle), now)
+                self._try('eco', '空闲且低负载（%ss 空闲）' % round(idle), now)
                 return self._out(now, snap)
 
         else:  # eco
             if cpu >= float(self.p['cpu_eco']) or gpu >= float(self.p.get('gpu_eco', 5)):
                 if self._ok('eco_exit', True, now, 5.0):
-                    self.set_tier('bal', '有负载，离开省电档', now)
+                    self._try('bal', '有负载，离开省电档', now)
                     return self._out(now, snap)
             else:
                 self._hold.pop('eco_exit', None)
             if in_resume:
-                self.set_tier('mid', '亮屏缓冲：先给流畅档', now)
+                self._try('mid', '亮屏缓冲：先给流畅档', now)
                 return self._out(now, snap)
 
         return self._out(now, snap)
@@ -206,4 +238,4 @@ class Scheduler:
         return {'tier': self.tier, 'effective': tier, 'reason': self.reason,
                 'throttle': self.throttle, 'dwell_left': max(0.0, self.dwell_until - now),
                 'resume_left': max(0.0, self.resume_until - now),
-                'intent_lock': False}
+                'pending': self.pending, 'intent_lock': False}

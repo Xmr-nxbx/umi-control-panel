@@ -11,6 +11,9 @@ from app.config import DEFAULTS
 from app.policy.scheduler import Scheduler
 
 P = dict(DEFAULTS['scheduler'])
+# 判定逻辑和「换挡节流」是两件事：下面这一大批用例只验判定，
+# 节流单独用真实参数验（见最后两条）。
+P.update({'min_up_dwell_s': 0.0, 'min_down_dwell_s': 0.0})
 APPS = dict(DEFAULTS['apps'])
 
 
@@ -208,6 +211,24 @@ def _():
     seq = drive(s, pts)
     changes = [seq[i] for i in range(1, len(seq)) if seq[i] != seq[i - 1]]
     assert len(changes) <= 2, (seq, changes)
+
+
+@case('降档防抖：刚进性能档不会 8 秒就掉回流畅')
+def _():
+    s = Scheduler(dict(DEFAULTS['scheduler']), APPS)
+    seq = drive(s, [(snap(cpu=80), 'auto')] * 5 + [(snap(cpu=3), 'auto')] * 30)
+    assert seq[4] == 'perf', seq                 # 第一次升档不受限
+    assert set(seq[5:]) == {'perf'}, seq         # 低负载 8 秒本该退，被 60 秒降档节流压住
+    assert s.pending and s.pending['tier'] == 'mid', s.pending
+
+
+@case('跨两级的大跳不受节流限制')
+def _():
+    s = Scheduler(dict(DEFAULTS['scheduler']), APPS)
+    drive(s, [(snap(cpu=3, idle=200), 'auto')] * 40)
+    assert s.tier == 'eco', s.tier
+    seq = drive(s, [(snap(cpu=95), 'auto')] * 6, start=3000.0)
+    assert seq[-1] == 'perf', seq                # eco→perf 跨三级，立刻放行
 
 
 def main():

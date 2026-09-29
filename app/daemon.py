@@ -14,6 +14,7 @@ from app.sense.system import SystemSense
 from app.sense.thermal import Thermal
 
 APPLY_COOLDOWN_S = 3.0
+REASSERT_S = 120.0
 BENCH_SETTLE_S = 5.0
 BENCH_COOLDOWN_S = 8.0
 COMPARE_TIERS = ('eco', 'bal', 'mid', 'perf')
@@ -38,6 +39,8 @@ class Daemon:
         self._external_hits = 0
         self.wanted_hw_mode = None
         self._last_fan_ts = 0.0
+        self._fan_lock_log_ts = 0.0
+        self._logged_tier = None
         self.started_at = time.time()
         self.snap = {'cpu_pct': None, 'gpu_pct': None, 'cpu_temp': None}
         self.capabilities = self.power.probe()
@@ -89,7 +92,8 @@ class Daemon:
         snap['cpu_temp'] = temp
         snap['thermal_zones'] = zones
         snap['cpu_mhz'] = self.clock.read()
-        g = self.gpu.read(min_interval=1.0) or {}
+        # nvidia-smi 是子进程，每秒起一个本身就是负载来源——测量工具不该给被测机器加负载
+        g = self.gpu.read(min_interval=5.0) or {}
         snap['gpu_pct'] = g.get('util_pct')
         snap['gpu'] = g
         self.snap = snap
@@ -105,12 +109,31 @@ class Daemon:
         tier = decision['effective']
 
         self._watchdog(now)
-        if self._last_applied_tier != tier or self._cooldown_passed(now):
+        tier = decision['effective']
+        if self._last_applied_tier != tier or self._needs_reassert(now):
             self._apply(tier, now)
+        self._log_tier_change(decision, tier, snap, now)
 
         self._hardware_follow(tier, snap, now)
         self._fan_follow(tier, now)
         self._state_store(snap, decision, tier, now)
+
+    def _log_tier_change(self, decision, tier, snap, now):
+        """档位一旦真的变了就记一行带传感器的原因。
+
+        之前只有 [执行] 行、看不到「为什么切」，用户报「一直在切档」时无从判断。
+        """
+        if tier == getattr(self, '_logged_tier', None):
+            return
+        prev = getattr(self, '_logged_tier', None)
+        self._logged_tier = tier
+        if prev is None:
+            return
+        self.log.info('[档位] %s → %s：%s（CPU=%s%% GPU=%s%% 温度=%s°C 空闲=%ss%s）' % (
+            TIER_LABELS.get(prev, prev), TIER_LABELS.get(tier, tier), decision['reason'],
+            round(snap.get('cpu_pct') or 0), round(snap.get('gpu_pct') or 0),
+            snap.get('cpu_temp'), round(snap.get('idle_s') or 0),
+            '，温度保护中' if decision['throttle'] else ''))
 
     def _bench_tick(self, snap, now):
         """跑分期间冻结调度与看门狗，否则测量结果就是调度器自己的噪声。"""
@@ -119,9 +142,14 @@ class Daemon:
                                  'throttle': self.sched.throttle,
                                  'dwell_left': 0.0, 'resume_left': 0.0}, tier, now)
 
-    def _cooldown_passed(self, now):
+    def _needs_reassert(self, now):
+        """每隔一阵复核一次电源设置：别的软件改了就补写。
+
+        power.apply 内部会跳过已经一致的项，值没变时既不写注册表也不产生日志，
+        所以这不是「反复折腾电源」，只是自愈。
+        """
         return (self._last_applied_tier is not None
-                and now - self._last_apply_ts > 60.0)
+                and now - self._last_apply_ts > REASSERT_S)
 
     def _apply(self, tier, now):
         profile = dict(self.cfg['tiers'].get(tier) or self.cfg['tiers']['bal'])
@@ -187,14 +215,30 @@ class Daemon:
         want = mapping.get(tier)
         if not want or want not in self.hw.fan_modes():
             return
+        snap = self.hw.snapshot()
+        if snap.get('fan_ctl_byte') is None:
+            return                    # 还没读到当前值就别动硬件，盲写会覆盖用户的选择
+        # 用户自己按出来的自定义曲线（0x80 位）永远不自动覆盖；
+        # 刚按过键的优先窗口内也只读不写。上一版没有这两条，实测到按键/重启后
+        # 面板会在 0 秒内把用户的自定义曲线写回自动档。
+        left = self.hw.ec.fan_lock_left(now)
+        owned = self.hw.ec.fan_user_owned() or bool(
+            (snap.get('fan_mode_flag') or '').startswith('User_Fan'))
+        if left or owned:
+            if now - self._fan_lock_log_ts >= 60:
+                self._fan_lock_log_ts = now
+                who = (self.hw.ec.status().get('detail') or {}).get('fan_lock_by')
+                self.log.info('[风扇] %s，面板不自动跟随%s' % (
+                    '%s优先' % who if who else '用户自定义曲线优先',
+                    '（窗口还剩 %.0f 秒）' % left if left else ''))
+            return
         cooldown = float(self.cfg.get('hardware', 'ec', 'fan_cooldown_s', default=20.0))
         if now - self._last_fan_ts < cooldown:
             return
-        snap = self.hw.snapshot()
         if snap.get('fan_mode_flag') == want:
             return
         self._last_fan_ts = now
-        ok, detail = self.hw.set_fan_mode(want)
+        ok, detail = self.hw.set_fan_mode(want, who=None)
         if ok:
             self.log.info('[风扇] 跟随%s档 → %s（%s）' % (
                 TIER_LABELS.get(tier, tier), want, detail))
@@ -210,6 +254,7 @@ class Daemon:
             'tier': tier,
             'tier_label': TIER_LABELS.get(tier),
             'reason': decision['reason'],
+            'pending': decision.get('pending'),
             'throttle': decision['throttle'],
             'dwell_left': round(decision['dwell_left'], 1),
             'resume_left': round(decision['resume_left'], 1),
@@ -323,28 +368,28 @@ class Daemon:
             for i, tier in enumerate(self.bench['tiers']):
                 label = TIER_LABELS.get(tier, tier)
                 profile = dict(self.cfg['tiers'].get(tier) or {})
+                # 进度只按「档位序号」算：一整套里每档占 100/n，最后再留 1% 给还原。
+                # 之前是几段拼出来的，跑完最多到 98%，看着就像卡住了。
+                pct = lambda frac: min(99, int((i + frac) * 100.0 / n))
                 self.bench.update({'tier': tier, 'label': label})
-                self._bench_progress('应用中…', int(i * 100.0 / n))
+                self._bench_progress('应用中…', pct(0.02))
                 self.sched.set_tier(tier, '跑分锁定（%s）' % label, time.time(), forced=True)
                 self._apply(tier, time.time())
-                self._bench_progress('稳定中…', int((i + 0.2) * 100.0 / n))
+                self._bench_progress('稳定中…', pct(0.10))
                 time.sleep(BENCH_SETTLE_S)
-                base_pct = int((i + 0.25) * 100.0 / n)
-                span = int(70.0 / n)
                 record = bench.run(
                     label=label, tier=tier,
                     extra={'run_id': run_id,
                            'profile': {k: profile.get(k) for k in
                                        ('scheme', 'min_ac', 'max_ac', 'boost', 'cool', 'epp')},
                            'throttled': self.sched.throttle},
-                    progress=lambda msg, pct: self._bench_progress(
-                        msg, base_pct + int(pct * span / 100.0)))
+                    progress=lambda msg, p: self._bench_progress(
+                        msg, pct(0.15 + 0.80 * p / 100.0)))
                 save_record(record)
                 results.append(record)
                 self.bench['results'] = list(results)
                 if i + 1 < n:
-                    self._bench_progress('测完，降温 %ds…' % BENCH_COOLDOWN_S,
-                                         int((i + 1) * 100.0 / n))
+                    self._bench_progress('测完，降温 %ds…' % BENCH_COOLDOWN_S, pct(0.98))
                     time.sleep(BENCH_COOLDOWN_S)
             if self.bench['mode'] == 'compare':
                 anchor = next((r for r in results if r.get('tier') == 'bal'), results[0])
