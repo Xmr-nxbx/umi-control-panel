@@ -57,6 +57,45 @@ def hw_mode_of_fan_flag(flag):
     return HW_MODE_BY_FAN_FLAG.get(flag)
 
 
+# 电池充电那三档。2026-09-30 01:16 观察3（logs/观察3 + tools/out/mqtt-watch.txt）两条通道
+# 同时对上号了：机主按「平衡 → 健康 → 长效」点过去，GCUBridge 的 BatteryProtection/Control
+# 依次收到 BALANCEDMODE / HEALTHYMODE / PERFORMANCEDMODE，EC 的 ADDR_AP_OEM_BYTE4 依次
+# 0x09 → 0x19 → 0x29 → 0x09。低半字节恒为 9，高半字节就是档位。
+# 界面词一律用 Creator Center 上的原话（平衡/健康/长效）——OEM 内部把「长效」叫
+# PERFORMANCEDMODE，那个英文名只进日志，不上界面。
+# 三档具体是多少百分比还没实测（CHARGE_LIMIT_UP/DOWN 全程读 0，阈值不在这张表里执行），
+# 所以只认档位名，不编百分比。
+BATTERY_MODE_BY_NIBBLE = {0: 'long', 1: 'balanced', 2: 'healthy'}
+BATTERY_MODE_LABELS = {'balanced': '平衡', 'healthy': '健康', 'long': '长效'}
+BATTERY_MODE_ACTION = {'balanced': 'BALANCEDMODE', 'healthy': 'HEALTHYMODE',
+                       'long': 'PERFORMANCEDMODE'}
+BATTERY_MODE_LOW_NIBBLE = 0x09
+
+
+def battery_mode_of_oem_byte4(value):
+    """ADDR_AP_OEM_BYTE4 → 电池档位 id；认不出来返回 None。
+
+    只见过 0x09/0x19/0x29 三个值，所以低半字节不是 9 就当作「没见过的状态」，
+    返回 None 让面板写「未知」——比拿半个证据去猜要安全。
+    """
+    if value is None or value & 0x0F != BATTERY_MODE_LOW_NIBBLE:
+        return None
+    return BATTERY_MODE_BY_NIBBLE.get(value >> 4)
+
+
+def win_locked_of_status_byte(value):
+    """ADDR_STAUTS_BYTE → Win 键是否锁定。
+
+    2026-09-30 01:16 观察3：机主连点三次 Win 锁，这个字节 0→1→0→1，
+    与同一时刻 MQTT 的 WINKEY_LOCK / WINKEY_UNLOCK / WINKEY_LOCK 一一对齐
+    （01:16:02→03、01:16:12→13、01:16:19→21）。只见过 0 和 1，
+    别的值说明这个字节还兼着别的意思，那就返回 None，不猜。
+    """
+    if value in (0, 1):
+        return bool(value)
+    return None
+
+
 class Channel:
     name = 'base'
     label = '抽象通道'

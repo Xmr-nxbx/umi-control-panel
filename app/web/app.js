@@ -192,6 +192,17 @@ function hwRow(k, v, ok) {  // 文案一律由调用方给：ok 只决定灰不�
     <span class="v${ok ? '' : ' na'}">${esc(v)}</span></div>`;
 }
 
+// 电池充电那三档（平衡/健康/长效）。档位名由后端给（meta.battery_mode_labels），
+// 前端只负责排版；认不出来就把原始字节亮出来，让人能自己去对，不编一个名字。
+function battText(hw) {
+  const raw = hw.battery_mode_raw;
+  const hex = raw != null ? `0x${Number(raw).toString(16).toUpperCase().padStart(2, '0')}` : null;
+  const word = (META.battery_mode_labels || {})[hw.battery_mode];
+  if (word) return hex ? `${word}（EC ${hex}）` : word;
+  if (hex) return `未知（EC ${hex}，不是见过的三个值）`;
+  return '未知';
+}
+
 function renderHardware(s) {
   const caps = s.capabilities || {};
   const hw = s.hardware || {};
@@ -223,6 +234,10 @@ function renderHardware(s) {
     hwRow('充电阈值', hw.charge_limit_up
           ? (hw.charge_limit_up + '% / 回落 ' + (hw.charge_limit_down || '?') + '%')
           : '未设限（寄存器读到 0）', hw.charge_limit_up != null),
+    // 2026-09-30 观察3 两条通道对齐后确认的：这两行不再是「候选」，敢下结论了。
+    hwRow('电池充电档位', battText(hw), hw.battery_mode != null),
+    hwRow('Win 键锁定', hw.win_key_locked == null ? (ecAlive ? '未知' : '不可读')
+          : (hw.win_key_locked ? '已锁定' : '未锁定'), hw.win_key_locked != null),
     hwRow('机型标识', hw.project_id != null ? ('ProjectID ' + hw.project_id
           + (hw.module_id != null ? ' · Module ' + hw.module_id : '')) : '未知',
           hw.project_id != null),
@@ -281,6 +296,80 @@ function renderHardware(s) {
   $('hw-hint').classList.toggle('err', !canWrite && !canFan);
 }
 
+// GCUBridge 报上来的开关状态。这一块**只读**：语义还没逐条验证过，
+// 先让机主看得见「OEM 自己认为现在是什么状态」，再谈写（README 6.7）。
+function onOff(v, onWord, offWord) {
+  return v == null ? '未知' : (v ? onWord : offWord);
+}
+
+function renderOem(s) {
+  const box = $('oem');
+  if (!box) return;
+  const hint = $('oem-hint');
+  const mqCh = (s.channels || []).find((c) => c.name === 'mqtt') || {};
+  const oem = (s.hardware || {}).oem;
+  if (!mqCh.alive || !oem) {
+    box.innerHTML = [hwRow('GCUBridge', '未连接', false),
+      hwRow('OEM 状态', '拿不到（要 GCUService 在跑，且 clientId 没被别人占用）', false)].join('');
+    hint.classList.add('err');
+    hint.textContent = '原因：' + ((mqCh.detail || {}).reason || '未探测')
+      + '。这一卡片只读，连上后会自动填。';
+    return;
+  }
+  hint.classList.remove('err');
+
+  const lim = oem.limits || {};
+  const limText = lim.pl1_min != null
+    ? `PL1 ${lim.pl1_min}~${lim.pl1_max}W · PL4 ≤${lim.pl4_max}W · TGP ${lim.tgp_min}~${lim.tgp_max} · Boost ${lim.boost_min}~${lim.boost_max} · GPU 目标温度 ${lim.gpu_temp_min}~${lim.gpu_temp_max}°C`
+    : '未报';
+  // 键盘背光：Keyboard/Status.powerStatus 才是真开关（实测报 Off 的时候灯确实是灭的），
+  // Setting/Status.SingleColorKBBL 是另一件事（单色背光这个功能支不支持/开没开），
+  // 两个都摆出来，不合并成一个会骗人的值。
+  const kbPower = oem.kb_power_on == null ? '未知' : (oem.kb_power_on ? '开' : '关');
+  const kbText = `${kbPower} · 亮度 ${oem.kb_brightness_ac != null ? oem.kb_brightness_ac : '?'} 档（电池 ${oem.kb_brightness_dc != null ? oem.kb_brightness_dc : '?'} 档）`
+    + (oem.kb_effect != null ? ` · 灯效 ${oem.kb_effect} 速度 ${oem.kb_speed != null ? oem.kb_speed : '?'}` : '')
+    + (oem.kb_controller ? ` · ${oem.kb_controller}` : '');
+  const barText = oem.lightbar_on == null ? '未知'
+    : ((oem.lightbar_on ? '开' : '关')
+       + (oem.lightbar_brightness != null ? ` · 亮度 ${oem.lightbar_brightness}` : ''));
+  // 2026-09-30 实测：开关字段说「直连已开」，DGpu 字段却是 NV_CTRL_PANEL_AUTOSELECT。
+  // 更可能是两层不同的东西（直连开关 vs NVIDIA 控制面板的输出偏好），没验证前两个都报。
+  const muxRaw = oem.dgpu_raw ? ` · NVIDIA 侧 ${oem.dgpu_raw}` : '';
+  const muxText = oem.mux_support === false ? '本机不支持（OEM 报 NotSupport）'
+    : (onOff(oem.mux_on, '已开（独显直连）', '关（混合输出）') + muxRaw);
+
+  box.innerHTML = [
+    hwRow('Win 键锁定', onOff(oem.win_key_locked, '已锁定', '未锁定')
+          + '（与 EC 的 STAUTS_BYTE 已对上号）', oem.win_key_locked != null),
+    hwRow('触摸板', onOff(oem.touchpad_on, '开', '关')
+          + '（触摸板上还有个实体拨动开关；OEM 也有 TOUCHPAD_TOGGLE_ON/OFF，'
+          + '但没验证过会不会被实体开关盖掉，所以面板不写）', oem.touchpad_on != null),
+    hwRow('键盘背光', kbText, oem.kb_power_on != null),
+    hwRow('单色背光功能', onOff(oem.kb_single_color_on, '开', '关'), oem.kb_single_color_on != null),
+    hwRow('顶灯条', barText, oem.lightbar_on != null),
+    hwRow('USB 关机充电', onOff(oem.usb_charger_on, '开', '关'), oem.usb_charger_on != null),
+    hwRow('OSD 提示', oem.osd_hidden == null ? '未知' : (oem.osd_hidden ? '隐藏' : '显示'),
+          oem.osd_hidden != null),
+    hwRow('Fn 键 / NumPad', `${onOff(oem.fn_locked, '锁', '未锁')} / ${onOff(oem.numpad_locked, '锁', '未锁')}`,
+          oem.fn_locked != null),
+    hwRow('Fn+F1 快捷键', onOff(oem.fn_hotkey_on, '开', '关'), oem.fn_hotkey_on != null),
+    hwRow('独显直连', muxText, oem.mux_on != null),
+    hwRow('显示模式', (oem.display_mode || '未知')
+          + ` · 色彩管理 ${onOff(oem.display_feature_on, '开', '关')}`, !!oem.display_mode),
+    hwRow('OEM 档位读数', (oem.power_mode_raw != null ? `PowerMode ${oem.power_mode_raw}` : 'PowerMode 未知')
+          + (oem.profile_name ? ` · ${oem.profile_name}` : '')
+          + (oem.fan_table ? ` · 风扇表 ${oem.fan_table}` : ''), oem.power_mode_raw != null),
+    hwRow('OEM 允许范围', limText, lim.pl1_min != null),
+    hwRow('AC 恢复', oem.ac_recovery_support
+          ? onOff(oem.ac_recovery_on, '开', '关') : '不支持（OEM 报 NotSupport）', true),
+  ].join('');
+
+  hint.textContent = '数据来自 GCUBridge 的 Setting/Status · HidLightbar/Status · Fan/Status · Keyboard/Status'
+    + '，全是 OEM 自己报的读数，面板在这一块一个字都不写。'
+    + '认不出来的值照实写「未知」，不猜。'
+    + '「OEM 允许范围」是 Fan/Status 里 OEM 自己写的上下限，以后任何写入都拿它当护栏。';
+}
+
 function renderCaps(s) {
   const caps = s.capabilities || {};
   const labels = META.cap_labels || {};
@@ -327,7 +416,7 @@ async function poll() {
     lastState = s;
     META = Object.assign(META, s.meta || {});
     renderTier(s); renderPills(s); renderIntents(); renderProfiles(s); renderMeters(s);
-    renderHardware(s); renderCaps(s);
+    renderHardware(s); renderOem(s); renderCaps(s);
     if ((s.bench || {}).running || benchWasRunning) loadBench();
     benchWasRunning = !!(s.bench || {}).running;
   } catch (e) {

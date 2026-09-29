@@ -31,7 +31,8 @@ import time
 from app.act.channels.base import (CAP_BATTERY_LIMIT, CAP_FAN_CURVE, CAP_FAN_MODE,
                                    CAP_FAN_RPM, CAP_MODE_READ, CAP_MODE_WRITE,
                                    CAP_PL_READ, CAP_PL_WRITE, CAP_TEMP_EC, MODES,
-                                   hw_mode_of_fan_flag)
+                                   battery_mode_of_oem_byte4, hw_mode_of_fan_flag,
+                                   win_locked_of_status_byte)
 from app.paths import data_path
 from app.sense.system import power_status
 
@@ -63,7 +64,7 @@ FAST_GROUPS = (
                'ADDR_CPU_VRM_CURRENT_LIMIT_BYTE', 'ADDR_CPU_VRM_MAXI_CURRENT_LIMIT_BYTE',
                'ADDR_COMPLEX_POWER_STATUS', 'ecPowSource')),
     ('mode', ('ADDR_MyFanCCI_Mode_Index', 'ADDR_SILENTMODE_STATUS_BYTE',
-              'ADDR_TRIGGER_BYTE', 'ADDR_STAUTS_BYTE')),
+              'ADDR_TRIGGER_BYTE', 'ADDR_STAUTS_BYTE', 'ADDR_AP_OEM_BYTE4')),
     ('battery', ('ecBt1RSOC', 'ecBt1Temperature')),
 )
 SLOW_GROUPS = (
@@ -103,18 +104,25 @@ FAN_KEY = 'ADDR_MAFAN_CONTROL_BYTE'
 # MyFanCTLByteFlag 里带这个位的全是「用户自己的曲线」：
 # User_Fan_Mode=0x80、User_Fan_HiMode=0xA0、User_Fan_Level1~5=0x81~0x85
 USER_FAN_BIT = 0x80
-# 还没确认、但已经有实测线索的两个字节（README 6.7）：
-#   ADDR_STAUTS_BYTE   Win 键锁定？2026-09-30 机主点了一次 Win 锁，它 1→0 且没再变回去，
-#                      同一时刻 Setting/Status 里 WinKey=WINKEY_STATUS_LOCK。样本只有一次，
-#                      等 MQTT 那边的 WINKEY_LOCK/UNLOCK 命令对上号才算确认。
-#   ADDR_AP_OEM_BYTE4  电池那三档（平衡/健康/长效）？高半字节 0x0?→0x1?→0x2?→0x0?
-#                      正好跟着机主连点三次电源模式走，低半字节 9 不动。
-#                      open-revo 说这三档是充电阈值（长效 100% / 均衡 80% / 养护 60%），
-#                      但 CHARGE_LIMIT_UP/DOWN 全程是 0，所以阈值不在 EC 这张表里执行。
+# 2026-09-30 01:16 观察3（logs/观察3 + tools/out/mqtt-watch.txt）把这两个字节钉死了，
+# 两条通道的时间戳能一一对齐，不再是「候选」：
+#   ADDR_STAUTS_BYTE   Win 键锁定：0=没锁，1=锁着。机主连点三次，MQTT 那边依次是
+#                      WINKEY_LOCK / WINKEY_UNLOCK / WINKEY_LOCK，EC 这边依次
+#                      0→1、1→0、0→1（01:16:02→03、12→13、19→21）。
+#   ADDR_AP_OEM_BYTE4  电池充电那三档：高半字节就是档位，低半字节恒为 9。
+#                      平衡 BALANCEDMODE→0x19、健康 HEALTHYMODE→0x29、
+#                      长效 PERFORMANCEDMODE→0x09（也是开机默认）。
+#                      解码在 channels.base，界面词用 Creator Center 的原话。
+#   ADDR_TRIGGER_BYTE  写入握手的脉冲位：第三次点 Win 锁时它 0→1→0 闪了一下。
+#                      只见过脉冲、没见过稳定值，所以只监听不解释。
+# 还没弄清的：这三档对应的**充电百分比**。CHARGE_LIMIT_UP/DOWN 全程读 0，说明阈值不在
+# 这张 EC 表里执行（可能在充电 IC 的 SMBus 上）。所以面板只报档位名，不编百分比；
+# open-revo 说的 100/80/60 是别的机型的说法，不能直接搬到本机。
 # 反过来，已经排除的：灯效不在 EC 上。LIGHTBAR_CONTROL_BYTE、RGBKB_LEVEL_R/G/B、
 # SINGLEKBL_ENABLE 在灯明明亮着的时候全是 0，机主点背光/灯条时全表也一个都没动；
 # 走的是 GCUBridge 的 Keyboard/Ctrl（{"function":"SetPower","light":"3","speed":"2"}，
-# 控制器 solution=ITE、type=FourZone）。触摸板是实体开关，不用软件管。
+# 控制器 solution=ITE、type=FourZone）。触摸板上有实体拨动开关，OEM 也另有
+# TOUCHPAD_TOGGLE_ON/OFF 命令——两条路会不会互相盖没验证过，面板只读。
 
 
 def load_map(path=None):
@@ -484,6 +492,11 @@ class EcChannel:
             'silent_mode': mode.get('ADDR_SILENTMODE_STATUS_BYTE'),
             'trigger_byte': mode.get('ADDR_TRIGGER_BYTE'),
             'status_byte': mode.get('ADDR_STAUTS_BYTE'),
+            # 这两个解码的依据都是 2026-09-30 01:16 那次观察：EC 与 GCUBridge 两条通道
+            # 的时间戳一一对齐（见 channels.base 里的注释），认不出来就是 None。
+            'win_key_locked': win_locked_of_status_byte(mode.get('ADDR_STAUTS_BYTE')),
+            'battery_mode_raw': mode.get('ADDR_AP_OEM_BYTE4'),
+            'battery_mode': battery_mode_of_oem_byte4(mode.get('ADDR_AP_OEM_BYTE4')),
             'battery_pct_ec': battery.get('ecBt1RSOC'),
             'battery_temp_c': self._battery_temp(battery.get('ecBt1Temperature')),
             'battery_temp_raw': battery.get('ecBt1Temperature'),

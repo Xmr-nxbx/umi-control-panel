@@ -39,7 +39,9 @@
 | OEM 那套档位（office/balance/turbo） | **本机没有** | 机主确认 Creator Center 界面上不存在办公/均衡/狂暴；GCUBridge 报的 `OperatingMode` 取值也不在 OEM 枚举里，所以面板一律显示「未知」并附原始值，那三个假的档位按钮已撤掉（见 6.6） |
 | 风扇转速 / 占空比 | **可用** | 性能档实测 4123 RPM / 自适应 3663 RPM / 省电档 3019 RPM |
 | 电池电量 / 温度 / 循环 | **可用** | 电量与系统 API 互相印证（100% = 100%）、循环 83 次、电池温度 24.4°C |
-| 充电阈值 | **读到 0，语义未确认** | 早先记过 80%/75%，现在稳定读到 0，无法复现 —— 先当成「未设限」，不做写入 |
+| 电池充电档（平衡 / 健康 / 长效） | **可读，语义已确认** | EC `ADDR_AP_OEM_BYTE4` 高半字节 1/2/0，与 GCUBridge 的 `BALANCEDMODE`/`HEALTHYMODE`/`PERFORMANCEDMODE` 逐条对齐（见 6.8）。**写入未验证**，具体充电百分比也还没实测 |
+| Win 键锁定 | **可读，语义已确认** | EC `ADDR_STAUTS_BYTE` 0/1，与 `WINKEY_LOCK`/`WINKEY_UNLOCK` 三次点击三次跳变对齐（见 6.8）；两条通道现在互相印证同一个状态。写入未验证 |
+| 充电阈值寄存器 | **读到 0，不在这条路上** | `CHARGE_LIMIT_UP/DOWN` 三次观察全是 0，切电池档时也不动 —— 阈值不由这张 EC 表执行，面板照实显示「未设限」，不做写入 |
 | 各模式出厂 PL 默认值、机型 ID | **可用（只读）** | 办公 35W / 均衡 60W / 省电档 75W；ProjectID=15 |
 | 实时 PL1/PL2 写入 | **未生效，已找到原因** | 写进去会自清、性能无变化（见 6.2）；离线核对 OEM 代码后确认那一组寄存器是 MyFan3 一代机型的落点，本机是 CML 平台。改功耗墙走风扇字节，不裸写 PL |
 | 风扇曲线 | **未验证** | 只有 EC 通道能提供；不做任何驱动穷举（见第 6 节） |
@@ -235,6 +237,8 @@ tests/test_supervise_guard.py 8 个守护卡死判定场景（含「健康时不
 tests/test_tray_session.py  6 个会话事件分发场景（不锁屏幕也能验证解锁那条路）
 tests/test_config_profile.py 6 个调度性格读写场景（盯「补丁漏进 config.json」那个 bug）
 tests/test_singleton_port.py 6 个单实例与端口场景（盯 2026-09-30 那个双实例并跑）
+tests/test_oem_status.py     7 个 GCUBridge 状态解析场景（盯 UNLOCK 被 endswith 判成 LOCK 那个坑）
+tests/test_battery_winlock.py 7 个解码场景（把 6.8 那张表的字节值逐条钉住）
 scripts/                    setup_runtime.ps1、make_bats.py（bat 生成器）、17 个入口 bat（GBK+CRLF）
 tools/                      全部离线只读的逆向与验证工具，产物落 tools/out（已 gitignore）
   gen_ec_map.py             从本机 Creator Center 生成 data/ec_map.local.json（不入仓库）
@@ -483,10 +487,10 @@ GCUBridge 服务恢复后（`scripts\启用造物者档控制.bat`），`127.0.0
 | 功能 | 结论 | 证据 | 置信度 |
 | :--- | :--- | :--- | :--- |
 | 键盘背光 / 灯条 | **不在 EC 上**，走 GCUBridge 的 `Keyboard/Ctrl`：`{"function":"SetPower","light":"3","speed":"2"}`；状态从 `Keyboard/Status`、`HidLightbar/Status` 读（`solution=ITE`、`type=FourZone` / `MEZone_Lighbar`，`ACBrightness=3`、`DCBrightness=0`） | 机主点背光和灯条时 EC 全表一个字节都没动；`LIGHTBAR_CONTROL_BYTE`、`RGBKB_LEVEL_R/G/B`、`SINGLEKBL_ENABLE` 在灯亮着的时候全是 0 | **已确认**（阴性结论，两边都指向同一条路） |
-| 触摸板 | 本机是**实体开关**（触摸板上有一处物理拨动），`Setting/Status` 里的 `TouchpadToggle` 只是它的读数，不是软件开关 | 机主 2026-09-30 确认；观察期间没有任何命令与它对应 | 已确认（所以面板不做这个开关） |
-| Win 键锁定 | 候选：`ADDR_STAUTS_BYTE`（1896）1→0，且此后没再变 | 机主只点了一次 Win 锁（00:29:19），EC 就这一个字节翻了；同一时刻 `Setting/Status` 报 `WinKey=WINKEY_STATUS_LOCK` | 待复核（样本一次；OEM 侧有现成的 `WINKEY_LOCK/UNLOCK`，已在白名单里） |
-| 「平衡 / 健康 / 长效」三档 | 候选：`ADDR_AP_OEM_BYTE4`（1958）高半字节 0→1→2→0，低半字节 9 不动 | 机主连点三次电源模式（00:30:03 / 00:30:09 / 00:30:17），只有这个字节跟着走 | 待复核（命令名没抓到） |
-| 这三档是什么 | **不是性能档，是电池充电阈值三档**：open-revo 的说明写得很明白——「长效模式 (100%)、日常均衡 (80%)、工作站长寿养护 (60%)」 | 本机 Creator Center 没有办公/均衡/狂暴；`powercfg -list` 只有系统自带那一个「平衡」方案，所以它也不是 Windows 电源计划 | 待复核（阈值不在 EC 这张表里执行：`CHARGE_LIMIT_UP/DOWN` 全程 0） |
+| 触摸板 | 触摸板上有一处**物理拨动开关**，`Setting/Status` 里的 `TouchpadToggle` 是它的读数；但 OEM 字符串表里确实有 `TOUCHPAD_TOGGLE_ON/OFF`，所以软件那条路也存在 | 机主 2026-09-30 确认实体开关；`cc-strings-all.txt`、`gcu-allfields.txt` 都有这两个动作名 | 已确认（两条路会不会互相盖没验证过，所以面板只读不写） |
+| Win 键锁定 | 候选：`ADDR_STAUTS_BYTE`（1896）1→0，且此后没再变 | 机主只点了一次 Win 锁（00:29:19），EC 就这一个字节翻了；同一时刻 `Setting/Status` 报 `WinKey=WINKEY_STATUS_LOCK` | **已确认**（6.8 用三次连点复核过了） |
+| 「平衡 / 健康 / 长效」三档 | 候选：`ADDR_AP_OEM_BYTE4`（1958）高半字节 0→1→2→0，低半字节 9 不动 | 机主连点三次电源模式（00:30:03 / 00:30:09 / 00:30:17），只有这个字节跟着走 | **已确认**（6.8 抓到了命令名） |
+| 这三档是什么 | **不是性能档，是电池充电三档**：open-revo 的说明写得很明白——「长效模式 (100%)、日常均衡 (80%)、工作站长寿养护 (60%)」 | 本机 Creator Center 没有办公/均衡/狂暴；`powercfg -list` 只有系统自带那一个「平衡」方案，所以它也不是 Windows 电源计划 | 档位已确认，**百分比仍待实测**（`CHARGE_LIMIT_UP/DOWN` 全程 0，阈值不在这张 EC 表里执行；open-revo 那组数是别的机型的说法，不能直接搬） |
 
 另外这 60 秒里 OEM 自己交代了两件有用的事：
 
@@ -505,6 +509,66 @@ GCUBridge 服务恢复后（`scripts\启用造物者档控制.bat`），`127.0.0
 没有 `esif_lf.exe`、没有 DPTF 服务。所以「用 Intel 官方接口调功耗墙」这条路在这台机器上
 不存在，功耗与散热策略完全在 OEM 的 EC + GCUService 手里——这也解释了为什么
 powercfg 那一层压不住频率（2 节）。
+
+### 6.8 第三次观察：Win 锁与电池三档定案（2026-09-30 01:16）
+
+6.7 里那两条「待复核」这次补齐了。修好双实例 bug 之后观察器再没掉线
+（`掉线重连 0 次`），240 秒全程都在，两份报告的时间戳可以逐条对齐：
+`logs/观察3`（EC 全表，2 秒一轮）+ `tools/out/mqtt-watch.txt`（OEM 命令）。
+机主的操作顺序是：**Win 锁连点三次**（起始是未锁），然后**电源模式点「平衡 → 健康 → 长效」**。
+
+| 时刻 | GCUBridge 收到的命令 | EC 同时的变化 |
+| :--- | :--- | :--- |
+| 01:16:02 | `Setting/Control {"Action":"WINKEY_LOCK"}` | 01:16:03 `ADDR_STAUTS_BYTE` 0 → 1 |
+| 01:16:12 | `Setting/Control {"Action":"WINKEY_UNLOCK"}` | 01:16:13 `ADDR_STAUTS_BYTE` 1 → 0 |
+| 01:16:19 | `Setting/Control {"Action":"WINKEY_LOCK"}` | 01:16:21 `ADDR_STAUTS_BYTE` 0 → 1（同时 `ADDR_TRIGGER_BYTE` 0→1→0 闪了一下） |
+| 01:16:30 | `BatteryProtection/Control {"Action":"BALANCEDMODE"}` | 01:16:31 `ADDR_AP_OEM_BYTE4` 0x09 → 0x19 |
+| 01:16:43 | `BatteryProtection/Control {"Action":"HEALTHYMODE"}` | 01:16:43 `ADDR_AP_OEM_BYTE4` 0x19 → 0x29 |
+| 01:17:01 | `BatteryProtection/Control {"Action":"PERFORMANCEDMODE"}` | 01:17:02 `ADDR_AP_OEM_BYTE4` 0x29 → 0x09 |
+
+定案的四条：
+
+1. **`ADDR_STAUTS_BYTE`（1896）就是 Win 键锁定状态**，0=没锁、1=锁着。三次点击三次跳变，
+   方向逐条对得上，不再是单样本。只见过 0/1，所以解码函数遇到别的值返回 `None`（面板写「未知」）。
+2. **`ADDR_AP_OEM_BYTE4`（1958）高半字节就是电池充电档位**，低半字节恒为 9：
+   `0x09`=长效（`PERFORMANCEDMODE`，也是开机默认）、`0x19`=平衡（`BALANCEDMODE`）、
+   `0x29`=健康（`HEALTHYMODE`）。注意 OEM 内部把界面上的「长效」叫 `PERFORMANCEDMODE`，
+   那个英文名只进日志，界面一律用 Creator Center 的原话。
+3. **`ADDR_TRIGGER_BYTE` 是写入握手的脉冲位**：点 Win 锁时它 0→1→0 闪一下。
+   只见过脉冲、没见过稳定值，所以只监听、不解释。
+4. **这三档仍然没给出充电百分比**：`CHARGE_LIMIT_UP/DOWN` 全程读 0，
+   切档时 `PL1_SETTING_VALUE`(75)、`MAFAN_CONTROL_BYTE`(0x10) 一个都没动——
+   也就是说电池档和性能档是**正交**的两件事，切电池档不会影响功耗墙。
+
+代码落点：解码函数在 `app/act/channels/base.py`（`battery_mode_of_oem_byte4` /
+`win_locked_of_status_byte`），界面词表 `BATTERY_MODE_LABELS` 经 `meta.battery_mode_labels`
+下发，前端不自己写死；三个动作名进了 `gcu_actions.json` 白名单（cap `battery.limit`，
+能力仍是 `unknown`，面板不显示写按钮，等做过可逆验证再点亮）。
+回归测试 `tests/test_battery_winlock.py` 直接把上表那串字节值钉住了。
+
+同时这次抓全了一条 `Setting/Status`，把面板「OEM 开关状态」那一卡片填实了：
+`WinKey=WINKEY_STATUS_UNLOCK`、`TouchpadToggle=TOUCHPAD_TOGGLE_ON`、`LightBar=LIGHTBAR_STATUS_ON`、
+`SingleColorKBBL=SINGLE_COLOR_KBBL_STATUS_ON`、`UsbCharger=USB_CHARGER_STATUS_OFF`、
+`OSD=OSD_HIDDEN_OFF`、`FnKey=FNKEY_UNLOCK`、`NumPad=NUMPAD_UNLOCK`、
+`FnWith1HotkeySwitch_Status=FN_WITH1_HOTKEY_TOGGLE_ON`、`DisplayFeatureStatus=DISPLAY_FEATURE_STATUS_ON`、
+`DisplayMode=DISPLAY_STANDARD_MODE`、`AcRecoverySwitch_Support=NotSupport`。
+两个字段要留个心眼，面板照实并列显示、不合并：
+
+- `Keyboard/Status.powerStatus="Off"` 而 `Setting/Status.SingleColorKBBL=..._ON`——
+  背光的真开关是前者（灯确实是灭的），后者说的是「单色背光」这个功能，两件事。
+- `DiscreteGpuDirectConnectionSwitch_Status=..._ON` 而 `DGpu=NV_CTRL_PANEL_AUTOSELECT`——
+  6.7 记的「互相矛盾」这次改了说法：更像是**两层不同的东西**（直连开关 vs NVIDIA 控制面板的
+  输出偏好）。旁证来自机主给的 Hackintosh 工程（见下），dGPU 的电源是挂在 ACPI 的
+  `\_SB.PCI0.PEG0.PEGP._OFF/_ON` 上的，跟这个字段不是一回事。没验证前两个值都报出来。
+
+顺带核了机主给的另一个资料：`UmiPro3-Hackintosh`（OpenCore 0.8.1 工程）。
+它确认了本机就是**同方 Tongfang GM5MG0Y**（i7-10875H + UHD630 + ALC274 + AX201 + RTL8125），
+并且致谢里指向 `kirainmoe/tongfang-utility`、`tongfang-macos`——和之前那条 `tongfang-mifs-wmi`
+线索是同一个生态。工程本身对 EC 语义**没有直接帮助**：19 个 SSDT 全是通用热补丁
+（DDGPU、USTP、PNLF、PS2Map、PTSWAK 之类），没有任何 EC 操作区/字段定义，
+`config.plist` 里也只有三条睡眠相关的改名补丁。唯一的收获是上面那条 dGPU 走 ACPI 的旁证，
+以及 `SSDT-RMCF-PS2Map` 只屏蔽了 PrtScn/Pause——说明**实体「造物者模式」键不是 PS/2 键**，
+和它直连 EC 的实测结果一致。
 
 ## 7. 运行方式（目标是"不用盯着"）
 
@@ -547,37 +611,42 @@ powercfg 那一层压不住频率（2 节）。
 - [x] **灯效不在 EC 上**：机主点背光/灯条时全表纹丝不动，`LIGHTBAR_CONTROL_BYTE`、
       `RGBKB_LEVEL_R/G/B`、`SINGLEKBL_ENABLE` 在灯亮着时全是 0；真实通路是
       `Keyboard/Ctrl {"function":"SetPower","light":"3","speed":"2"}`（ITE / FourZone），见 6.7
-- [x] 触摸板是**实体拨动开关**，`TouchpadToggle` 只是读数——面板不做这个软件开关
+- [x] 触摸板上有**实体拨动开关**，`TouchpadToggle` 是它的读数；OEM 另有
+      `TOUCHPAD_TOGGLE_ON/OFF`，但两条路会不会互相盖没验证过——面板只读不写
 - [x] 官方主板驱动包（`01-Chipset`）查过了：Intel Chipset Device Software，纯 INF/CAT，
       不含 EC 相关任何东西；顺带确认本机**没有 Intel DPTF/ESIF**，功耗墙只能走 OEM 那条路
 - [x] 双实例并跑的 bug：互斥锁因 `ctypes.windll` 拿不到 last error 而失效 +
       `SO_REUSEADDR` 在 Windows 上允许二次绑端口，两个实例共用 8747 还互踢 MQTT 身份。
       两处都已修，`tests/test_singleton_port.py` 6 条盯着（见 7 节）
-- [ ] **补一次 5 分钟观察**（`scripts\观察OEM通道.bat`，观察器现在掉线会自动重连）：
-      只点 Win 锁关/开、电池三档各切一次，把 `WINKEY_*` 和那三档的 Action 名抓下来，
-      好确认 `ADDR_STAUTS_BYTE`、`ADDR_AP_OEM_BYTE4` 这两个候选（见 6.7）
+- [x] **第三次观察跑完（240 秒没掉线）**：`ADDR_STAUTS_BYTE` = Win 键锁定、
+      `ADDR_AP_OEM_BYTE4` 高半字节 = 电池充电档，两条都与 GCUBridge 的命令逐条对齐，
+      已从「候选」升级为「已确认」（见 6.8，`tests/test_battery_winlock.py` 钉住）
+- [x] 机主给的 `UmiPro3-Hackintosh`（OpenCore 工程）核过了：确认本机是同方 GM5MG0Y，
+      但 19 个 SSDT 全是通用热补丁、没有 EC 字段定义，对本项目只有 dGPU 走 ACPI 这一条旁证（见 6.8）
+- [ ] **电池三档对应的充电百分比还没实测**：`CHARGE_LIMIT_UP/DOWN` 全程 0，
+      切档时 PL1 与风扇字节都不动（说明与性能档正交）。open-revo 的 100/80/60 是别的机型的说法，
+      不能直接搬。要定这个数只能实测：切到某一档、把电充到停、看停在百分之几
 - [ ] **MQTT 写通道的可逆验证**：`OPERATING_OFFICE_MODE / OPERATING_TURBO_MODE` 这些动作名
       来自 OEM 自己的动作表，但本机还没做过「写 → 观察哪个寄存器/跑分变了 → 还原」。
-      验证之前 `mode.write` 保持「待验证」，面板不点亮那组按钮（6.3 第 2 条）
+      验证之前 `mode.write` 保持「待验证」，面板不点亮那组按钮（6.3 第 2 条）。
+      Win 锁是最安全的突破口：命令名（`WINKEY_LOCK/UNLOCK`）和 EC 落点都已确认，
+      状态可逆、无温度风险，适合当「第一次自己下发写命令」的验证对象
 - [ ] 改功耗墙的正路已经看到了：`Fan/Control {"Action":"SET_OPERATING_MODE_DETAIL","PL1","PL2","PL4"}`，
       而且 `Fan/Status` 给出了 OEM 自己的边界（PL1 10~120W、PL4 ≤165W、TGP 80~115、
       目标温度 75~87°C）。要做可逆验证 + 拿这组边界当护栏，验证前不进白名单
+      （注意 `Fan/Status` 不是随时都有：本机现在只在被 GETSTATUS 问到时才报，
+      所以「OEM 允许范围」这一行经常显示「未报」，不是 bug）
 - [ ] `OperatingMode` 的真实取值：`Tray/Status` 报的值不在 OEM 枚举 `{Office:0, Turbo:2}` 里，
       现在一律按「未知」处理并把原始值暴露在通道状态里，等一次点击观察把它对上
-- [ ] 键盘背光 / 灯条 / USB 充电 / OSD / 独显直连：GCUBridge 已经报出**当前状态**
-      （`SingleColorKBBL`、`LightBar`、`UsbCharger`、`OSD`，见 6.6），
-      但「点一下会发哪条命令」只抓到了背光那一条（`Keyboard/Ctrl` + `SetPower`）。
-      拿到其余的命令名之后再决定要不要把这些开关搬进面板；
-      EC 侧那几个灯效寄存器已经排除，不存在「写它试试」的选项
+- [ ] 这些开关的**写入**都还没验证，面板一律只读：USB 关机充电、OSD、Fn/NumPad 锁、
+      Fn+F1 快捷键、色彩管理、显示模式、独显直连。状态读数是齐的（见 6.8 那条完整
+      `Setting/Status`），命令名也在 OEM 字符串表里，缺的还是「下发 → 回读 → 还原」那一次实测
+- [ ] 键盘背光的写入：命令已知（`Keyboard/Ctrl {"function":"SetPower","light","speed"}`），
+      状态也已知（`Keyboard/Status.powerStatus` 才是真开关，`SingleColorKBBL` 是另一件事），
+      同样等一次可逆验证
 - [ ] 风扇曲线读写：`ADDR_MYFAN2_L1~L5_PWM` 与 `User_Fan_Level1~5(0x81~0x85)` 看着是一对，
       而且全表观察抓到按硬件模式时 `MYFAN2_L1/L4_PWM` 会跟着换（3↔7、5↔15），
       但「写单个 PWM 会不会被 EC 覆盖」没实测过，暂不写
-- [ ] 电池保养三档（长效 100% / 平衡 80% / 健康 60%，档位含义取自 open-revo 的说明）：
-      EC 侧候选是 `ADDR_AP_OEM_BYTE4` 高半字节 0/1/2（跟着机主三次点击走，见 6.7），
-      但 `ADDR_BATTERY_CHARGE_LIMIT_UP/DOWN` 两次实测都是 0，说明阈值不在 EC 这张表里执行；
-      OEM 那边的路是 `BatteryProtection/Control` + `HealthProtectionStatus`（观察里抓到过
-      `{"Report":"GET"}` 这条读命令）。**故意不做写入**，命令名确认前不编造。
-      面板只把读到的电量 / 电池温度 / 循环次数如实显示出来（这三项与系统 API 互相印证过）
 - [ ] **同方 WMI 接口（`B60BFB48-…`）在不在本机**：查不到也否不掉——普通权限连微软自己的
       GUID 类都看不见（见 6.5）。需要用管理员权限跑一次 `tools\wmi_guid_probe.ps1`（只读）。
       优先级已经降低：GCUBridge 这条路通了之后，大部分功能都有 OEM 背书，不用赌 WMI

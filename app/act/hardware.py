@@ -12,14 +12,15 @@ from app.act.channels.ec_gpd import EcChannel
 from app.act.channels.mqtt_gcu import MqttChannel
 
 ECHO_SUPPRESS_S = 8.0
-# EC 通道能给出的额外语义值，一并进快照供面板展示
+# 通道能给出的额外语义值，一并进快照供面板展示（EC 的寄存器语义 + GCUBridge 报的开关状态）
 STATE_KEYS = ('mode', 'hw_mode', 'pl1', 'pl2', 'pl4', 'fan_rpm', 'fan2_rpm', 'fan_boost',
               'fan_mode',
               'fan_duty_l', 'fan_duty_r', 'fan_ctl_byte', 'fan_mode_flag', 'kb_backlight',
               'pl1_setting', 'pl2_setting', 'pl4_setting', 'vrm_max_limit',
               'battery_pct_ec', 'battery_temp_c', 'battery_cycles', 'charge_limit_up',
               'charge_limit_down', 'project_id', 'module_id', 'vrm_limit', 'silent_mode',
-              'mode_index', 'ec_power_source')
+              'mode_index', 'ec_power_source', 'win_key_locked', 'battery_mode',
+              'battery_mode_raw', 'oem')
 
 
 class Hardware:

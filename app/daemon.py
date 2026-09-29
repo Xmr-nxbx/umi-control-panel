@@ -2,7 +2,7 @@
 import threading
 import time
 
-from app.act.channels.base import CAP_LABELS, MODE_LABELS
+from app.act.channels.base import BATTERY_MODE_LABELS, CAP_LABELS, MODE_LABELS
 from app.act.hardware import Hardware
 from app.act.power import PowerExecutor, active_scheme
 from app.bench import (Bench, best_of_each_tier, build_coremark, coremark_missing,
@@ -309,6 +309,7 @@ class Daemon:
                       ('running', 'mode', 'tier', 'label', 'step', 'pct', 'error')},
             'meta': {'cap_labels': CAP_LABELS, 'mode_labels': MODE_LABELS,
                      'tier_labels': TIER_LABELS,
+                     'battery_mode_labels': BATTERY_MODE_LABELS,
                      'fan_mode_words': fankey.mode_words(),
                      'sched_profiles': {k: {'label': v['label'], 'desc': v['desc']}
                                         for k, v in SCHED_PROFILES.items()}},

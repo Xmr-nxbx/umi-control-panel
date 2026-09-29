@@ -3,7 +3,10 @@
 本机事实：broker 是 OEM 组件 GCUBridge.exe 监听 127.0.0.1:13688，只接受固定身份；
 它会周期性用 GetProcessesByName 校验「clientId 同名进程是否存在」，不存在就踢线
 （约 26 秒一次），所以这里必须自带自动重连 + 发送队列补发。
-当前该服务被 OpenRevo 的 takeover 停用（Start=4），probe 失败就整通道降级，不报错刷屏。
+2026-09-30 起该服务已恢复运行（`scripts\\启用造物者档控制.bat`），通道连通并用于只读；
+连不上时 probe 失败就整通道降级，不报错刷屏。
+**同一个 clientId 只允许一条连接**：后连上的会把先连上的顶掉，所以观察工具跑之前必须停面板
+（2026-09-30 那次双实例并排跑，两边互踢，观察报告只留下前 60 秒）。
 """
 import json
 import os
@@ -312,7 +315,107 @@ class MqttChannel(Channel):
         if kb:
             out['kb_backlight'] = {'on': str(kb.get('powerStatus', '')).lower() == 'on',
                                    'brightness': kb.get('brightNess')}
+        oem = self._oem_switches(payloads)
+        if oem:
+            out['oem'] = oem
         out['topics'] = sorted(payloads.keys())
+        return out
+
+    @staticmethod
+    def _oem_switches(payloads):
+        """OEM 自己报上来的开关状态与允许范围（全是读数，一个字都不写）。
+
+        这些字段的值就是 OEM 的原文（WINKEY_STATUS_LOCK 这种），照实转成布尔/词，
+        并把原文留在 `_raw` 里，认不出来就是 None——面板不猜。
+        2026-09-30 00:27 那一条 GETSTATUS 的完整回报见 README 6.6/6.7。
+        """
+        def data(topic):
+            return (payloads.get(topic) or {}).get('data') or {}
+
+        setting = data('Setting/Status')
+        bar = data('HidLightbar/Status')
+        kb = data('Keyboard/Status')
+        fan = data('Fan/Status')
+        if not setting and not bar and not fan:
+            return None
+
+        def flag(value, on_token):
+            """比最后一段：'WINKEY_STATUS_LOCK'→True，'WINKEY_STATUS_UNLOCK'→False。
+
+            不能用 endswith：'UNLOCK' 也以 'LOCK' 结尾，会把「没锁」判成「锁着」。
+            空值/认不出来一律 None，面板照实写「未知」。
+            """
+            text = str(value or '')
+            if not text or text == 'None' or '_' not in text:
+                return None
+            return text.rsplit('_', 1)[-1] == on_token
+
+        def num(value):
+            try:
+                return int(str(value))
+            except (TypeError, ValueError):
+                return None
+
+        out = {
+            # Win 键锁定：OEM 原文 WINKEY_STATUS_LOCK / _UNLOCK，命令是
+            # Setting/Control {"Action":"WINKEY_LOCK"|"WINKEY_UNLOCK"}。
+            # 2026-09-30 01:16 观察3 已确认：机主连点三次，这里的 LOCK/UNLOCK/LOCK
+            # 与 EC 的 ADDR_STAUTS_BYTE 0→1→0→1 逐条对齐。
+            'win_key_locked': flag(setting.get('WinKey'), 'LOCK'),
+            # 触摸板：本机触摸板上有个**实体拨动开关**，这是它的读数。OEM 字符串表里
+            # 确实有 TOUCHPAD_TOGGLE_ON/OFF（cc-strings-all.txt、gcu-allfields.txt 都有），
+            # 但没验证过软件写下去会不会被实体开关盖掉，所以面板只读不写。
+            'touchpad_on': flag(setting.get('TouchpadToggle'), 'ON'),
+            'lightbar_on': flag(setting.get('LightBar'), 'ON'),
+            'kb_single_color_on': flag(setting.get('SingleColorKBBL'), 'ON'),
+            'usb_charger_on': flag(setting.get('UsbCharger'), 'ON'),
+            'osd_hidden': flag(setting.get('OSD'), 'ON'),
+            'fn_locked': flag(setting.get('FnKey'), 'LOCK'),
+            'numpad_locked': flag(setting.get('NumPad'), 'LOCK'),
+            'mux_on': flag(setting.get('DiscreteGpuDirectConnectionSwitch_Status'), 'ON'),
+            'mux_support': str(setting.get('DiscreteGpuDirectConnectionSwitch_Support') or '') == 'Support',
+            # 2026-09-30 01:15 那条 Setting/Status 里这两个字段并存：
+            #   DiscreteGpuDirectConnectionSwitch_Status = DGPU_DIRECT_CONNECT_TOGGLE_ON
+            #   DGpu                                     = NV_CTRL_PANEL_AUTOSELECT
+            # 看着像矛盾，更可能是**两层不同的东西**（一个是独显直连开关，一个是 NVIDIA
+            # 控制面板的输出偏好）。Hackintosh 那边也印证 dGPU 的电源是挂在 ACPI 的
+            # \_SB.PCI0.PEG0.PEGP._OFF/_ON 上，不是这个字段。没验证前两个都照实报。
+            'dgpu_raw': setting.get('DGpu'),
+            'display_mode': setting.get('DisplayMode'),
+            'display_feature_on': flag(setting.get('DisplayFeatureStatus'), 'ON'),
+            'fn_hotkey_on': flag(setting.get('FnWith1HotkeySwitch_Status'), 'ON'),
+            'ac_recovery_on': flag(setting.get('AcRecoverySwitch_Status'), 'ON'),
+            'ac_recovery_support': str(setting.get('AcRecoverySwitch_Support') or '') == 'Support',
+            # Keyboard/Status.powerStatus 才是键盘背光的真开关（实测 'Off'），
+            # Setting/Status.SingleColorKBBL 同时是 ON——两个字段说的不是一件事，
+            # 所以面板上「背光开没开」只认 powerStatus，SingleColorKBBL 单独列。
+            'kb_power_on': str(kb.get('powerStatus') or '').lower() == 'on' if kb else None,
+            'kb_effect': kb.get('effect') if kb else None,
+            'kb_speed': kb.get('speed') if kb else None,
+            'kb_light': kb.get('light') if kb else None,
+            'lightbar_brightness': bar.get('brightNess') if bar else None,
+            'kb_brightness_ac': kb.get('ACBrightness') if kb else None,
+            'kb_brightness_dc': kb.get('DCBrightness') if kb else None,
+            'kb_controller': kb.get('solution') if kb else None,
+            # Fan/Status 里 OEM 自己写的允许范围：以后任何写入都拿这组数当护栏。
+            'limits': {k: num(fan.get(v)) for k, v in (
+                ('pl1_min', 'CPU_PL1Minimum'), ('pl1_max', 'CPU_PL1Maximum'),
+                ('pl4_max', 'CPU_PL4Maximum'), ('tgp_min', 'GPU_ConfigurableTGPMinimum'),
+                ('tgp_max', 'GPU_ConfigurableTGPMaximum'),
+                ('boost_min', 'GPU_DynamicBoostMinimum'), ('boost_max', 'GPU_DynamicBoostMaximum'),
+                ('gpu_temp_min', 'GPU_TargetTemperatureMinimum'),
+                ('gpu_temp_max', 'GPU_TargetTemperatureMaximum'))} if fan else None,
+            # 电池那三档（平衡/健康/长效）已确认在 EC 的 ADDR_AP_OEM_BYTE4 高半字节，
+            # 命令是 BatteryProtection/Control 的 BALANCEDMODE/HEALTHYMODE/PERFORMANCEDMODE
+            # （解码见 channels.base）。Fan/Status 里这个 PowerMode 是**另一回事**，
+            # 当时报 1，三档切换时它没跟着动过，语义未知，只当原始值暴露。
+            'power_mode_raw': num(fan.get('PowerMode')) if fan else None,
+            'profile_name': fan.get('ProfileName') if fan else None,
+            'fan_table': fan.get('FAN_TableName') if fan else None,
+            '_raw': {'WinKey': setting.get('WinKey'), 'TouchpadToggle': setting.get('TouchpadToggle'),
+                     'LightBar': setting.get('LightBar'), 'UsbCharger': setting.get('UsbCharger')},
+            'ts': max([v.get('ts', 0) for v in payloads.values()] or [0]),
+        }
         return out
 
     def tick(self):
