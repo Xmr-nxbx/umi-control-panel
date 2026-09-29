@@ -573,9 +573,13 @@ def power_verdict():
         reason = ('实测性能档比省电档快 %s%%（%s），Windows 电源档位在本机有效。'
                   % (round(best_gain if best_gain is not None else spread, 1), freq_txt))
     else:
+        # 只说「压不住」等于把机主晾在半路：他真正要知道的是那什么才压得住。
+        # 本机实测（README 6.4）性能墙在散热侧——只改 EC 风扇一个字节就能拉开
+        # 满载吞吐，所以面板在性能档会同时把风扇推到强冷。
         reason = ('实测性能档只比省电档快 %s%%（%s），说明 BIOS/EC 接管了频率，'
-                  'powercfg 那一层压不住。EC 通道本身已经打通（风扇可控），'
-                  '但功耗墙的落点寄存器还没确认——确认前不猜测写入。'
+                  'powercfg 那一层压不住。这台机器的性能墙在散热侧：改 EC 风扇模式'
+                  '实测就能拉开满载吞吐（README 6.4），所以性能档会同时把风扇推到强冷；'
+                  '功耗墙的落点寄存器还没确认——确认前不猜测写入。'
                   % (round(best_gain if best_gain is not None else (spread or 0), 1), freq_txt))
     return {'effective': effective, 'perf_gain_pct': round(best_gain, 1) if best_gain is not None else None,
             'clock_spread_pct': round(spread, 1) if spread is not None else None,
