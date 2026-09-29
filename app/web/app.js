@@ -231,9 +231,12 @@ function renderHardware(s) {
           ? (hw.battery_pct_ec + '% · ' + (hw.battery_temp_c != null ? hw.battery_temp_c + '°C' : '?')
              + (hw.battery_cycles != null ? ' · ' + hw.battery_cycles + ' 次循环' : ''))
           : '未知', hw.battery_pct_ec != null),
+    // 「未设限」这个说法是错的：本机根本没有百分比这套机制（封顶走充电电压，
+    // 而那个寄存器 host 写不住）。这两个字节恒为 0，照实说清楚，别让人以为
+    // 「打开某个开关就能设 80%」。（README 6.11 第三节）
     hwRow('充电阈值', hw.charge_limit_up
           ? (hw.charge_limit_up + '% / 回落 ' + (hw.charge_limit_down || '?') + '%')
-          : '未设限（寄存器读到 0）', hw.charge_limit_up != null),
+          : '本机不按百分比设限（寄存器恒为 0）', hw.charge_limit_up != null),
     // 2026-09-30 观察3 两条通道对齐后确认的：这两行不再是「候选」，敢下结论了。
     hwRow('电池充电档位', battText(hw), hw.battery_mode != null),
     hwRow('Win 键锁定', hw.win_key_locked == null ? (ecAlive ? '未知' : '不可读')
@@ -391,11 +394,102 @@ function renderOem(s) {
     + '「OEM 允许范围」是 Fan/Status 里 OEM 自己写的上下限，以后任何写入都拿它当护栏。';
 }
 
+// ---------- 风扇曲线（EC 直读，只读） ----------
+// 表布局来自同源机型反编译出的 SetEcFanTable/GetEcFanTable（README 6.11）：
+// 升温点 mem[base+i-1]、降温点 mem[base+0x11+i]、占空比 mem[base+0x20+i]/2。
+// 这块**按需**取数：一轮近百次读约 3 秒，不进 2 秒轮询，页面不点就不打 EC。
+let curveData = null;
+let curveLoading = false;
+
+const CURVE_WORD = { CPU: 'CPU', GPU: 'GPU（独显）' };
+
+function curveTable(which, points) {
+  const rows = (points || []).map((p) => {
+    const cls = p.mailbox ? 'mailbox' : (p.complete ? (p.sentinel ? 'sentinel' : '') : 'na');
+    const duty = p.mailbox ? '信箱' : (p.duty_pct != null ? p.duty_pct + '%' : '—');
+    const up = p.up_t != null ? (p.sentinel ? '0xFF 哨兵' : p.up_t) : '—';
+    return `<tr class="${cls}"><td>${p.id}</td><td>${esc(up)}</td>
+      <td>${p.down_t != null ? p.down_t : '—'}</td><td>${esc(duty)}</td></tr>`;
+  }).join('');
+  return `<table class="curve"><caption>${esc(CURVE_WORD[which] || which)}</caption>
+    <thead><tr><th>点</th><th>升温 °C</th><th>降温 °C</th><th>占空比</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+}
+
+const triText = (v, on, off) => (v == null ? '读不到' : (v ? on : off));
+
+function renderFanCurve() {
+  const box = $('fan-curve');
+  const hint = $('fan-curve-hint');
+  if (!box) return;
+  if (!curveData) return;                       // 还没点过：留着 index.html 里那句说明
+  if (!curveData.ok && !curveData.tables) {
+    box.innerHTML = '';
+    hint.classList.add('err');
+    hint.textContent = '读不到：' + (curveData.reason || '未知原因');
+    return;
+  }
+  hint.classList.remove('err');
+  const t = curveData.tables || {};
+  const ctx = curveData.context || {};
+  box.innerHTML = `<div class="curve-ctx">`
+    + hwRow('硬件模式', hwModeWord(ctx.hw_mode) || `未知（风扇字节 ${ctx.fan_mode_flag || '?'}）`,
+            !!ctx.hw_mode)
+    + hwRow('CPU/GPU 分表', triText(ctx.split_tables, '开（两张表都在用）', '关'),
+            ctx.split_tables != null)
+    + hwRow('写表括号位', triText(ctx.bracket, '正常（1）', '拉低中：有人正在写表'),
+            ctx.bracket != null)
+    + hwRow('AP 存在位', triText(ctx.ap_exist, '1（EC 不会清零功耗墙）', '0'),
+            ctx.ap_exist != null)
+    + `</div><div class="curve-wrap">${curveTable('CPU', t.CPU)}${curveTable('GPU', t.GPU)}</div>`;
+  const bits = [`本轮读了 ${curveData.reads} 次、写了 ${curveData.writes} 次`,
+                `用时 ${curveData.elapsed_s} 秒`];
+  if (curveData.ts) bits.push(`读于 ${new Date(curveData.ts * 1000).toLocaleTimeString()}`);
+  if (curveData.cached) bits.push(`这是 ${curveData.age_s} 秒前的缓存`);
+  if (curveData.writes_during) {
+    bits.push(`转储期间通道另有 ${curveData.writes_during} 次写入（自动跟随在改风扇字节），`
+              + '所以这不是同一时刻的快照');
+  }
+  if (curveData.incomplete) bits.push(`有 ${curveData.incomplete} 个点没读全`);
+  hint.textContent = bits.join(' · ') + '。'
+    + '第 15 点的 0xFF 是「到此为止」的哨兵，不是温度；降温值比升温值高是厂商自己的写法，不是解码错。'
+    + 'GPU 表最后三格被厂商借去当信箱（写表时用来传模式和握手字节），所以显示「信箱」而不是占空比。'
+    + curveData.note;
+}
+
+async function loadFanCurve(say) {
+  if (curveLoading) return;
+  curveLoading = true;
+  const btn = $('btn-fan-curve');
+  btn.disabled = true;
+  btn.textContent = '读取中（约 3 秒）…';
+  try {
+    curveData = await api('/api/fan-curve');
+    if (say) {
+      const head = `风扇表读到了：${curveData.reads} 次读、${curveData.writes} 次写、`
+        + `${curveData.elapsed_s} 秒`;
+      toast(curveData.ok
+        ? (curveData.reason ? `${head}（${curveData.reason}）` : head)
+        : ('读取不完整：' + (curveData.reason || '未知原因')), !curveData.ok);
+    }
+  } catch (e) {
+    // 读失败不清掉上一次的结果：机主宁可看着旧表也不想看到卡片突然空掉。
+    // 旧表有多旧，提示行里写着（缓存几秒前 / 什么时候读的）。
+    if (say) toast('读取失败：' + e.message, true);
+  }
+  curveLoading = false;
+  btn.disabled = false;
+  btn.textContent = curveData ? '重新读取（约 3 秒）' : '读取曲线（约 3 秒）';
+  renderFanCurve();
+  poll();     // 读成功会把 fan.curve 能力点成「可用」，顺手刷新能力矩阵
+}
+
 function renderCaps(s) {
   const caps = s.capabilities || {};
   const labels = META.cap_labels || {};
   const shown = ['mode.read', 'mode.write', 'power_limit.read', 'power_limit.write',
-                 'fan.rpm', 'fan.mode', 'fan.curve', 'ec.temp', 'battery.limit',
+                 'fan.rpm', 'fan.mode', 'fan.curve', 'fan.curve.write', 'ec.temp',
+                 'battery.limit',
                  'battery.mode.write', 'winkey.write', 'gpu.mux', 'lighting.rgb'];
   const stateText = { verified: '可用', unknown: '待验证', blocked: '受限',
                       missing: '缺本机配置', unsupported: '不支持' };
@@ -714,6 +808,8 @@ $('btn-diag').onclick = async () => {
 };
 $('btn-bench-current').onclick = () => startBench('current');
 $('btn-bench-compare').onclick = () => startBench('compare');
+// 风扇曲线不自动读：一轮近百次读约 3 秒，只有机主点了才打 EC
+$('btn-fan-curve').onclick = () => loadFanCurve(true);
 $('btn-stop').onclick = async () => {
   if (!confirm('确定停止面板服务？停止后自适应调度与掉档守护都会失效。')) return;
   try { await api('/api/shutdown', {}); toast('服务已停止'); }

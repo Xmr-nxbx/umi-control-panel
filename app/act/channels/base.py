@@ -11,7 +11,8 @@ CAP_PL_READ = 'power_limit.read'     # 读 PL1/PL2/PL4
 CAP_PL_WRITE = 'power_limit.write'
 CAP_FAN_RPM = 'fan.rpm'              # 风扇实时转速
 CAP_FAN_MODE = 'fan.mode'            # 风扇字节（OEM 枚举 MyFanCTLByteFlag），同时是硬件模式总开关
-CAP_FAN_CURVE = 'fan.curve'          # 风扇曲线读写
+CAP_FAN_CURVE = 'fan.curve'          # 读 16 点风扇表（表布局见 ec_gpd.FAN_TABLE_*）
+CAP_FAN_CURVE_WRITE = 'fan.curve.write'   # 写风扇表：布局已知，但可逆验证要机主在场
 CAP_TEMP_EC = 'ec.temp'              # EC 侧温度传感器
 CAP_BATTERY_LIMIT = 'battery.limit'
 CAP_BATTERY_MODE_WRITE = 'battery.mode.write'   # 电池充电三档（平衡/健康/长效）
@@ -20,7 +21,8 @@ CAP_DGPU = 'gpu.mux'
 CAP_RGB = 'lighting.rgb'
 
 ALL_CAPS = (CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ, CAP_PL_WRITE,
-            CAP_FAN_RPM, CAP_FAN_MODE, CAP_FAN_CURVE, CAP_TEMP_EC, CAP_BATTERY_LIMIT,
+            CAP_FAN_RPM, CAP_FAN_MODE, CAP_FAN_CURVE, CAP_FAN_CURVE_WRITE,
+            CAP_TEMP_EC, CAP_BATTERY_LIMIT,
             CAP_BATTERY_MODE_WRITE, CAP_WINKEY_WRITE, CAP_DGPU, CAP_RGB)
 
 CAP_LABELS = {
@@ -33,7 +35,8 @@ CAP_LABELS = {
     CAP_PL_WRITE: '写入功耗墙',
     CAP_FAN_RPM: '风扇转速',
     CAP_FAN_MODE: '造物者模式按键（硬件模式总开关）',
-    CAP_FAN_CURVE: '风扇曲线',
+    CAP_FAN_CURVE: '读风扇曲线（16 点表）',
+    CAP_FAN_CURVE_WRITE: '写风扇曲线（未做可逆验证）',
     CAP_TEMP_EC: 'EC 温度传感器',
     CAP_BATTERY_LIMIT: '电池充电阈值',
     CAP_BATTERY_MODE_WRITE: '切换电池充电档（平衡/健康/长效）',

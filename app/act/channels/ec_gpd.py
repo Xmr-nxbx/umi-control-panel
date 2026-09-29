@@ -13,7 +13,8 @@ r"""EC 直连主通道：走 OEM 驱动的 IOCTL_GPD_ACPI_ECREAD，普通用户�
 
 寄存器「名字 → 地址」的对应表不在仓库里（OEM 私有定义，README 第 8 节的承诺），
 由 tools/gen_ec_map.py 在每台机器上从本机安装的 Creator Center 生成到
-data/ec_map.local.json。本文件只按名字取地址，一个数字都不写死。
+data/ec_map.local.json。本文件只按名字取地址——**唯一的例外**是 16 点风扇表
+（见 FAN_TABLE_BASE 那段注释：厂商代码里就是字面量，反射表拿不到）。
 
 安全约束：
   * 只发确认过的 IOCTL 码，绝不穷举、绝不试错布局；
@@ -28,7 +29,8 @@ import os
 import threading
 import time
 
-from app.act.channels.base import (CAP_BATTERY_LIMIT, CAP_FAN_CURVE, CAP_FAN_MODE,
+from app.act.channels.base import (CAP_BATTERY_LIMIT, CAP_FAN_CURVE,
+                                   CAP_FAN_CURVE_WRITE, CAP_FAN_MODE,
                                    CAP_FAN_RPM, CAP_MODE_READ, CAP_MODE_WRITE,
                                    CAP_PL_READ, CAP_PL_WRITE, CAP_TEMP_EC, MODES,
                                    battery_mode_of_oem_byte4, hw_mode_of_fan_flag,
@@ -135,6 +137,29 @@ USER_FAN_BIT = 0x80
 # 三个写者共用一个字节，所以它进了 README 6.3 第 8 条的永久禁区。
 # 触摸板上有实体拨动开关，OEM 也另有
 # TOUCHPAD_TOGGLE_ON/OFF 命令——两条路会不会互相盖没验证过，面板只读。
+
+# 16 点风扇表的布局。**这是本文件唯一一处写死地址**，因为这些地址不在 ECSpec 常量表里
+# （厂商代码里就是字面量 3840/3856/3872），本机反射出来的寄存器表根本没有它们。
+# 依据是 GM7MG7P 反编译出的 FanTable_Manager1p5.SetEcFanTable / GetEcFanTable
+# ——那份代码与本机同源（0x740 PROJECT_ID=15、0x78E bit6=IsSuportRamFan1p5 都为 1，
+# 两个前提都只读复核过，README 6.11 第一、六节）：
+#   升温点 UpT[i]   = mem[base + i - 1]，i=1..15（base+0x0F 从不参与；UpT[0] 恒为 0）
+#   降温点 DownT[i] = mem[base + 0x11 + i]，i=0..14（base+0x10 从不参与）；
+#                     i=15 时厂商读的是 base+0x1F，也就是和 i=14 同一个地址
+#   占空比 Duty[i]  = mem[base + 0x20 + i] / 2（寄存器里存的是「百分比 ×2」）
+# 两个坑：第 15 点的升温值恒为 0xFF，是「到此为止」的哨兵不是温度；
+# GPU 表最后三个占空比槽（0x0F5D/0x0F5E/0x0F5F）被 RefreshDefaultFanTableAll 借去
+# 当信箱用了（0x0F5F=模式、0x0F5D=0xFD、0x0F5E=0xC9，500ms 轮询），所以那不是数据。
+FAN_TABLE_BASE = (('CPU', 0x0F00), ('GPU', 0x0F30))
+FAN_TABLE_POINTS = 16
+FAN_TABLE_SENTINEL = 0xFF
+GPU_DUTY_MAILBOX = (13, 14, 15)
+# 按需读，不进轮询：一轮 92 个表地址 + 4 个语义位，约 30 次/秒
+# （README 6.3 第 6 条的上限是 62）。
+FAN_CURVE_GAP_S = 0.03
+FAN_CURVE_MIN_S = 10.0            # 十秒内的重复请求直接回缓存，页面刷新不该打 EC
+FAN_CURVE_NOTE = ('这是 Creator Center 最后一次编进 EC RAM 的表，不一定是此刻真正在管风扇的表'
+                  '（EC 自己还有一套出厂曲线，切换条件没逆向出来）。只读，不写。')
 
 
 def load_map(path=None):
@@ -259,8 +284,8 @@ class EcChannel:
         self.dev = EcGpd(log)
         self.caps = {c: 'unknown' for c in
                      (CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ, CAP_FAN_RPM,
-                      CAP_FAN_MODE, CAP_FAN_CURVE, CAP_TEMP_EC, CAP_BATTERY_LIMIT,
-                      CAP_PL_WRITE)}
+                      CAP_FAN_MODE, CAP_FAN_CURVE, CAP_FAN_CURVE_WRITE, CAP_TEMP_EC,
+                      CAP_BATTERY_LIMIT, CAP_PL_WRITE)}
         self.detail = {'device': DEVICE, 'ioctl_read': '0x%08X' % IOCTL_ECREAD,
                        'state': 'unknown', 'reason': '尚未探测'}
         self.alive = False
@@ -275,6 +300,10 @@ class EcChannel:
         self._last_slow = 0.0
         self._last_reprobe = 0.0
         self._validated = False
+        # 风扇表按需读：一轮 92 个地址要约 3 秒，所以缓存结果并用锁挡住并发重复读
+        self._curve = None
+        self._curve_at = 0.0
+        self._curve_lock = threading.Lock()
         self.allow_write = bool(cfg.get('hardware', 'ec', 'allow_write', default=False))
         # 人工意图优先窗口：见 FAN_KEY / USER_FAN_BIT 的说明
         self.respect_s = float(cfg.get('hardware', 'ec', 'respect_external_s', default=900.0))
@@ -352,13 +381,21 @@ class EcChannel:
             fan_enum = (self.map or {}).get('enums', {}).get('MyFanCTLByteFlag') or {}
             self.caps.update({
                 CAP_FAN_RPM: 'verified', CAP_PL_READ: 'verified', CAP_TEMP_EC: 'verified',
-                CAP_BATTERY_LIMIT: 'verified', CAP_FAN_CURVE: 'unknown',
+                CAP_BATTERY_LIMIT: 'verified',
+                # 读风扇表：布局是从同源机型的反编译代码里拿到的，但「读成功」要真读过
+                # 一轮才算数，所以没读之前照实写 unknown，不因为「地址知道了」就点亮。
+                CAP_FAN_CURVE: 'verified' if (self._curve or {}).get('ok') else 'unknown',
+                CAP_FAN_CURVE_WRITE: 'blocked',
                 # mode.read/write 说的是 OEM 那套 office/balance/turbo：EC 侧没有这个
                 # 概念（机主确认 Creator Center 界面上也没有），只有 GCUBridge 认。
                 # 本机真正的硬件模式走风扇字节，见 hw_mode_of_fan_flag / derived['hw_mode']。
                 CAP_MODE_READ: 'unsupported', CAP_MODE_WRITE: 'blocked',
                 CAP_PL_WRITE: 'blocked',
             })
+            self.detail['fan_curve_reason'] = (
+                '读已按同源机型的反编译布局实现（tools/ec_fantable_dump.py 先只读验证过一轮）；'
+                '写表还不许动：可逆验证要机主在场（存原值→写→回读→超温还原），'
+                '而且「EC 里哪张表此刻在管风扇」还没逆向清楚。')
             if fan_reg is None or not fan_enum:
                 self.caps[CAP_FAN_MODE] = 'missing'
                 self.detail['fan_mode_reason'] = '寄存器表里没有风扇模式寄存器或取值枚举'
@@ -570,6 +607,125 @@ class EcChannel:
         defaults = self.values.get('defaults') or {}
         key = {1: 'ADDR_GAMING_PL1_DEFAULT_VALUE', 2: 'ADDR_GAMING_PL2_DEFAULT_VALUE'}.get(which)
         return defaults.get(key) if key else None
+
+    # ---------- 风扇表（按需只读，一个写都不发） ----------
+    def _bit(self, addr, bit):
+        raw = self.dev.read(addr)
+        time.sleep(FAN_CURVE_GAP_S)
+        return None if raw is None else bool(raw & (1 << bit))
+
+    def _read_curve_table(self, which, base):
+        """读一张 16 点表，返回 (points, 没读全的点数, 本轮发出的读次数)。
+
+        地址按 FAN_TABLE_BASE 上面那段注释的规则算，**不读厂商代码从不读的字节**
+        （base+0x0F 和 base+0x10），也不做范围盲扫——兄弟板曾因为盲扫风扇转速寄存器
+        把风扇扫停（README 6.11），所以这里一个多余的地址都不碰。
+        """
+        addrs = ([base + i for i in range(FAN_TABLE_POINTS - 1)]
+                 + [base + 0x11 + i for i in range(FAN_TABLE_POINTS - 1)]
+                 + [base + 0x20 + i for i in range(FAN_TABLE_POINTS)])
+        mem = {}
+        for addr in addrs:
+            raw = self.dev.read(addr)
+            time.sleep(FAN_CURVE_GAP_S)
+            if raw is not None:
+                mem[addr] = raw & 0xFF
+        points = []
+        incomplete = 0
+        for k in range(FAN_TABLE_POINTS):
+            # 厂商代码里 UpT[0] 直接赋 0，不从寄存器读；DownT[15] 读的是 base+0x1F，
+            # 与 DownT[14] 同一个地址，所以最后一点的降温值不是「没有」。
+            up = 0 if k == 0 else mem.get(base + k - 1)
+            down = mem.get(base + (0x11 + k if k < FAN_TABLE_POINTS - 1 else 0x1F))
+            duty = mem.get(base + 0x20 + k)
+            mailbox = which == 'GPU' and k in GPU_DUTY_MAILBOX
+            point = {'id': k, 'up_t': up, 'down_t': down,
+                     'duty_raw': None if mailbox else duty,
+                     'duty_pct': None if (mailbox or duty is None) else round(duty / 2.0, 1),
+                     'sentinel': up == FAN_TABLE_SENTINEL,
+                     'mailbox': mailbox}
+            point['complete'] = (down is not None and (mailbox or duty is not None)
+                                 and (k == 0 or up is not None))
+            if not point['complete']:
+                incomplete += 1
+            points.append(point)
+        return points, incomplete, len(addrs)
+
+    def fan_curve(self):
+        """按需转储 CPU/GPU 两张 16 点风扇表。只发 ECREAD。
+
+        一轮 92 个表地址 + 4 个语义位、约 3 秒，所以结果缓存 FAN_CURVE_MIN_S 秒，
+        并发请求拿旧缓存；这一条不进轮询，页面不点就不读 EC。
+        """
+        now = time.time()
+        cached = self._curve
+        if cached is not None and now - self._curve_at < FAN_CURVE_MIN_S:
+            out = dict(cached)
+            out.update({'cached': True, 'age_s': round(now - self._curve_at, 1)})
+            return out
+        if not self.alive:
+            return {'ok': False, 'cached': False, 'state': self.detail.get('state'),
+                    'reason': self.detail.get('reason') or 'EC 通道不可用'}
+        if not self._curve_lock.acquire(False):
+            if cached is not None:
+                out = dict(cached)
+                out.update({'cached': True, 'age_s': round(now - self._curve_at, 1)})
+                return out
+            return {'ok': False, 'cached': False, 'reason': '上一轮还在读（约 3 秒），稍后再试'}
+        try:
+            started = time.time()
+            writes0 = self.dev.writes
+            tables = {}
+            incomplete = 0
+            reads = 0
+            for which, base in FAN_TABLE_BASE:
+                points, miss, count = self._read_curve_table(which, base)
+                tables[which] = points
+                incomplete += miss
+                reads += count
+            ctl = self._read_named(FAN_KEY)
+            reads += 1
+            flag = self.fan_flag_name(ctl)
+            # 这三个位的地址同样是厂商代码里的字面量，反射表里没有。
+            # bracket（0x07C6 bit2）是「写表括号」：厂商写表前**清零**、写完**置一**，
+            # 所以读到 1 才是「没人在写」，读到 0 说明这一刻正有写表在进行。
+            context = {'fan_ctl_byte': ctl, 'fan_mode_flag': flag,
+                       'hw_mode': hw_mode_of_fan_flag(flag),
+                       'ap_exist': self._bit(0x0741, 0),
+                       'split_tables': self._bit(0x07C5, 7),
+                       'bracket': self._bit(0x07C6, 2)}
+            reads += 3
+            # dev.reads/dev.writes 是整个通道共用的计数器：轮询线程同一时刻也在读，
+            # 所以「本轮读了多少次」必须自己数，不能拿计数器做差（实测会虚高 40 多次）。
+            # 写入这一侧本函数一个都不发；但自动跟随可能在同一窗口里改风扇字节，
+            # 那种情况下这份转储就不是同一时刻的快照了——照实说出来，不装作原子。
+            writes_during = self.dev.writes - writes0
+            notes = []
+            if incomplete:
+                notes.append('%d 个点没读全（EC 忙或 IOCTL 失败），下面是拿到的部分'
+                             % incomplete)
+            if writes_during:
+                notes.append('本轮期间通道另有 %d 次写入（自动跟随在改风扇字节），'
+                             '这份表不是同一时刻的快照' % writes_during)
+            ok = incomplete == 0
+            out = {'ok': ok, 'cached': False, 'reason': '；'.join(notes),
+                   'ts': round(time.time(), 1),
+                   'reads': reads, 'writes': 0, 'writes_during': writes_during,
+                   'elapsed_s': round(time.time() - started, 1),
+                   'points': FAN_TABLE_POINTS, 'incomplete': incomplete,
+                   'gap_s': FAN_CURVE_GAP_S, 'tables': tables,
+                   'context': context, 'note': FAN_CURVE_NOTE}
+            self._curve = out
+            self._curve_at = time.time()
+            if ok:
+                self.caps[CAP_FAN_CURVE] = 'verified'
+            if self.log:
+                self.log.info('[EC读] 风扇表转储：%d 次读、%d 次写、%.1f 秒，%s'
+                              % (reads, writes_during, out['elapsed_s'],
+                                 '完整' if ok and not notes else out['reason']))
+            return dict(out)
+        finally:
+            self._curve_lock.release()
 
     # ---------- 对外 ----------
     def read(self):

@@ -141,6 +141,10 @@ def make_handler(daemon, cfg, on_shutdown):
                 self._send(200, daemon.history_view(minutes))
             elif path == '/api/ec/probe':
                 self._send(200, daemon.hw.ec.probe())
+            elif path == '/api/fan-curve':
+                # 只读：一轮 92 个地址约 3 秒，通道内部有 10 秒缓存与并发闸，
+                # 所以放在 GET 上、由页面按钮触发，不进 2 秒轮询。
+                self._send(200, daemon.hw.ec.fan_curve())
             elif path == '/api/bench':
                 self._send(200, daemon.bench_view())
             elif path == '/api/ping':
