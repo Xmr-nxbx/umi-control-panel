@@ -19,6 +19,7 @@ Maximum/Minimum，不参与 clamp。所以护栏必须由我们自己加，而�
 import inspect
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -168,14 +169,36 @@ def t_shape_from_whitelist():
     assert spec['topic'] == 'fan_control', spec
 
 
-@case('能力表要把功耗墙写成 unknown 并说明缺什么，通道掉线时也要能复位')
+@case('本机 Fan/Status 报全了三对边界时各用各的，不再借 PL1 那一组')
+def t_uses_own_per_channel_bounds():
+    # 2026-09-30 19:45 往 Fan/Control 问到的原文（节选）：PL1 10~120、PL2 10~120、PL4 10~165
+    full = {'CPU_PL1Minimum': '10', 'CPU_PL1Maximum': '120',
+            'CPU_PL2Minimum': '10', 'CPU_PL2Maximum': '60',
+            'CPU_PL4Minimum': '15', 'CPU_PL4Maximum': '165'}
+    ch = _channel(full, verified=('power_limit.write',))
+    assert ch.pl_limits() == {'pl1_min': 10, 'pl1_max': 120, 'pl2_min': 10, 'pl2_max': 60,
+                              'pl4_min': 15, 'pl4_max': 165}, ch.pl_limits()
+    # PL2 的上限现在是 60：越过它必须被拒，而不是按 PL1 的 120 放行
+    ok, detail = ch.set_power_limits(pl2=75)
+    assert ok is False and '10~60' in detail, detail
+    ok, detail = ch.set_power_limits(pl4=12)
+    assert ok is False and '15~165' in detail, detail
+
+
+@case('功耗墙已升 verified，但原因里必须说清验的是哪几个值；掉线要把它收回')
 def t_cap_reported_and_reset():
     src = inspect.getsource(MqttChannel._session)
-    assert "self.caps[CAP_PL_WRITE] = 'unknown'" in src, '能力状态没上报，面板画不出这一行'
-    assert 'pl_write_reason' in src, '没写清楚缺的是哪一步'
+    assert "self.caps[CAP_PL_WRITE] = 'verified'" in src, '验证做完了还写着 unknown，面板永远点不亮'
+    assert 'pl_write_reason' in src, '没写清楚验过什么、没验什么'
+    reason = re.search(r"self\.detail\['pl_write_reason'\] = \(\s*((?:'[^']*'\s*)+)", src)
+    assert reason and 'PL1' in reason.group(1) and 'PL2' in reason.group(1), \
+        '文案没区分「亲手验过的 PL1」和「同一条命令但没单独试的 PL2/PL4」'
     whole = inspect.getsource(sys.modules[MqttChannel.__module__])
     assert 'CAP_PL_READ, CAP_PL_WRITE' in whole, \
         '复位列表里没有它：通道掉线后会留着上一次的 verified 骗人'
+    # 掉线那段必须把 PL_WRITE 一起收回，不能只收 Win 锁
+    except_block = whole.split('except Exception as exc')[1].split('self.detail[\'reason\']')[0]
+    assert 'CAP_PL_WRITE' in except_block, '断线后功耗墙还挂着 verified = 面板会点出失败'
 
 
 def main():

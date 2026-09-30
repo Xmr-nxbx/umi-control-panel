@@ -148,6 +148,9 @@ class MqttChannel(Channel):
     # 够快了——前端「正在生效」最长挂 20 秒。窗口一过就回到 45 秒的例行问。
     ASK_BURST_S = 30.0
     ASK_BURST_GAP_S = 3.0
+    # 问状态要按主题分开问：Setting/Control 只回 Setting/Keyboard/HidLightbar 那几份，
+    # Fan/Status（含功耗墙边界）只回 Fan/Control 的问。见 _ask_status。
+    ASK_TOPICS = ('Setting/Control', 'Fan/Control')
 
     def __init__(self, cfg, log):
         super().__init__(cfg, log)
@@ -215,8 +218,11 @@ class MqttChannel(Channel):
                 self.alive = False
                 self._kick_reason = repr(exc)
                 self.caps[CAP_MODE_READ] = 'unsupported'
-                # 掉线就把已验证的写能力收回：否则面板还亮着按钮，点了只会失败
-                self.caps[CAP_WINKEY_WRITE] = 'unsupported'
+                # 掉线就把**所有**已验证的写能力收回：否则面板还亮着按钮，点了只会失败。
+                # 上一版只收了 Win 锁，功耗墙升 verified 之后这个口子会更明显。
+                for cap in (CAP_MODE_WRITE, CAP_PL_WRITE, CAP_RGB_WRITE, CAP_WINKEY_WRITE,
+                            CAP_BATTERY_MODE_WRITE):
+                    self.caps[cap] = 'unsupported'
                 self.detail['reason'] = '未连接：%s' % self._kick_reason
                 for _ in range(int(backoff * 10)):
                     if self._stop.is_set():
@@ -231,13 +237,15 @@ class MqttChannel(Channel):
         self.alive = True
         self.caps[CAP_MODE_READ] = 'verified'
         self.caps[CAP_PL_READ] = 'verified'
-        # 精细功耗墙：护栏代码已经就位（set_power_limits 会拿 Fan/Status 的边界夹），
-        # 但**还没做过一次在场验证**，所以照旧不点亮，能力表写 unknown 并说明缺什么。
-        self.caps[CAP_PL_WRITE] = 'unknown'
+        # 精细功耗墙：2026-09-30 19:51 做完在场可逆验证（tools/pl_detail_test.py --PL1=60 --write）：
+        # EC 直读 0x0783 由 10 → 60 用了约 2 秒，再发原值 20 秒后回到 10，全程本脚本 EC 写 0 次。
+        # 比档位命令快得多（那条要 24~26 秒）。注意**只验过 PL1**，PL2/PL4 是同一条命令的另外
+        # 两个独立 if，机制相同但没亲手试过，所以文案里说清验的是哪一个。
+        self.caps[CAP_PL_WRITE] = 'verified'
         self.detail['pl_write_reason'] = (
-            '护栏已就位（越界拒发、没边界不发），缺一次有人在场的一次验证：'
-            '下发界内值 → 看 EC 0x0783 真的变了 → 还原。'
-            '注意 0x0783-0x0785 还有 ACPI 侧写者，还原值可能不是原值，验证时要对照前后读数')
+            '已做过可逆验证（2026-09-30 19:51）：PL1 10→60→10，EC 直读 2 秒内跟上。'
+            '边界由 OEM 在 Fan/Status 里自己报（PL1 10~120），越界是拒发不是夹取。'
+            'PL2/PL4 走同一条命令但没单独实测过；改的是当前档位的墙，切档会被服务重算。')
         # 写档位：2026-09-30 12:19-12:24 做完整可逆验证（notes/hardware-channels.md 6.11 十五）。
         # 关键发现是**方向反了**：EC 的 `0x0751`（面板风扇模式字节）是**服务的输出，不是输入**。
         # 只写那个字节 → PL1 死守 10 W，100 秒 52 个采样点一次没动；
@@ -278,7 +286,8 @@ class MqttChannel(Channel):
                                                '损坏电池的前例（CVE-2026-64143），'
                                                '用户点头之前不下发')
         self.detail['reason'] = '已连接 GCUBridge'
-        cli.publish('Setting/Control', json.dumps({'Action': 'GETSTATUS'}))
+        for topic in self.ASK_TOPICS:      # 连上就先问一轮，两条控制主题各一条（见 _ask_status）
+            cli.publish(topic, json.dumps({'Action': 'GETSTATUS'}))
         last_ping = time.time()
         cli.sock.settimeout(1.0)
         while not self._stop.is_set():
@@ -381,8 +390,9 @@ class MqttChannel(Channel):
     def pl_limits(self):
         """OEM 自己在 `Fan/Status` 里写的边界。拿不到就返回 None——没护栏就不发。
 
-        注意 `Fan/Status` 不是周期广播：本机只在被 `GETSTATUS` 问到时才报，
-        所以这一组数经常是空的（面板上那行显示「未报」不是 bug）。
+        `Fan/Status` 不是周期广播：只有往 **Fan/Control** 发 `{"Action":"GETSTATUS"}` 才报
+        （只问 Setting/Control 问不到它，这是 2026-09-30 19:45 实测出来的，`_ask_status` 已改）。
+        本机这一条报全了三对边界：PL1 10~120、PL2 10~120、PL4 10~165。
         """
         fan = (self.payloads().get('Fan/Status') or {}).get('data') or {}
 
@@ -394,6 +404,10 @@ class MqttChannel(Channel):
 
         out = {'pl1_min': num('CPU_PL1Minimum'), 'pl1_max': num('CPU_PL1Maximum'),
                'pl4_max': num('CPU_PL4Maximum')}
+        # PL2/PL4 有自己的边界就用它；老固件不报时才退回借 PL1 的下限（PL2 总不会比 PL1 更宽）
+        out['pl2_min'] = out['pl1_min'] if num('CPU_PL2Minimum') is None else num('CPU_PL2Minimum')
+        out['pl2_max'] = out['pl1_max'] if num('CPU_PL2Maximum') is None else num('CPU_PL2Maximum')
+        out['pl4_min'] = out['pl1_min'] if num('CPU_PL4Minimum') is None else num('CPU_PL4Minimum')
         return out if any(v is not None for v in out.values()) else None
 
     def set_power_limits(self, pl1=None, pl2=None, pl4=None):
@@ -403,7 +417,7 @@ class MqttChannel(Channel):
         发 300 会静默变成 44 W（notes/hardware-channels.md 6.11 十二）。
         所以护栏只能我们自己加，而且**越界是拒绝、不是悄悄夹到边上**——
         悄悄夹会让人以为设成了 300。PL1/PL2/PL4 是三个独立 `if`，一条消息能同时带三个。
-        OEM 没单独报 PL2 的边界，这里借用 PL1 那一组，理由写在拒绝文案里。
+        边界成对取自 `Fan/Status`（PL1 10~120、PL2 10~120、PL4 10~165）。
         """
         want = {'PL1': pl1, 'PL2': pl2, 'PL4': pl4}
         want = dict((k, v) for k, v in want.items() if v is not None)
@@ -412,12 +426,11 @@ class MqttChannel(Channel):
         lim = self.pl_limits()
         if not lim:
             return False, ('拿不到 Fan/Status 里 OEM 自己报的上下限，拒绝下发：'
-                           '没有护栏的功耗墙写入不做。Fan/Status 只在被问到时才报，'
-                           '先发一条 GETSTATUS 再试')
+                           '没有护栏的功耗墙写入不做。Fan/Status 只回 Fan/Control 上的 GETSTATUS，'
+                           '先发一条再试')
         bounds = {'PL1': (lim.get('pl1_min'), lim.get('pl1_max')),
-                  # OEM 没报 PL2 的独立边界，借用 PL1 那一组（它总不会比 PL1 上限更宽）
-                  'PL2': (lim.get('pl1_min'), lim.get('pl1_max')),
-                  'PL4': (lim.get('pl1_min'), lim.get('pl4_max'))}
+                  'PL2': (lim.get('pl2_min'), lim.get('pl2_max')),
+                  'PL4': (lim.get('pl4_min'), lim.get('pl4_max'))}
         extra = {}
         for key, value in want.items():
             lo, hi = bounds[key]
@@ -576,7 +589,13 @@ class MqttChannel(Channel):
 
     def _ask_status(self):
         self._last_ask_ts = time.time()
-        self._outq.put(('Setting/Control', json.dumps({'Action': 'GETSTATUS'})))
+        # OEM 的 GETSTATUS 是**按控制主题分工**的：只问 Setting/Control 永远问不到 Fan/Status，
+        # 而功耗墙的上下限（`set_power_limits` 的护栏数据源）只在 Fan/Status 里。
+        # 2026-09-30 19:45 实测：往 Fan/Control 发同一条 {"Action":"GETSTATUS"} 才报回
+        # CPU_PL1Minimum/Maximum 与当前 CPU_PL1/PL2/PL4；只问 Setting 的那几轮全是「未报」。
+        ask = json.dumps({'Action': 'GETSTATUS'})
+        for topic in self.ASK_TOPICS:
+            self._outq.put((topic, ask))
 
     def tick(self):
         now = time.time()

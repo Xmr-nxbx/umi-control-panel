@@ -7,7 +7,11 @@
 
 用法：runtime\\python.exe tools\\mqtt_watch.py [秒数] [--ask]      默认 180 秒
 
-  --ask  连上之后发**一条** {"Action":"GETSTATUS"} 问当前状态（面板每次启动也发这一条）。
+  --ask  连上之后在 **Setting/Control** 上发一条 {"Action":"GETSTATUS"} 问当前状态。
+  --ask-all
+         同时在几个控制主题上各问一条 GETSTATUS。2026-09-30 19:41 实测：只问 Setting/Control
+         服务只回 Setting/Keyboard/HidLightbar 三份，**Fan/Status 与 Tray/Status 根本不报**，
+         所以想知道功耗墙边界（护栏要用）或当前档位，得按主题分开问。
          不加就纯被动，只能听到「你点功能时 Creator Center 发出去的命令」和变化推送。
          实测不加 --ask 时 20 秒只收到一条 ProcessControl/Status，所以默认建议加上。
 
@@ -15,7 +19,7 @@
 报告里每条消息都带时间戳，按你记的顺序就能一一对回去。
 
 安全边界：
-  * 除了 --ask 那一条 GETSTATUS，不 publish 任何主题；GETSTATUS 是问状态，不改设置；
+  * 除了 --ask/--ask-all 那几条 GETSTATUS，不 publish 任何主题；GETSTATUS 是问状态，不改设置；
   * 不打开 \\\\.\\ACPIDriver，不发 IOCTL，不读写任何 EC 寄存器；
   * 身份从 data\\mqtt_identity.json 读（已 gitignore），报告里绝不出现口令原文；
   * broker 会因为「clientId 同名进程不在」或「同名客户端后到」而踢线，所以本工具跑之前
@@ -40,11 +44,17 @@ CONTROL_TOPICS = ('Fan/Control', 'Setting/Control', 'Display/Control', 'Keyboard
                   'MyRgbLightbar/Control', 'BatteryProtection/Control')
 ALL_TOPICS = tuple(dict.fromkeys(CONTROL_TOPICS + STATUS_TOPICS))
 RETRY_S = 3.0
+# OEM 的 GETSTATUS 是**按控制主题分工**的：Setting/Control 问回来的只有 Setting/Keyboard 那几份，
+# 功耗墙边界在 Fan/Status，得往 Fan/Control 问（2026-09-30 19:41 实测只问 Setting 拿不到墙）。
+ASK_ALL_TOPICS = ('Setting/Control', 'Fan/Control', 'Keyboard/Ctrl')
 
 
 def main(argv):
     seconds = next((float(a) for a in argv if a.replace('.', '').isdigit()), 180.0)
-    ask = '--ask' in [a.lower() for a in argv]
+    low = [a.lower() for a in argv]
+    ask_all = '--ask-all' in low
+    ask = ask_all or '--ask' in low
+    ask_topics = ASK_ALL_TOPICS if ask_all else ('Setting/Control',)
     report = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'out',
                           'mqtt-watch.txt')
     lines = []
@@ -61,7 +71,8 @@ def main(argv):
     password = m.get('password') or ''
     out('GCUBridge 通道观察器  %s（观察 %.0f 秒，%s）'
         % (time.strftime('%Y-%m-%d %H:%M:%S'), seconds,
-           '只发一条 GETSTATUS 问状态' if ask else '只订阅不发送'))
+           ('在 %d 个控制主题上各问一条 GETSTATUS' % len(ask_topics)) if ask
+           else '只订阅不发送'))
     out('broker %s:%d，身份 %s（口令不打印）'
         % (host, port, client_id or '未配置'))
     if not client_id or not username:
@@ -88,15 +99,17 @@ def main(argv):
                 break
             continue
         if ask and not stat['sent']:
-            cli.publish('Setting/Control', json.dumps({'Action': 'GETSTATUS'}))
-            stat['sent'] = 1
-            out('已发送 1 条 GETSTATUS（问当前状态，不改任何设置）')
+            for topic in ask_topics:
+                cli.publish(topic, json.dumps({'Action': 'GETSTATUS'}))
+                stat['sent'] += 1
+            out('已发送 %d 条 GETSTATUS（问状态，不改任何设置）：%s'
+                % (stat['sent'], ', '.join(ask_topics)))
         if not stat['kicks']:
             out('\n已连接。现在开始观察——请在这段时间里去点 Creator Center 里要研究的功能：')
             out('  键盘背光（调一格 / 换个灯效）、灯条开关、Win 键锁定、触摸板开关、')
             out('  电池充电阈值、独显直连（会要求重启，可以点了再取消）。')
             out('  一次只点一个，点完等 10 秒。屏幕提示（OSD）开关也算一个。\n')
-        _observe(cli, out, last, dup, stat, deadline, ask)
+        _observe(cli, out, last, dup, stat, deadline, ask_topics)
         try:
             cli.close()
         except OSError:
@@ -118,7 +131,7 @@ def main(argv):
     return _finish(lines, report, 0)
 
 
-def _observe(cli, out, last, dup, stat, deadline, ask):
+def _observe(cli, out, last, dup, stat, deadline, ask_topics):
     """听到时间用完或掉线为止；掉线就返回，由上层决定要不要重连。"""
     last_ping = time.time()
     cli.sock.settimeout(1.0)
@@ -150,7 +163,7 @@ def _observe(cli, out, last, dup, stat, deadline, ask):
             out('      （上一条重复了 %d 次）' % dup.pop(topic))
         last[topic] = raw
         note = ''
-        if ask and topic == 'Setting/Control' and '"GETSTATUS"' in raw:
+        if topic in ask_topics and '"GETSTATUS"' in raw:
             note = '   ← 这是本工具自己发的那条，broker 原样回显，不是 Creator Center 干的'
         out('  [%s] %-24s %s%s' % (time.strftime('%H:%M:%S'), topic, _pretty(raw), note))
 

@@ -71,13 +71,33 @@ def _channel(verified=()):
 
 
 def _asks(ch):
-    """把队列里攒的报文都倒出来，返回 GETSTATUS 的条数。"""
+    """把队列里攒的报文都倒出来，返回 GETSTATUS 的**轮数**（一轮可能横跨几个主题）。"""
     n = 0
     while not ch._outq.empty():
         topic, payload = ch._outq.get_nowait()
         if topic == 'Setting/Control' and json.loads(payload).get('Action') == 'GETSTATUS':
             n += 1
     return n
+
+
+def _drain_topics(ch):
+    out = set()
+    while not ch._outq.empty():
+        topic, payload = ch._outq.get_nowait()
+        if json.loads(payload).get('Action') == 'GETSTATUS':
+            out.add(topic)
+    return out
+
+
+@case('一轮问状态要把 Fan/Control 也问到：功耗墙边界只在 Fan/Status，而它只回 Fan/Control')
+def t_asks_fan_control_too():
+    """2026-09-30 19:41 踩到的坑：只问 Setting/Control 时服务只回 Setting/Keyboard 那几份，
+    `pl_limits()` 永远拿不到边界，于是护栏把每一次功耗墙写入都拒了——护栏没坏，问路错了。
+    """
+    assert 'Fan/Control' in MqttChannel.ASK_TOPICS, MqttChannel.ASK_TOPICS
+    ch = _channel()
+    ch.request_status()
+    assert _drain_topics(ch) == set(MqttChannel.ASK_TOPICS), '问状态漏了主题'
 
 
 @case('没写东西时维持 45 秒一次的节奏：连点 tick 不许多发')
