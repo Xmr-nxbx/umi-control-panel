@@ -370,7 +370,8 @@ function renderOem(s) {
           + '但没验证过会不会被实体开关盖掉，所以面板不写）', oem.touchpad_on != null),
     hwRow('键盘背光', kbText, oem.kb_power_on != null),
     hwRow('单色背光功能', onOff(oem.kb_single_color_on, '开', '关'), oem.kb_single_color_on != null),
-    hwRow('顶灯条', barText, oem.lightbar_on != null),
+    // 用户/Creator Center 叫它「海岸灯」，面板跟着叫，别让他对不上号
+    hwRow('海岸灯（灯条）', barText, oem.lightbar_on != null),
     hwRow('USB 关机充电', onOff(oem.usb_charger_on, '开', '关'), oem.usb_charger_on != null),
     hwRow('OSD 提示', oem.osd_hidden == null ? '未知' : (oem.osd_hidden ? '隐藏' : '显示'),
           oem.osd_hidden != null),
