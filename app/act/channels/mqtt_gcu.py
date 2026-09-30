@@ -316,9 +316,22 @@ class MqttChannel(Channel):
         if not spec:
             return False, 'Action "%s" 不在白名单里，拒绝发送' % action
         topic = self.actions['topics'].get(spec['topic'], 'Fan/Control')
-        obj = {'Action': action}
+        # OEM 不是一套报文格式：Setting/Fan/Battery 用 {"Action":...}，
+        # Keyboard/Ctrl 用的是 {"function":"SetPower", ...}（读 GCUService 的
+        # OnMqttMessage switch 确认，见 notes/hardware-channels.md 6.11 十八）。
+        # 字段名和固定参数都由白名单条目自己声明，代码里不写死任何一条命令的形状。
+        obj = {spec.get('field', 'Action'): spec.get('value', action)}
+        obj.update(spec.get('args') or {})
         if extra:
             obj.update(extra)
+        # 第二道闸：这个动作对应的能力**验过没有**。上一版只查白名单，
+        # 于是 lighting.rgb.write 还标着 blocked 就能从 HTTP 发出去——
+        # "验证之前不点亮"必须是执行层的效果，不只是 UI 层的（6.3 第 7 条）。
+        cap = spec.get('cap')
+        if cap and self.caps.get(cap) != 'verified':
+            return False, ('%s 对应的能力 %s 还没做过可逆验证（当前 %s），拒绝下发。'
+                           '首次验证走 tools/ 下的脚本，不在 HTTP 上开口子'
+                           % (action, cap, self.caps.get(cap) or '未上报'))
         if not self.alive:
             return False, 'GCUBridge 未连接'
         self._outq.put((topic, json.dumps(obj, ensure_ascii=False)))

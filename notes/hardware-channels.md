@@ -1839,3 +1839,54 @@ CPU 风扇表第 0 点占空比 `0x0F20 = 0x00`、第 1 点 `0x0F21 = 0x84`(132 
 别写完关掉却发现亮度档被改了。厂商 BIOS 命令面里给了读回命令（`LEDKB /GetStatus`，见第九节②-补），
 两边都能读回来，所以这条路的「可逆」是厂商认可的。
 
+## 6.11 第十八节：`Keyboard/Ctrl` 的确切形状不用猜——读 GCUService 的 MQTT 分发（2026-09-30 14:05）
+
+要做 #29 就得知道报文到底长什么样。**先纠正一条早先写得太满的话**：
+6.7 那张表里 `Keyboard/Ctrl {"function":"SetPower","light":"3","speed":"2"}`
+标着「抓包确认」，其实我们自己的 `tools/out/mqtt-watch.txt` 里**只录到过自己发的那条 GETSTATUS**，
+那个形状是从 OEM 字符串表拼出来的（`SetPower`、`light`、`speed` 这些字符串确实都在
+`gcu-strings-all.txt` 里）。所以它是推断，不是观测——现在换成硬证据。
+
+硬证据来自参考仓库里现成的反编译产物（离线读，没执行任何脚本）：
+`windows/decompiled/v3.1.39.0/GCUService/MyRGBKeyboard/RGBKeyboard.cs` 的 `OnMqttMessage`：
+
+```csharp
+case "SetPower":
+    RGBKB_PowerStatus rGBKB_PowerStatus = val["powerstatus"];
+    if (!MyEcCtrl.Instance.IsChinaMode()) {         // 非中国模式才碰 EC
+        byte Data = 0;
+        MyEcCtrl.Instance.Read(GetType().Name, 1922, ref Data);   // 0x0782
+        Data |= 0x40;
+        MyEcCtrl.Instance.Write(GetType().Name, 1922, Data);
+    }
+    ... m_hidkeyboad?.SetPowerStatus(rGBKB_PowerStatus);
+```
+
+四条结论：
+
+1. **字段是 `function` + `powerstatus`，不是 `Action`**。所以白名单条目得能声明
+   自己的报文形状，代码里不许写死 `{"Action": ...}`——已经改成
+   `spec.get('field','Action')` / `spec.get('value')` / `spec.get('args')`。
+2. **取值是枚举序号**：`RGBKB_PowerStatus` = `Off=0, On=1, Lighting_off=2, Lighting_on=3,
+   Welcome_off=4, Welcome_on=5`。我们只发 0/1，脚本里对 2~5 直接拒。
+   状态侧同一份数据以两种形式回报：`powerStatus`（字符串 "On"/"Off"）和
+   `powerstatus`（整数 1/0），别只认一个。
+3. **这条命令会顺带写 EC `0x0782` bit6**，但只在 `IsChinaMode()` 为假时。
+   也就是说背光开关的 EC 副作用是**服务自己写的**，不是我们写的——
+   这正好解释了 6.7 那条「点背光时 EC 全表不动」：本机是中国模式，那条分支不跑。
+4. `SetLightingLevel` 走的是另一个函数（`RGBKeyboard_SetEffectLight`），
+   读 `data["mode"]` + `data["light"]`（亮度是 uint），**和 `SetPower` 不是一条命令**。
+   所以「开背光」和「调亮度」要分开发，别指望 `SetPower` 顺带把亮度拉满。
+
+**同一天补上的第三道闸**（这条是 6.3 第 7 条的收尾）：`send_action` 以前只查白名单，
+现在多查一层「这个动作对应的 cap 是不是 verified」。之前那个缺口的真实后果是
+`mode.write` 还标着 blocked 的时候，本机任何进程 POST `/api/action` 就能把
+`OPERATING_TURBO_MODE` 打到硬件上——今天做验证时我就是这么发的，属于正当使用，
+但这个口子本身不该存在。现在首次验证只能走 `tools/` 下的脚本（脚本自己读同一份白名单，
+不在 HTTP 上开口子），`tests/test_write_gates.py` 13 条盯着：13/13。
+
+**#29 的准备已经就绪、还没做**：`tools/kb_power_test.py` 是「读原值 → 开 → 回读 → 关回原值 → 回读」，
+拿不到初始 `Keyboard/Status` 就一个命令都不发，还原失败退出码 3。
+跑之前要**停面板**（抢同一个 broker 身份会互踢），所以要用户在场上才做得完——
+他今天出门了，脚本先压着不发。
+

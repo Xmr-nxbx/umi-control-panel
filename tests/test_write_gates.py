@@ -1,15 +1,19 @@
 # -*- coding: utf-8 -*-
-"""写操作的两道闸：来源校验 + allow_write。
+"""写操作的三道闸：来源校验 + allow_write + 能力有没有验过。
 
     runtime\\python.exe tests\\test_write_gates.py
 
 面板只听 127.0.0.1，但这**不等于**安全：用户浏览器里任何一个网页都能往
 http://127.0.0.1:8747/api/action 发 POST（CSRF），而那个接口能下发 OEM 硬件命令、
-还能把面板关掉。所以要钉住两件事：
+还能把面板关掉。所以要钉住三件事：
   * 跨站 / 非回环 Host 的写请求一律 403，curl 这类不带 Origin 的照常放行；
   * `MqttChannel.send_action` 必须查 `config.hardware.ec.allow_write`——
-    白名单只回答「OEM 认不认这个命令」，不回答「现在准不准发」。
+    白名单只回答「OEM 认不认这个命令」，不回答「现在准不准发」；
+  * 还得查这个动作对应的**能力状态**：没做过可逆验证（不是 verified）就不发。
+    前两道闸 2026-09-30 才补上，第三道是同日发现「UI 不点亮 ≠ 执行层不发」之后补的。
 """
+import inspect
+import json
 import os
 import sys
 
@@ -53,9 +57,13 @@ class FakeLog:
         pass
 
 
-def _channel(allow_write):
+def _channel(allow_write, verified=()):
     ch = MqttChannel(FakeCfg(allow_write), FakeLog())
     ch.alive = True                 # 只测闸门，不连 broker
+    # 真实通道是连上并验过之后才把 cap 置 verified 的（_session 里），
+    # 测试要发命令就得先把这一步补上，否则会被第三道闸拦掉——那正是第三道闸该干的活。
+    for cap in verified:
+        ch.caps[cap] = 'verified'
     return ch
 
 
@@ -101,13 +109,51 @@ def _():
 
 @case('allow_write=true 时才放行，且只发白名单里的')
 def _():
-    ch = _channel(True)
+    ch = _channel(True, ('winkey.write',))
     ok, detail = ch.send_action('WINKEY_UNLOCK')
     assert ok is True, detail
     topic, payload = ch._outq.get_nowait()
     assert topic == 'Setting/Control', topic
     assert '"WINKEY_UNLOCK"' in payload, payload
     assert 'Action' in payload
+
+
+@case('第三道闸：能力没验过就不许发，哪怕白名单里有、allow_write 也开着')
+def _():
+    ch = _channel(True)                       # 一个 cap 都没标 verified
+    for action, cap in (('HEALTHYMODE', 'battery.mode.write'),
+                        ('KB_POWER_ON', 'lighting.rgb.write'),
+                        ('OPERATING_GAMING_MODE', 'mode.write')):
+        assert ch.actions['actions'][action]['cap'] == cap, action
+        ok, detail = ch.send_action(action)
+        assert ok is False, '%s 居然发出去了：%s' % (action, detail)
+        assert '可逆验证' in detail, (action, detail)
+        assert ch._outq.empty(), '%s 被拒了却还是把命令塞进了发送队列' % action
+
+
+@case('标成 verified 之后同一条命令就该放行（闸不是写死的）')
+def _():
+    ch = _channel(True, ('lighting.rgb.write',))
+    ok, detail = ch.send_action('KB_POWER_ON')
+    assert ok is True, detail
+    topic, payload = ch._outq.get_nowait()
+    assert topic == 'Keyboard/Ctrl', topic
+    data = json.loads(payload)
+    # OEM 的 Keyboard/Ctrl 用的是 function，不是 Action（读 GCUService 的 switch 确认）
+    assert data['function'] == 'SetPower', payload
+    assert data['powerstatus'] == 1, payload
+    assert 'Action' not in data, payload
+    ok2, _ = ch.send_action('KB_POWER_OFF')
+    assert ok2 is True
+    assert json.loads(ch._outq.get_nowait()[1])['powerstatus'] == 0
+
+
+@case('白名单里每条命令的形状由条目自己声明，代码不许写死')
+def _():
+    body = inspect.getsource(MqttChannel.send_action)
+    assert "spec.get('field'" in body, 'payload 形状又写死成 Action 了'
+    assert "spec.get('args'" in body, '固定参数没从白名单取'
+    assert "self.caps.get(cap) != 'verified'" in body, '没查能力状态就没第三道闸'
 
 
 @case('不在白名单里的命令一律拒发（哪怕 allow_write 开着）')
@@ -119,7 +165,7 @@ def _():
 
 @case('通道没连上时不许假装发出去了')
 def _():
-    ch = _channel(True)
+    ch = _channel(True, ('winkey.write',))
     ch.alive = False
     ok, detail = ch.send_action('WINKEY_LOCK')
     assert ok is False
