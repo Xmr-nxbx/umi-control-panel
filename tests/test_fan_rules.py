@@ -290,6 +290,17 @@ def _():
     assert plan[-1] == (0x07C6, 0x0F), plan[-1]       # 0x0F | 0x04
 
 
+@case('地址常量与读侧 ec_gpd 一字不差（本仓库只许有一套风扇表算法）')
+def _():
+    # fanrules 不许 import app.act，所以地址是抄来的；抄就得有人盯住别分叉。
+    # 读侧哪天改了基址/信箱槽/哨兵，这条会红。
+    from app.act.channels import ec_gpd
+    assert dict(ec_gpd.FAN_TABLE_BASE) == fanrules.FAN_TABLE_BASE, fanrules.FAN_TABLE_BASE
+    assert tuple(ec_gpd.GPU_DUTY_MAILBOX) == tuple(fanrules.GPU_DUTY_MAILBOX)
+    assert ec_gpd.FAN_TABLE_SENTINEL == fanrules.SENTINEL
+    assert ec_gpd.FAN_TABLE_POINTS == fanrules.FAN_TABLE_POINTS
+
+
 @case('结构断言：fanrules 是纯计算模块，不存在任何写路径')
 def _():
     with open(os.path.join(REPO, 'app', 'fanrules.py'), encoding='utf-8') as f:
