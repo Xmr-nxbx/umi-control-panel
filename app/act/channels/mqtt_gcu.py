@@ -18,7 +18,7 @@ import time
 
 from app.act.channels.base import (Channel, CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ,
                                    CAP_RGB, CAP_DGPU, CAP_WINKEY_WRITE,
-                                   CAP_BATTERY_MODE_WRITE)
+                                   CAP_BATTERY_MODE_WRITE, MODE_LABELS, MODE_VERIFIED)
 
 ACTIONS_PATH = os.path.join(os.path.dirname(__file__), 'gcu_actions.json')
 STATUS_TOPICS = ('Tray/Status', 'Fan/Status', 'Setting/Status', 'Keyboard/Status',
@@ -224,12 +224,21 @@ class MqttChannel(Channel):
         self.alive = True
         self.caps[CAP_MODE_READ] = 'verified'
         self.caps[CAP_PL_READ] = 'verified'
-        # 写档位不做「连上就算可用」：OPERATING_*_MODE 这三个动作名确实来自 OEM 自己的
-        # 动作表，但本机还没做过一次「写 → 观察哪个寄存器/跑分变了 → 还原」的可逆验证，
-        # 按第 6.3 节的规矩，验证之前不许在面板上点亮这个开关。
-        self.caps[CAP_MODE_WRITE] = 'unknown'
-        self.detail['mode_write_reason'] = ('未做可逆验证：动作名来自 OEM 动作表，'
-                                            '但本机还没实测过它到底改了什么，验证前不点亮')
+        # 写档位：2026-09-30 12:19-12:24 做完整可逆验证（README 6.11 十五）。
+        # 关键发现是**方向反了**：EC 的 `0x0751`（面板风扇模式字节）是**服务的输出，不是输入**。
+        # 只写那个字节 → PL1 死守 10 W，100 秒 52 个采样点一次没动；
+        # 改发本动作 → 约 24 秒后 PL1 从 10 爬到 75，服务同时把 `0x0751` 写成 0x10。
+        # 再发 OFFICE → PL1 掉回 10、`0x0751` 被服务改回 0xA0；再发 TURBO → 又回 75。
+        # 往返两次都改到了真东西、都能还原，所以升 verified。
+        self.caps[CAP_MODE_WRITE] = 'verified'
+        self.detail['mode_write_reason'] = (
+            '已在本机做过可逆验证（2026-09-30 12:21）：TURBO→OFFICE→TURBO 往返，'
+            'EC 直读 PL1 依次 10→75→10→75 W。注意生效有约 24 秒延迟，'
+            '且功耗墙只由这条路改变得了——裸写 EC 档位字节不动它。')
+        # 按钮清单由后端给：前端不许自己写死档位（上一版写死了 office/balance/turbo，
+        # 结果 balance 是个点了只会报「未知档位」的死按钮）。只放验过的。
+        self.detail['mode_options'] = [{'id': m, 'label': MODE_LABELS[m]}
+                                       for m in MODE_VERIFIED if m in MODE_ACTION]
         # Win 键锁定是唯一做完完整可逆验证的写操作（2026-09-30 01:43）：
         # 下发 WINKEY_UNLOCK 后 EC 的 ADDR_STAUTS_BYTE 由 1 变 0（面板日志 01:43:16 抓到，
         # 延迟约 6 秒），再下发 WINKEY_LOCK 又回到 1，EC 直读与 Setting/Status 两条通道

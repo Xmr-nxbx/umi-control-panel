@@ -92,9 +92,15 @@ DEFAULTS = {
         # allow_write 只放开「语义已确认」的写入（目前是风扇模式字节）；
         # 档位/PL 这类语义未确认的寄存器在代码层面硬拦，配置开了也不写。
         'ec': {'enabled': True, 'allow_write': False,
-               # 风扇模式跟随调度档位：空闲安静、性能档加强散热。
-               # 取值必须来自 OEM 枚举 MyFanCTLByteFlag，别的名字一律不下发。
-               'fan_follow_tier': True, 'fan_cooldown_s': 10.0,
+               # 风扇模式跟随调度档位：**默认关掉**。
+               # 上一版开着，让自适应按档位去写 EC `0x0751`，以为在"加强散热"。
+               # 2026-09-30 12:19 实测证明那个字节是**服务的输出、不是输入**：
+               # 写完 100 秒、52 个采样点，PL1 一次都没动，风扇占空比也只是顺着
+               # 原来的曲线爬——**唯一的实际效果是把键盘上那颗实体灯的指示改掉了**，
+               # 于是出现"灯说性能、墙说省电"。面板不该去动一个物理指示灯还骗人，
+               # 更不该把服务自己的状态字段改得和真实档位不一致。
+               # 真要改墙走下面的 sync_ec_mode（OEM 的 OPERATING_*_MODE），那条验过。
+               'fan_follow_tier': False, 'fan_cooldown_s': 10.0,
                'fan_map': {'eco': 'Normal_Mode', 'bal': 'Normal_Mode',
                            'mid': 'Normal_Mode', 'perf': 'Turbo_Mode'},
                # 实体「造物者模式」按键优先：观察到按键改了风扇字节后，

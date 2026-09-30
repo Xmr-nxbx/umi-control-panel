@@ -756,8 +756,10 @@ class EcChannel:
     def set_mode(self, mode):
         if mode not in MODES:
             return False, '未知档位：%s' % mode
-        return False, ('档位寄存器语义未确认（MAFAN_CONTROL_BYTE=Turbo_Mode 与 '
-                       'MyFanCCI_Mode_Index=0 互相矛盾），不做猜测性写入')
+        return False, ('本通道不写档位：EC 的 `0x0751` 是**服务的输出不是输入**，'
+                       '裸写它只改指示灯、不动功耗墙（2026-09-30 12:19 实测，'
+                       '写完 100 秒 52 个采样点 PL1 死守 10 W）。改墙走 GCUBridge 的 '
+                       'OPERATING_*_MODE')
 
     # ---------- 写（默认关闭，需要 allow_write）----------
     def fan_modes(self):
@@ -767,12 +769,24 @@ class EcChannel:
     def set_fan_mode(self, flag_name, who='面板按钮'):
         """写风扇模式字节（Normal_Mode / Turbo_Mode / User_Fan_Mode …）。
 
-        这个字节就是实体「造物者模式」按键写的同一个寄存器，取值直接来自
-        OEM 自己的枚举 MyFanCTLByteFlag，写完立刻回读校验。
-        人工点按钮算一次人工意图：随后一段时间内自动跟随不许再来抢方向盘。
+        ⚠️ 名字里的「模式」是**从服务的输出上读来的**，不是我们能按下去的开关：
+        这个字节由服务的 `SetUserProfile` 写，我们写它**不动功耗墙、不动风扇表**，
+        唯一可见的效果是键盘那颗实体灯跟着变（2026-09-30 12:19 实测）。
+        取值来自 OEM 枚举 MyFanCTLByteFlag，写完立刻回读校验；
+        人工点按钮算一次人工意图：随后一段时间内自动跟随不许再来抢方向盘
+        （自动跟随现在被上面那段硬拦直接拒掉，根本不会写）。
         """
         if not self.allow_write:
             return False, 'EC 写入未开启（config.hardware.ec.allow_write=false）'
+        # 自动跟随**一律不许**写这个字节，代码里硬拦，不看配置项。
+        # 2026-09-30 12:19 实测：这个字节是服务的输出不是输入，写它不动 PL、
+        # 不动风扇表，唯一的效果是把键盘那颗实体灯的指示改掉——于是自适应每换一次档
+        # 就把灯拨到一个和真实功耗墙不符的状态（"灯说性能、墙说省电"）。
+        # 上一版开着 fan_follow_tier 就是在干这件事，所以本机 config 里那个 true
+        # 我们不打算再去改，直接在这儿拦住，免得跟着配置一起漂。
+        if not who:
+            return False, ('自动跟随不写档位字节：它只改指示灯、不改功耗墙'
+                           '（2026-09-30 12:19 实测，PL1 全程死守 10 W）')
         addr = self.addr(FAN_KEY)
         if addr is None:
             return False, '寄存器表里没有 %s' % FAN_KEY

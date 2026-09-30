@@ -4,6 +4,9 @@
 查不到、没验证过的能力一律标记为 unknown，UI 显示为不可用并说明原因。
 绝不向用户假装能控制我们其实控制不了的东西。
 """
+# 唯一的一套模式词定义在调度层，这里引用而不是再抄一份（scheduler 只 import deque，
+# 不依赖本模块，没有循环）。
+from app.policy.scheduler import TIER_LABELS
 
 CAP_MODE_READ = 'mode.read'          # 读 OEM 上报的档位（office/balance/turbo）
 CAP_MODE_WRITE = 'mode.write'        # 下发 OEM 档位
@@ -50,13 +53,29 @@ CAP_LABELS = {
 }
 
 MODES = ('office', 'balance', 'turbo')
-MODE_LABELS = {'office': '办公', 'balance': '均衡', 'turbo': '狂暴', 'unknown': '未知'}
+# 措辞：机主明确说过本机 Creator Center 界面上没有「办公/均衡/狂暴」这三档，
+# 这三个词不许当本机模式用（OEM 的 office/balance/turbo 只属于 GCUBridge 词汇）。
+# 所以标签从调度那套四档词（TIER_LABELS：省电/均衡/流畅/性能）派生，
+# 只加一个「OEM 硬件档」的来源后缀，免得和调度档位混淆 —— 全项目不许另造第三套说法。
+_MODE_TIER = {'office': 'eco', 'balance': 'bal', 'turbo': 'perf'}
+MODE_LABELS = dict([(m, '%s（OEM 硬件档）' % TIER_LABELS[t])
+                    for m, t in _MODE_TIER.items()])
+MODE_LABELS['unknown'] = '未知'
+# 只在本机做过「写 → 观察 EC 真变了 → 还原」的档位才允许上按钮。
+# 2026-09-30 12:19-12:24 实测：TURBO→PL1 10→75、OFFICE→PL1 75→10、再 TURBO→75，
+# 两个方向都改到了 EC 的 `0x0783`，都能还原。Gaming/balance 那一档**没验过**，
+# 而且 OEM 枚举里 OperatingMode 只认得到 0 和 2，先不放按钮。
+MODE_VERIFIED = ('office', 'turbo')
 
 # EC 风扇字节（OEM 枚举 MyFanCTLByteFlag 的名字）→ 硬件模式。
-# 取值一律用调度那套四档词（app.policy.scheduler.TIER_LABELS），不另造第三套说法。
-# 依据是 2026-09-30 的全表差分：按一次键，这个字节 0x10↔0xA0 的同时
-# PL1_SETTING_VALUE 75↔10、MYFAN2_L1/L4_PWM、DynamicBoost_MaxinumTGP 整组跟着换，
-# 满载实测差 23~26%。也就是说它是硬件模式的总开关，功耗墙是它的结果。
+# ⚠️ 2026-09-30 12:19 实测把这个方向**纠正过来了**：这个字节是**服务的输出，不是输入**。
+# 早先根据全表差分（按一次键，`0x0751` 0x10↔0xA0 的同时 PL1 75↔10）判成
+# 「它是硬件模式总开关，功耗墙是它的结果」——**因果搞反了**。真实机制是：
+# 按键 → EC 抬一个 WMI 事件（`176 = OSD_FanModeSwitch`）→ 服务的 `ModeSwitchChanged()`
+# 从它自己内部的模式推进 → `SetUserProfile` 一次性写 PL、风扇表**和这个字节**。
+# 所以我们**写**这个字节只会点亮 LED、把指示灯和服务的真实状态弄得不一致，
+# PL 一个字都不动（实测：写完 100 秒、52 个采样点，PL1 死守 10 W）。
+# 下面这张表因此只用于**读**（把服务写出来的字节认回模式），不用于写。
 HW_MODE_BY_FAN_FLAG = {'Turbo_Mode': 'perf', 'Normal_Mode': 'auto'}
 USER_FAN_PREFIX = 'User_Fan'          # 0x80 位：Mode/HiMode/Level1~5，全是低功耗档
 

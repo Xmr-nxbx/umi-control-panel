@@ -210,8 +210,9 @@ function renderHardware(s) {
   const ecCh = (s.channels || []).find((c) => c.name === 'ec') || {};
   const ecAlive = ecCh.alive === true;
   const keyFlag = FAN_KEY_FLAGS.indexOf(hw.fan_mode_flag) >= 0 ? hw.fan_mode_flag : null;
-  // 2026-09-30 全表差分（tools/ec_watch.py all）：实体键写的这个字节是硬件模式总开关，
-  // PL1 75W↔10W、风扇 PWM 表、TGP 都是它的结果。所以「硬件模式」这一行敢下结论了，
+  // 2026-09-30 12:19 实测纠正：这一行读的是**服务写出来的结果**，不是我们能按下去的原因。
+  // 按键 → EC 抬 WMI 事件 → 服务的 SetUserProfile 一次性写 PL、风扇表和这个字节，
+  // 所以「全亮 + PL1 75W」是真的同时出现，但**字节不是功耗墙的原因**。
   // 取值认不出来时照实写「未知」，不猜。
   const keyText = fanModeWord(hw.fan_mode_flag) || hw.fan_mode_flag
     || (ecAlive ? '未知' : '不可读');
@@ -261,6 +262,8 @@ function renderHardware(s) {
   // 只放实体按键真正会到的那几态（GCUBridge 在跑时是 0x10↔0xA0 两态循环，
   // 半亮那一态也留着，面板点得到）；User_Fan_Level1~5 是自定义曲线的子档，
   // 放上来只会让面板看起来比实际能控的东西多。
+  // ⚠️ 但这三个按钮**只改指示灯、不改功耗墙**（见下面 hw-hint 的说明）——
+  // 那个字节是服务的输出，不是输入。
   const flags = FAN_KEY_FLAGS.filter((f) => available.indexOf(f) >= 0);
   const lockLeft = (ecCh.detail || {}).fan_lock_left || 0;
   const lockBy = (ecCh.detail || {}).fan_lock_by;
@@ -268,10 +271,14 @@ function renderHardware(s) {
   const fanButtons = canFan ? flags.map((f) => `
     <button data-fan="${f}" class="${hw.fan_mode_flag === f ? 'primary' : ''}">${esc(fanModeWord(f) || f)}</button>`).join('') : '';
   const canWrite = (caps['mode.write'] || {}).state === 'verified';
-  const modes = ['office', 'balance', 'turbo'];
+  // 档位按钮由后端给清单，前端不许写死（上一版写死 office/balance/turbo，
+  // 结果 balance 点了只会报「未知档位」；而三个词用的还是本机界面里没有的
+  // 办公/均衡/狂暴）。清单里只有在本机做过「写→看 EC 真变了→还原」的那两档。
+  const mqttCh = (s.channels || []).find((c) => c.name === 'mqtt') || {};
+  const modeOpts = (mqttCh.detail || {}).mode_options || [];
   $('hw-buttons').innerHTML = fanButtons
-    + (canWrite ? modes.map((m) => `
-    <button data-mode="${m}">${esc((META.mode_labels || {})[m] || m)}</button>`).join('') : '')
+    + (canWrite ? modeOpts.map((o) => `
+    <button data-mode="${esc(o.id)}">${esc(o.label)}</button>`).join('') : '')
     + `<button class="ghost" id="btn-refresh-hw">立即自检通道</button>`;
   document.querySelectorAll('#hw-buttons button[data-fan]').forEach((b) => {
     b.onclick = async () => {
@@ -292,7 +299,6 @@ function renderHardware(s) {
     lastProbeAt = 0;
     autoProbe(true);
   };
-  const mqCh = (s.channels || []).find((c) => c.name === 'mqtt') || {};
   const why = (c) => (c.detail || {}).reason || '未探测';
   const hints = [];
   if (lockLeft) hints.push(`${lockBy || '人工'}优先，${Math.round(lockLeft)} 秒内面板不自动改硬件模式`);
@@ -301,7 +307,10 @@ function renderHardware(s) {
   if ((hw.fan_mode_flag || '').indexOf('User_Fan') === 0) {
     hints.push('⚠ 这一态把功耗墙压到 10W，满载实测慢 23~26%，换来的是安静和低温');
   }
-  if (!canWrite) hints.push('OEM 档位不可写：' + ((ecCh.detail || {}).write_reason || why(ecCh)));
+  // 上一版这里没有这条说明，结果「性能模式」按钮写着「功耗墙 75W」却是假的：
+  // 实测裸写那个字节 100 秒、52 个采样点，PL1 一次都没动（README 6.11 十五）。
+  if (canFan) hints.push('上面那三个按钮只改指示灯和字节，**改不动功耗墙**——要改墙请用下面的「OEM 硬件档」');
+  if (!canWrite) hints.push('OEM 档位不可写：' + ((mqttCh.detail || {}).mode_write_reason || why(mqttCh)));
   if (!canFan) hints.push('硬件模式不可写：' + ((ecCh.detail || {}).fan_mode_reason || why(ecCh)));
   $('hw-hint').textContent = hints.join('；');
   $('hw-hint').classList.toggle('err', !canWrite && !canFan);
