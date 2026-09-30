@@ -167,7 +167,9 @@ EC/ACPI 交互的设计思路参考社区项目 [OpenRevo](https://github.com/fa
 本项目为独立实现，不含其源码或二进制。硬件行为记录部分参考了
 [tongfang-gm7mg7p-re](https://github.com/ElDavoo/tongfang-gm7mg7p-re)、
 [uniwill-laptop-mr](https://github.com/Terabinaryte/uniwill-laptop-mr)、
-[mechrevo_ec_api](https://github.com/roj234/mechrevo_ec_api) 等社区逆向成果，
+[mechrevo_ec_api](https://github.com/roj234/mechrevo_ec_api)、
+[jialong-control-protocol](https://github.com/roxyyn0304/jialong-control-protocol)（蛟龙 16 Pro 2025 / AMD 平台，
+只用来交叉印证语义，地址与数值不搬用）等社区逆向成果，
 以及内核文档中的 [uniwill-laptop WMI 设备说明](https://docs.kernel.org/wmi/devices/uniwill-laptop.html)。
 均为离线阅读，未执行其中的脚本；厂商私有映射与机型表不在本仓库分发范围内。
 
