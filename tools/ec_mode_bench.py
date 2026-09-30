@@ -7,7 +7,7 @@ r"""实测「造物者模式」按键的三态到底改变了什么。
 PL1/PL2/PL4、MyFanCCI_Mode_Index 全部不动。所以这个工具回答的其实是：
 「只改风扇这一字节，满载时频率/温度/吞吐会不会跟着变」。
 
-安全约束（README 第 6.3 节，不可协商）：
+安全约束（notes/hardware-channels.md 6.3）：
   * 只写 OEM 枚举 MyFanCTLByteFlag 里的取值，不发明数值；
   * 全程可逆：先存原值，finally 里写回并回读确认；
   * 带温度保险：任一阶段超过 TEMP_ABORT 立即还原并停手；

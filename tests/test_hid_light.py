@@ -4,7 +4,7 @@
     runtime\\python.exe tests\\test_hid_light.py
 
 编码器的判据不是我自己想的，是**厂商写在 BIOS 命令面里的样例字节**
-（README 6.11 第九节：`LEDKB /SetData 0x08 0x03 0x0A 0x05 0x32 0x04 0x00 0xAF`、
+（notes/hardware-channels.md 6.11 第九节：`LEDKB /SetData 0x08 0x03 0x0A 0x05 0x32 0x04 0x00 0xAF`、
 `USBLB /SetMode 0x1A …` / `0x14 …` / `0x08 …`）。能逐字节复现它们，编码就是对的。
 
 通道那几条用例把「只读」这件事钉死：探测只允许改能力表，
@@ -279,7 +279,7 @@ def test_no_write_path():
                if re.match(r'^(send|write|apply)_', n) and callable(getattr(H, n))]
     check('模块里也没有写函数', not bad_mod, ','.join(bad_mod))
     check('探测之后写能力没被偷偷点亮', ch.caps[CAP_RGB_WRITE] == 'blocked')
-    check('blocked 的理由写明要机主在场', '机主' in ch.detail['write_reason'])
+    check('blocked 的理由写明要用户在场', '用户' in ch.detail['write_reason'])
 
 
 def test_status_and_helpers():

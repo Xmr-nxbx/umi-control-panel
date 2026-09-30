@@ -24,7 +24,7 @@ DEFAULTS = {
     'tray': {
         'enabled': True,
         # 按实体「造物者模式」键时在屏幕上方弹一条提示：Creator Center 卸载后
-        # 按键仍然生效但一个字都不弹，机主只能靠听风扇声猜。
+        # 按键仍然生效但一个字都不弹，用户只能靠听风扇声猜。
         'osd': True,
     },
     'scheduler': {
@@ -129,7 +129,7 @@ SCHEMES = {
 
 SCHEME_LABELS = {'balanced': '平衡', 'high_perf': '高性能', 'power_saver': '节能'}
 
-# 调度性格预设：机主不需要理解 cpu_perf=60 是什么意思，只需要说「我要安静」
+# 调度性格预设：用户不需要理解 cpu_perf=60 是什么意思，只需要说「我要安静」
 # 或「我要性能」。每一项是覆盖在 scheduler 默认值上的增量，标准档就是空覆盖。
 # 只动判定阈值与防抖时长，不动风扇映射——档位性格不该改变会写进硬件的东西。
 SCHED_PROFILES = {

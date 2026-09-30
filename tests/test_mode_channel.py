@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """档位写入通道的用例：钉死「谁是输入、谁是输出」这条刚被实测纠正过来的方向。
 
-2026-09-30 12:19-12:24 在本机做的可逆验证（README 6.11 十五）：
+2026-09-30 12:19-12:24 在本机做的可逆验证（notes/hardware-channels.md 6.11 十五）：
 
   1. 面板写 EC `0x0751 = 0x10`（Turbo_Mode），回读一致 —— **PL1 死守 10 W，
      100 秒 52 个采样点一次没动**。唯一可见效果是键盘那颗实体灯亮了。
@@ -16,7 +16,7 @@
   * 自动跟随不许写那个字节（它只会把物理指示灯拨到和真实功耗墙不符的状态）；
   * 按钮清单由后端给，且只含本机验过的档位（不许有点了报错的死按钮）；
   * 词表沿用调度那套（省电/均衡/流畅/性能），不许再用「办公/狂暴」——
-    机主明确说过本机 Creator Center 没有这三档。
+    用户明确说过本机 Creator Center 没有这三档。
 """
 import inspect
 import io
@@ -125,7 +125,7 @@ def t_echo_window_suppresses_key():
     st = _stub(echo_left=30.0)
     ec_gpd.EcChannel._watch(st)
     assert st.took == [], '回声窗口内还去抢「实体按键」优先锁：%s' % st.took
-    assert st.fired == [], '回声窗口内还触发了按键提示（会给机主弹假消息）：%s' % st.fired
+    assert st.fired == [], '回声窗口内还触发了按键提示（会给用户弹假消息）：%s' % st.fired
     assert st.changes and st.changes[0].get('echo'), '变化本身也该照实记下来'
 
 
@@ -134,7 +134,7 @@ def t_expired_window_still_detects_key():
     st = _stub(echo_left=0.0)
     ec_gpd.EcChannel._watch(st)
     assert st.took == ['实体按键'], '按键优先锁没抢，说明判定被写死了：%s' % st.took
-    assert len(st.fired) == 1, '屏幕提示没响，机主按了键不会有任何反馈'
+    assert len(st.fired) == 1, '屏幕提示没响，用户按了键不会有任何反馈'
     assert st.hold_last, '按键前后值没记录'
 
 

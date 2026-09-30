@@ -14,7 +14,7 @@
 操作建议：**一次只点一个功能，点完等 10 秒再点下一个**，并把顺序记下来。
 报告里每条消息都带时间戳，按你记的顺序就能一一对回去。
 
-安全边界（不可协商）：
+安全边界：
   * 除了 --ask 那一条 GETSTATUS，不 publish 任何主题；GETSTATUS 是问状态，不改设置；
   * 不打开 \\\\.\\ACPIDriver，不发 IOCTL，不读写任何 EC 寄存器；
   * 身份从 data\\mqtt_identity.json 读（已 gitignore），报告里绝不出现口令原文；

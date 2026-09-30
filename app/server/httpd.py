@@ -14,7 +14,7 @@ STATIC = {'/': ('index.html', 'text/html; charset=utf-8'),
 SENSITIVE_KEYS = {'password', 'token', 'secret'}
 
 # 面板每 2 秒轮询一次的地址。成功的轮询不记日志——
-# 一记就把「最近日志」刷满（600 行只够一分钟），机主真正想看的动作反而被挤掉。
+# 一记就把「最近日志」刷满（600 行只够一分钟），用户真正想看的动作反而被挤掉。
 # 出错（非 200）照样记。
 QUIET_PATHS = ('/api/state', '/api/history', '/api/logs', '/api/bench',
                '/style.css', '/app.js', '/favicon.ico', '/index.html')
@@ -34,7 +34,7 @@ LOOPBACK_HOSTS = ('127.0.0.1', 'localhost', '[::1]', '::1')
 def is_local_same_origin(headers):
     """写操作只接受「本机页面发来的、打在本机回环地址上的」请求。
 
-    面板只绑 127.0.0.1，但这挡不住 CSRF：机主浏览器里随便一个网页都能往
+    面板只绑 127.0.0.1，但这挡不住 CSRF：用户浏览器里随便一个网页都能往
     http://127.0.0.1:8747/api/action 发 POST，而那个接口能下发 OEM 硬件命令、
     还能把面板关掉。所以规矩是两条：
       * 带了 Origin/Referer 的，必须与本次请求的 Host 完全一致（浏览器发起的
@@ -126,7 +126,7 @@ def make_handler(daemon, cfg, on_shutdown):
                                  'state': daemon.hw.snapshot(),
                                  'caps': daemon.hw.capability_map()})
             elif path == '/api/health':
-                # 机主不是开发者：出问题时要能一行字讲清楚现状，所以体检结果直接给面板
+                # 用户不是开发者：出问题时要能一行字讲清楚现状，所以体检结果直接给面板
                 from app.cli import health_rows, health_text    # 延迟导入：cli 也 import 了本模块
                 rows = health_rows(cfg, daemon.log, state=daemon.state())
                 self._send(200, {'text': health_text(rows),

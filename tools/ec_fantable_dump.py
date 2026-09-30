@@ -3,7 +3,7 @@ r"""只读转储本机 EC 风扇表与相关档位字节。
 用途：任务 #31（风扇曲线读写实测）需要一份「写之前」的基线，写完再转储一次对比。
 本脚本**只发 ECREAD**，不发任何 ECWRITE，不改任何硬件状态。
 
-表布局来自厂商 FanTable_Manager1p5.SetEcFanTable 的解密源码（README 6.10 末尾）：
+表布局来自厂商 FanTable_Manager1p5.SetEcFanTable 的解密源码（notes/hardware-channels.md 6.10 末尾）：
     CPU  UpT = 0x0F00+i   DownT = 0x0F11+i   Duty = 0x0F20+i     (i = 0..15)
     GPU  UpT = 0x0F30+j   DownT = 0x0F41+j   Duty = 0x0F50+j     (j = 0..15)
     Duty 存的是「百分比 × 2」
@@ -37,7 +37,7 @@ SENTINEL = 0xFF
 
 # 表之外的上下文：档位字节、PL、以及 GM7MG7P 逆向里点名的几个状态字节。
 # 全是**已知语义的具体地址**，不做范围盲扫——兄弟板曾因为盲扫风扇转速寄存器
-# 把风扇扫停（README 6.11），所以这里一个多余的地址都不读。
+# 把风扇扫停（notes/hardware-channels.md 6.11），所以这里一个多余的地址都不读。
 CONTEXT = (
     (0x0751, 'MAFAN_CONTROL_BYTE 硬件模式总开关'),
     (0x0741, 'AP_OEM_BYTE：bit0=ap_exist，也是 EC 唯一的 PL 清零闸'),

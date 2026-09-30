@@ -4,7 +4,7 @@
     runtime\\python.exe tests\\test_fan_curve.py
 
 表布局来自同源机型反编译出的 FanTable_Manager1p5.SetEcFanTable / GetEcFanTable
-（README 6.11 第一节：0x740 PROJECT_ID 与 0x78E bit6 两个前提都在本机只读复核过）。
+（notes/hardware-channels.md 6.11 第一节：0x740 PROJECT_ID 与 0x78E bit6 两个前提都在本机只读复核过）。
 基线数据是 **2026-09-30 03:10:52 本机那次只读转储的真实读数**
 （tools/ec_fantable_dump.py，118 次读 0 次写；那份产物在 tools/out 不入仓库，
 所以把当时的字节值抄在这里钉住）。以后谁改了地址算法，跑一遍就知道有没有算歪。

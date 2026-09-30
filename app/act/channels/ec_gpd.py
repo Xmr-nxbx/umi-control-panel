@@ -1,6 +1,6 @@
 r"""EC 直连主通道：走 OEM 驱动的 IOCTL_GPD_ACPI_ECREAD，普通用户权限即可。
 
-这条路线是本机逆向确认后定下来的，过程写在 README 第 6 节，关键结论：
+这条路线是本机逆向确认后定下来的，过程写在 notes/hardware-channels.md 第 6 节，关键结论：
 
   * 微软文档化的 `\\.\ACPI`（IOCTL_ACPI_ASYNC_EVAL_METHOD）非管理员打不开（err=2），
     所以「自己拼 AeiC/ECRR 结构发给 ACPI.sys」这条路在这台机器上走不通；
@@ -11,7 +11,7 @@ r"""EC 直连主通道：走 OEM 驱动的 IOCTL_GPD_ACPI_ECREAD，普通用户�
     Version 1，再用 0x32C004 交给 ACPI.sys，最后校验 'AeoB' 响应；
   * 实测：读电量寄存器返回 100，与 GetSystemPowerStatus 的 100% 完全一致 → 布局证实。
 
-寄存器「名字 → 地址」的对应表不在仓库里（OEM 私有定义，README 第 8 节的承诺），
+寄存器「名字 → 地址」的对应表不在仓库里（OEM 私有定义，notes/verification-log.md 里的承诺），
 由 tools/gen_ec_map.py 在每台机器上从本机安装的 Creator Center 生成到
 data/ec_map.local.json。本文件只按名字取地址——**唯一的例外**是 16 点风扇表
 （见 FAN_TABLE_BASE 那段注释：厂商代码里就是字面量，反射表拿不到）。
@@ -91,7 +91,7 @@ SLOW_GROUPS = (
     #   厂商服务侧的 SetCpuTccOffset 也按这个语义写：使能时写 offset|0x80，不使能写 0。
     # 读它的理由：0x07D8-0x07DA 那三个 TCC 默认值（本机 5/5/5）**只有在 APTN 置位时
     # 才生效**。不看这一位，就没法判断降频点到底是 TjMax 还是 TjMax-5，
-    # 也就没法校准跑分工具那道 97 °C 保险（README 6.11 十三）。
+    # 也就没法校准跑分工具那道 97 °C 保险（notes/hardware-channels.md 6.11 十三）。
     # 60 秒一轮，不进 2 秒高频组。
     ('tcc', ('ADDR_L1_PWM_DEFAULT_MYFAN3',)),
 )
@@ -128,7 +128,7 @@ FAN_KEY_ECHO_S = 45.0
 USER_FAN_BIT = 0x80
 # 2026-09-30 01:16 观察3（logs/观察3 + tools/out/mqtt-watch.txt）把这两个字节钉死了，
 # 两条通道的时间戳能一一对齐，不再是「候选」：
-#   ADDR_STAUTS_BYTE   Win 键锁定：0=没锁，1=锁着。机主连点三次，MQTT 那边依次是
+#   ADDR_STAUTS_BYTE   Win 键锁定：0=没锁，1=锁着。用户连点三次，MQTT 那边依次是
 #                      WINKEY_LOCK / WINKEY_UNLOCK / WINKEY_LOCK，EC 这边依次
 #                      0→1、1→0、0→1（01:16:02→03、12→13、19→21）。
 #   ADDR_AP_OEM_BYTE4  电池充电那三档：高半字节就是档位，低半字节恒为 9。
@@ -144,13 +144,13 @@ USER_FAN_BIT = 0x80
 # 来自别的板子，判据是 0x742 bit2，本机读 0x742=2 → bit2=0，机制不在场。
 # 所以面板只报档位名、永不编百分比；open-revo 说的 100/80/60 是别的机型的说法。
 # 反过来，已经排除的：灯效不在 EC 上。LIGHTBAR_CONTROL_BYTE、RGBKB_LEVEL_R/G/B、
-# SINGLEKBL_ENABLE 在灯明明亮着的时候全是 0，机主点背光/灯条时全表也一个都没动；
+# SINGLEKBL_ENABLE 在灯明明亮着的时候全是 0，用户点背光/灯条时全表也一个都没动；
 # 走的是 GCUBridge 的 Keyboard/Ctrl（{"function":"SetPower","light":"3","speed":"2"}，
 # 控制器 solution=ITE、type=FourZone）。**根因也查到了**：ITE 8291 是 USB HID 设备
 # （048D:CE00 键盘 / 048D:6005 灯条），EC 侧灯条寄存器 0x0748-0x074B 在固件里零引用、
 # 写了也没效果；SINGLEKBL_ENABLE(0x78C) 只是个状态镜像，EC 固件从内部 0x0826 生成
 # bits5-7、厂商服务 SetBrightness 也 RMW 它、Fn+F6/F7 热键走 WMI 177/178——
-# 三个写者共用一个字节，所以它进了 README 6.3 第 8 条的永久禁区。
+# 三个写者共用一个字节，所以它进了 notes/hardware-channels.md 6.3 第 8 条的禁写清单。
 # 触摸板上有实体拨动开关，OEM 也另有
 # TOUCHPAD_TOGGLE_ON/OFF 命令——两条路会不会互相盖没验证过，面板只读。
 
@@ -158,7 +158,7 @@ USER_FAN_BIT = 0x80
 # （厂商代码里就是字面量 3840/3856/3872），本机反射出来的寄存器表根本没有它们。
 # 依据是 GM7MG7P 反编译出的 FanTable_Manager1p5.SetEcFanTable / GetEcFanTable
 # ——那份代码与本机同源（0x740 PROJECT_ID=15、0x78E bit6=IsSuportRamFan1p5 都为 1，
-# 两个前提都只读复核过，README 6.11 第一、六节）：
+# 两个前提都只读复核过，notes/hardware-channels.md 6.11 第一、六节）：
 #   升温点 UpT[i]   = mem[base + i - 1]，i=1..15（base+0x0F 从不参与；UpT[0] 恒为 0）
 #   降温点 DownT[i] = mem[base + 0x11 + i]，i=0..14（base+0x10 从不参与）；
 #                     i=15 时厂商读的是 base+0x1F，也就是和 i=14 同一个地址
@@ -171,7 +171,7 @@ FAN_TABLE_POINTS = 16
 FAN_TABLE_SENTINEL = 0xFF
 GPU_DUTY_MAILBOX = (13, 14, 15)
 # 按需读，不进轮询：一轮 92 个表地址 + 4 个语义位，约 30 次/秒
-# （README 6.3 第 6 条的上限是 62）。
+# （notes/hardware-channels.md 6.3 第 6 条的上限是 62）。
 FAN_CURVE_GAP_S = 0.03
 FAN_CURVE_MIN_S = 10.0            # 十秒内的重复请求直接回缓存，页面刷新不该打 EC
 FAN_CURVE_NOTE = ('这是 Creator Center 最后一次编进 EC RAM 的表，不一定是此刻真正在管风扇的表'
@@ -339,10 +339,10 @@ class EcChannel:
     def expect_fan_key_change(self, seconds=FAN_KEY_ECHO_S, why='面板刚下发过 OEM 档位命令'):
         """接下来一段时间里，`0x0751` 变了**不许**当成「有人按了实体键」。
 
-        为什么要这个：这个字节是服务的**输出**（见 README 6.11 十五），
+        为什么要这个：这个字节是服务的**输出**（见 notes/hardware-channels.md 6.11 十五），
         我们发一条 `OPERATING_*_MODE`，服务大约 24~26 秒后会自己把它写一次。
         上一版把这种回声认成按键，于是①给自己下一把 900 秒的按键优先锁
-        （自动跟随被冻住），②给机主弹一句"你按了造物者键"的假消息（实测复现两次：
+        （自动跟随被冻住），②给用户弹一句"你按了造物者键"的假消息（实测复现两次：
         12:24:29 与 12:59:39，两次都没人碰键盘）。
         变化本身照旧记录，只是不再归因成按键、不再触发屏幕提示。
         """
@@ -420,14 +420,14 @@ class EcChannel:
                 CAP_FAN_CURVE: 'verified' if (self._curve or {}).get('ok') else 'unknown',
                 CAP_FAN_CURVE_WRITE: 'blocked',
                 # mode.read/write 说的是 OEM 那套 office/balance/turbo：EC 侧没有这个
-                # 概念（机主确认 Creator Center 界面上也没有），只有 GCUBridge 认。
+                # 概念（用户确认 Creator Center 界面上也没有），只有 GCUBridge 认。
                 # 本机真正的硬件模式走风扇字节，见 hw_mode_of_fan_flag / derived['hw_mode']。
                 CAP_MODE_READ: 'unsupported', CAP_MODE_WRITE: 'blocked',
                 CAP_PL_WRITE: 'blocked',
             })
             self.detail['fan_curve_reason'] = (
                 '读已按同源机型的反编译布局实现（tools/ec_fantable_dump.py 先只读验证过一轮）；'
-                '写表还不许动：可逆验证要机主在场（存原值→写→回读→超温还原），'
+                '写表还不许动：可逆验证要用户在场（存原值→写→回读→超温还原），'
                 '而且「EC 里哪张表此刻在管风扇」还没逆向清楚。')
             if fan_reg is None or not fan_enum:
                 self.caps[CAP_FAN_MODE] = 'missing'
@@ -610,11 +610,11 @@ class EcChannel:
         out['fan_boost'] = None if ctl is None else bool(ctl & 0x40)
         # 硬件模式：2026-09-30 的全表差分给了答案 —— 风扇字节就是总开关，
         # 按一次键它 0x10↔0xA0 的同时 PL1_SETTING_VALUE 75↔10、MYFAN2_L1/L4_PWM、
-        # DynamicBoost_MaxinumTGP 整组跟着换（README 6.2）。映射表在 channels.base，
+        # DynamicBoost_MaxinumTGP 整组跟着换（notes/hardware-channels.md 6.2）。映射表在 channels.base，
         # 取值用调度那套四档词，认不出来就是 None，面板照实写「未知」。
         out['hw_mode'] = hw_mode_of_fan_flag(out['fan_mode_flag'])
         # OEM 那套 office/balance/turbo 是 GCUBridge 的说法，本机 Creator Center
-        # 界面上没有这三档（机主 2026-09-30 确认），EC 侧也不声称能读它。
+        # 界面上没有这三档（用户 2026-09-30 确认），EC 侧也不声称能读它。
         out['mode'] = None
         self.derived = out
 
@@ -668,7 +668,7 @@ class EcChannel:
 
         地址按 FAN_TABLE_BASE 上面那段注释的规则算，**不读厂商代码从不读的字节**
         （base+0x0F 和 base+0x10），也不做范围盲扫——兄弟板曾因为盲扫风扇转速寄存器
-        把风扇扫停（README 6.11），所以这里一个多余的地址都不碰。
+        把风扇扫停（notes/hardware-channels.md 6.11），所以这里一个多余的地址都不碰。
         """
         addrs = ([base + i for i in range(FAN_TABLE_POINTS - 1)]
                  + [base + 0x11 + i for i in range(FAN_TABLE_POINTS - 1)]

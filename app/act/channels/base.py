@@ -15,14 +15,14 @@ CAP_PL_WRITE = 'power_limit.write'
 CAP_FAN_RPM = 'fan.rpm'              # 风扇实时转速
 CAP_FAN_MODE = 'fan.mode'            # 风扇字节（OEM 枚举 MyFanCTLByteFlag），同时是硬件模式总开关
 CAP_FAN_CURVE = 'fan.curve'          # 读 16 点风扇表（表布局见 ec_gpd.FAN_TABLE_*）
-CAP_FAN_CURVE_WRITE = 'fan.curve.write'   # 写风扇表：布局已知，但可逆验证要机主在场
+CAP_FAN_CURVE_WRITE = 'fan.curve.write'   # 写风扇表：布局已知，但可逆验证要用户在场
 CAP_TEMP_EC = 'ec.temp'              # EC 侧温度传感器
 CAP_BATTERY_LIMIT = 'battery.limit'
 CAP_BATTERY_MODE_WRITE = 'battery.mode.write'   # 电池充电三档（平衡/健康/长效）
 CAP_WINKEY_WRITE = 'winkey.write'               # Win 键锁定开关
 CAP_DGPU = 'gpu.mux'
 CAP_RGB = 'lighting.rgb'
-CAP_RGB_WRITE = 'lighting.rgb.write'   # 写灯效：协议已逆出，但可逆验证要机主在场
+CAP_RGB_WRITE = 'lighting.rgb.write'   # 写灯效：协议已逆出，但可逆验证要用户在场
 
 ALL_CAPS = (CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ, CAP_PL_WRITE,
             CAP_FAN_RPM, CAP_FAN_MODE, CAP_FAN_CURVE, CAP_FAN_CURVE_WRITE,
@@ -30,9 +30,9 @@ ALL_CAPS = (CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ, CAP_PL_WRITE,
             CAP_BATTERY_MODE_WRITE, CAP_WINKEY_WRITE, CAP_DGPU, CAP_RGB, CAP_RGB_WRITE)
 
 CAP_LABELS = {
-    # 措辞跟着实测走（2026-09-30 全表观察，README 6.2）：本机的硬件模式总开关是
+    # 措辞跟着实测走（2026-09-30 全表观察，notes/hardware-channels.md 6.2）：本机的硬件模式总开关是
     # EC 风扇字节，功耗墙 PL1 是它的结果；OEM 那套 office/balance/turbo 是 GCUBridge
-    # 才认的说法，机主确认 Creator Center 界面上根本没有这三档，所以两件事分开命名。
+    # 才认的说法，用户确认 Creator Center 界面上根本没有这三档，所以两件事分开命名。
     CAP_MODE_READ: '读取 OEM 上报档位（office/balance/turbo）',
     CAP_MODE_WRITE: '下发 OEM 档位',
     CAP_PL_READ: '读取功耗墙 PL1/PL2/PL4',
@@ -53,7 +53,7 @@ CAP_LABELS = {
 }
 
 MODES = ('office', 'balance', 'turbo')
-# 措辞：机主明确说过本机 Creator Center 界面上没有「办公/均衡/狂暴」这三档，
+# 措辞：用户明确说过本机 Creator Center 界面上没有「办公/均衡/狂暴」这三档，
 # 这三个词不许当本机模式用（OEM 的 office/balance/turbo 只属于 GCUBridge 词汇）。
 # 所以标签从调度那套四档词（TIER_LABELS：省电/均衡/流畅/性能）派生，
 # 只加一个「OEM 硬件档」的来源后缀，免得和调度档位混淆 —— 全项目不许另造第三套说法。
@@ -108,7 +108,7 @@ def tcc_offset_of(raw):
 
 
 # 电池充电那三档。2026-09-30 01:16 观察3（logs/观察3 + tools/out/mqtt-watch.txt）两条通道
-# 同时对上号了：机主按「平衡 → 健康 → 长效」点过去，GCUBridge 的 BatteryProtection/Control
+# 同时对上号了：用户按「平衡 → 健康 → 长效」点过去，GCUBridge 的 BatteryProtection/Control
 # 依次收到 BALANCEDMODE / HEALTHYMODE / PERFORMANCEDMODE，EC 的 ADDR_AP_OEM_BYTE4 依次
 # 0x09 → 0x19 → 0x29 → 0x09。低半字节恒为 9，高半字节就是档位。
 # 界面词一律用 Creator Center 上的原话（平衡/健康/长效）——OEM 内部把「长效」叫
@@ -118,7 +118,7 @@ def tcc_offset_of(raw):
 # Stationary≥200、Balanced≥100、High capacity 0 mV/cell），代码里不存在任何百分比；
 # 0x0522 还 host 写不住（<101µs 被 EC 夺回）。那套「0x7C3/0x770 门控 → 0x87F 存储上限
 # → 每秒读 0x7B9」的百分比模型来自别的板子（无界 14XA），判据是 0x742 bit2，
-# 本机读到 0x742=2（bit2=0），机制不在场。见 README 6.11 第三节。
+# 本机读到 0x742=2（bit2=0），机制不在场。见 notes/hardware-channels.md 6.11 第三节。
 # 所以下面这张表只认档位名，永远不编百分比。
 # 档位编码本身拿到了独立印证：0x07A6 的 bits[5:4] = 00 High capacity(Standard/长效)、
 # 01 Balanced(Long_Life/平衡)、10 Stationary(Trickle/健康)，与观察3 抓到的
@@ -144,7 +144,7 @@ def battery_mode_of_oem_byte4(value):
 def win_locked_of_status_byte(value):
     """ADDR_STAUTS_BYTE → Win 键是否锁定。
 
-    2026-09-30 01:16 观察3：机主连点三次 Win 锁，这个字节 0→1→0→1，
+    2026-09-30 01:16 观察3：用户连点三次 Win 锁，这个字节 0→1→0→1，
     与同一时刻 MQTT 的 WINKEY_LOCK / WINKEY_UNLOCK / WINKEY_LOCK 一一对齐
     （01:16:02→03、01:16:12→13、01:16:19→21）。只见过 0 和 1，
     别的值说明这个字节还兼着别的意思，那就返回 None，不猜。

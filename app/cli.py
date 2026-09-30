@@ -281,7 +281,7 @@ def health_rows(cfg, log, state=None):
 
 def health_text(rows, head=''):
     """把体检结果压成一小段文本——面板上「复制诊断信息」用的就是它，
-    机主不用截图也不用描述「我点了什么」，粘过来就能看出问题在哪。"""
+    用户不用截图也不用描述「我点了什么」，粘过来就能看出问题在哪。"""
     lines = ['Umi Control Panel 体检  %s' % time.strftime('%Y-%m-%d %H:%M:%S')]
     if head:
         lines.append(head)

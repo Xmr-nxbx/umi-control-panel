@@ -78,7 +78,7 @@ def main():
             print('  %s %s  → %s  %s'
                   % (tag, ' '.join('%02X' % b for b in s),
                      ' '.join('%02X' % b for b in got), '一致' if got == want else '**不一致**'))
-    print('\n写通道状态：blocked（新写通道要先做一次可逆验证，见 README 6.3 第 2 条）')
+    print('\n写通道状态：blocked（新写通道要先做一次可逆验证，见 notes/hardware-channels.md 6.3 第 2 条）')
     return 1 if bad else 0
 
 

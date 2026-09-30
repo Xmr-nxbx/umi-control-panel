@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""灯效通道：ITE 8291 是 **USB HID 设备**，不在 EC 上（README 6.11 第四节）。
+"""灯效通道：ITE 8291 是 **USB HID 设备**，不在 EC 上（notes/hardware-channels.md 6.11 第四节）。
 
-6.7/6.10 那两轮观察里，机主点背光和灯条时 EC 全表一个字节都没动，
+6.7/6.10 那两轮观察里，用户点背光和灯条时 EC 全表一个字节都没动，
 `LIGHTBAR_CONTROL_BYTE`、`RGBKB_LEVEL_R/G/B`、`SINGLEKBL_ENABLE` 在灯亮着时全是 0——
 当时只能记一条阴性结论。原因后来查明了：真实通路是 HID `SET_REPORT` Feature。
 
@@ -18,7 +18,7 @@
 按 6.3 第 2 条，新的写通道要先满足「语义有佐证 / 可逆 / 有保险」才允许下发，
 可逆那半现在有了着落（固件侧 `LEDKB /GetStatus`、`USBLB /GetMode` 证明这两个设备
 都能读回当前设置，见 6.11 第九节②-补），但**读回本身也要先发一次报告才验得出来**，
-所以整套得等机主在场一次做完。灯效没有温度风险，缺的只是"能不能读回来"。
+所以整套得等用户在场一次做完。灯效没有温度风险，缺的只是"能不能读回来"。
 
 灯效枚举（呼吸/波浪那些 effect 编号）**没有查到**，所以这里不提供 effect 名字表，
 也不猜。已经拿到的语义只有三件：亮度 5 档 `0/8/22/36/50`、速度 5 档 `10/7/5/3/1`、
@@ -74,7 +74,7 @@ TARGETS = (
 )
 TARGET_BY_TRIPLE = dict(((t['vid'], t['pid'], t['usage_page']), t) for t in TARGETS)
 
-# 厂商自己写在 BIOS 命令面里的样例字节（README 6.11 第九节）。
+# 厂商自己写在 BIOS 命令面里的样例字节（notes/hardware-channels.md 6.11 第九节）。
 # 这五组是编码器唯一的判据：能逐字节复现它们，编码就是对的。
 VENDOR_KB_SAMPLES = (
     (0x08, 0x03, 0x0A, 0x05, 0x32, 0x04, 0x00, 0xAF),
@@ -380,7 +380,7 @@ class HidLightChannel:
         self.enum = HidEnumerator(log)
         self.caps = {CAP_RGB: 'unknown', CAP_RGB_WRITE: 'blocked'}
         self.detail = {'state': 'unknown', 'reason': '尚未探测',
-                       'write_reason': '新写通道，按 6.3 第 2 条要先做一次可逆验证（机主在场）'}
+                       'write_reason': '新写通道，按 6.3 第 2 条要先做一次可逆验证（用户在场）'}
         self.alive = False
         self.devices = {}
         self.ite_interfaces = []

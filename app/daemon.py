@@ -338,13 +338,13 @@ class Daemon:
             self.log.warn('[OSD] 弹提示失败（忽略）：%r' % (exc,))
 
     def on_fan_key(self, old, new):
-        """实体「造物者模式」键：机主眼里它就是模式键，那就让它真的切模式。
+        """实体「造物者模式」键：用户眼里它就是模式键，那就让它真的切模式。
 
-        2026-09-30 全表观察（README 6.2）证实这个键是硬件模式总开关：风扇字节
+        2026-09-30 全表观察（notes/hardware-channels.md 6.2）证实这个键是硬件模式总开关：风扇字节
         0x10 ↔ 0xA0 的同时 PL1_SETTING_VALUE 75 ↔ 10、风扇 PWM 表、TGP 一起换。
         所以三态要如实翻译成意图：全亮=锁定性能、半亮=自适应、不亮=锁定省电。
         上一版把「不亮」当成「只接管风扇、电源不变」，面板照旧显示自适应，
-        机主看到的状态和机器实际跑的档对不上。
+        用户看到的状态和机器实际跑的档对不上。
         """
         flag = self.hw.ec.fan_flag_name(new)
         intent = fankey.key_intent(flag)
@@ -357,7 +357,7 @@ class Daemon:
         self._osd(*fankey.key_text(flag))
 
     def set_sched_profile(self, name):
-        """调度性格：安静 / 标准 / 性能。给机主的「一个按钮」，
+        """调度性格：安静 / 标准 / 性能。给用户的「一个按钮」，
         而不是让他去理解 cpu_perf=60 这种数字。"""
         if name not in SCHED_PROFILES:
             return False, '未知性格：%s（可用：%s）' % (name, '/'.join(SCHED_PROFILES))
@@ -462,7 +462,7 @@ class Daemon:
         """每 0.5 秒刷一次进度和剩余时间。
 
         为什么不让 bench 自己报：一步卡住的话，按步骤算的条子就一动不动，
-        机主分不清是在跑还是死了。这里取两个来源的大值——
+        用户分不清是在跑还是死了。这里取两个来源的大值——
         步骤进度（准，但会停）和 已用时间÷预估总时长（粗，但一定在走），
         所以条子永远往前，剩余秒数则按已用时间现场反推，越跑越准。
         """

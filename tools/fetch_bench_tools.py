@@ -3,7 +3,7 @@
 
     runtime\\python.exe tools\\fetch_bench_tools.py
 
-面板里点跑分时也会自动做这件事，这个脚本只是让机主能手动补一次、看清缺了什么。
+面板里点跑分时也会自动做这件事，这个脚本只是让用户能手动补一次、看清缺了什么。
 """
 import os
 import sys

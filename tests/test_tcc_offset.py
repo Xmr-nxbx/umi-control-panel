@@ -7,7 +7,7 @@
   * 本机 Creator Center 的 ECSpec 叫它 ADDR_L1_PWM_DEFAULT_MYFAN3（风扇 PWM 默认值）；
   * 客服 ROM 里那份 DSDT 的 ECMG 字段表把它拆成 APTC(bit0-6) + APTN(bit7)，
     厂商服务侧的 SetCpuTccOffset 也按这个语义写：使能时写 offset|0x80，不使能写 0。
-认后一对（DSDT + 服务互相印证），理由记在 README 6.11 十二。
+认后一对（DSDT + 服务互相印证），理由记在 notes/hardware-channels.md 6.11 十二。
 
 为什么要读它：0x07D8-0x07DA 那三个「每档一个 TCC 偏移默认值」本机读出来是 5/5/5，
 但**只有 APTN 置位时才生效**——参考仓库 2026-09-23 的实测里这个字节一直是 0x00，
@@ -76,7 +76,7 @@ def _():
 
 # 下面两条钉的是「放在哪儿」，不是「怎么解」。
 # 0x0786 是 60 秒一轮的低频项：它不是每秒都在动的量，进 2 秒高频组
-# 就白占限速预算（README 6.3 第 6 条），而且会让全表差分的基线变脏。
+# 就白占限速预算（notes/hardware-channels.md 6.3 第 6 条），而且会让全表差分的基线变脏。
 @case('0x0786 在 60 秒低频组里，不在 2 秒高频组里')
 def _():
     from app.act.channels import ec_gpd

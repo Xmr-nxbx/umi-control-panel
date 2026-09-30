@@ -30,9 +30,9 @@
     "DISPLAY_CUSTOMIZED_MODE": {"topic": "display_control", "cap": "display.mode", "label": "显示-自定义"},
     "FN_WITH1_HOTKEY_TOGGLE_ON": {"topic": "setting_control", "cap": "fn.hotkey", "label": "Fn+F1 快捷键开"},
     "FN_WITH1_HOTKEY_TOGGLE_OFF": {"topic": "setting_control", "cap": "fn.hotkey", "label": "Fn+F1 快捷键关"},
-    "BALANCEDMODE": {"topic": "battery_control", "cap": "battery.mode.write", "label": "电池-平衡（EC AP_OEM_BYTE4 高半字节=1；未做可逆验证，机主同意前不下发）"},
-    "HEALTHYMODE": {"topic": "battery_control", "cap": "battery.mode.write", "label": "电池-健康（高半字节=2；未做可逆验证，机主同意前不下发）"},
-    "PERFORMANCEDMODE": {"topic": "battery_control", "cap": "battery.mode.write", "label": "电池-长效（高半字节=0，开机默认；未做可逆验证，机主同意前不下发）"},
+    "BALANCEDMODE": {"topic": "battery_control", "cap": "battery.mode.write", "label": "电池-平衡（EC AP_OEM_BYTE4 高半字节=1；未做可逆验证，用户同意前不下发）"},
+    "HEALTHYMODE": {"topic": "battery_control", "cap": "battery.mode.write", "label": "电池-健康（高半字节=2；未做可逆验证，用户同意前不下发）"},
+    "PERFORMANCEDMODE": {"topic": "battery_control", "cap": "battery.mode.write", "label": "电池-长效（高半字节=0，开机默认；未做可逆验证，用户同意前不下发）"},
     "TOUCHPAD_TOGGLE_ON": {"topic": "setting_control", "cap": "touchpad", "label": "触摸板开"},
     "TOUCHPAD_TOGGLE_OFF": {"topic": "setting_control", "cap": "touchpad", "label": "触摸板关"}
   },

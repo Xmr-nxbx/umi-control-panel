@@ -89,7 +89,7 @@ def _():
 
 
 def _with_history(rows, fn):
-    """把 data/bench.json 换成临时文件再跑，绝不碰机主的真实成绩。"""
+    """把 data/bench.json 换成临时文件再跑，绝不碰用户的真实成绩。"""
     tmp = tempfile.mkdtemp(prefix='umi-bench-')
     orig = bench.data_path
     bench.data_path = lambda name: os.path.join(tmp, name)
@@ -149,7 +149,7 @@ def _():
         v = power_verdict()
         assert v['effective'] is False, v
         assert '压不住' in v['reason'], v['reason']
-        # 只说「压不住」等于把机主晾在半路：必须给出那什么才压得住，
+        # 只说「压不住」等于把用户晾在半路：必须给出那什么才压得住，
         # 并且带上实测量级（2026-09-30 全表差分：风扇字节一动，PL1 75W↔10W）。
         assert 'EC 侧' in v['reason'] and '强冷' in v['reason'], v['reason']
         assert '23~26%' in v['reason'] and '75W/10W' in v['reason'], v['reason']

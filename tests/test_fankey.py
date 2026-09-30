@@ -5,7 +5,7 @@
 
 盯的是五件容易悄悄坏掉的事：
   * 全项目只有一套模式词（省电/均衡/流畅/性能），弹窗不许另造说法；
-  * 三态文案不能张冠李戴（把强冷说成自动，机主会以为按键坏了）；
+  * 三态文案不能张冠李戴（把强冷说成自动，用户会以为按键坏了）；
   * 实体键的三态映射到哪个控制意图（全亮→锁性能、半亮→自适应、不亮→锁省电）；
   * 风扇字节 → 硬件模式的映射表和 EC 通道共用一份，不许各存各的；
   * 认不出的取值照实说，不猜。
@@ -46,7 +46,7 @@ def _():
 @case('User_Fan 全家族 = 低功耗档：必须说省电模式和 10W，不许说「电源模式不变」')
 def _():
     # 2026-09-30 全表差分抓到这一态 PL1_SETTING_VALUE 从 75 掉到 10，
-    # 以前文案写「只接管风扇、电源不变」是错的，机主看到面板还显示自适应。
+    # 以前文案写「只接管风扇、电源不变」是错的，用户看到面板还显示自适应。
     for flag in ('User_Fan_Mode', 'User_Fan_HiMode', 'User_Fan_Level3'):
         title, sub = fankey.key_text(flag)
         assert title == '省电模式', (flag, title)
@@ -106,7 +106,7 @@ def _():
     assert fankey.key_intent('Turbo_Mode') == 'turbo'
     assert fankey.key_intent('Normal_Mode') == 'auto'
     # 不亮那一态是完整的低功耗档（PL1 10W），意图必须跟着落到省电，
-    # 否则面板显示自适应、机器跑省电档，机主看到的和实际的对不上。
+    # 否则面板显示自适应、机器跑省电档，用户看到的和实际的对不上。
     for flag in ('User_Fan_Mode', 'User_Fan_HiMode', 'User_Fan_Level3'):
         assert fankey.key_intent(flag) == 'office', flag
     # 认不出的取值不敢猜：只弹提示，不动电源。

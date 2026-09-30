@@ -4,7 +4,7 @@
 用途：搞清楚 OEM 用户态库（ACPIDriverDll.dll / GCUService.exe）到底提供了什么。
 输出：基本信息、导入表、导出表、.NET 判定、按关键字过滤的字符串。
 
-安全红线（见 README 第 6 节）：本工具不发任何 IOCTL，也不做穷举扫描。
+安全约束（见 notes/hardware-channels.md 第 6 节）：本工具不发任何 IOCTL，也不做穷举扫描。
 """
 import re
 import sys

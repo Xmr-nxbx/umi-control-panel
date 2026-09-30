@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """单次、只读、自校验的 EC 读取验证（IOCTL_GPD_ACPI_ECREAD）。
 
-安全红线（README 第 6 节）逐条对照：
+安全约束（notes/hardware-channels.md 第 6 节）逐条对照：
   * 不做任何穷举：IOCTL 码 0x9C40A488 是从 GCUService.exe 的常量表里取出来的，
     并且在 UWACPIDriver.sys 的分发链里确认存在（tools/ioctl_layout_probe.py）；
   * 缓冲布局不是猜的：驱动 ECREAD 处理函数把调用者输入缓冲的前 4 字节
@@ -103,7 +103,7 @@ def main(argv):
     if not ok:
         out('')
         out('[失败] %s' % fmt_err(err))
-        out('判读：请求被拒绝。按红线停手，不换布局重试。')
+        out('判读：请求被拒绝。按安全约束停手，不换布局重试。')
         return _finish(lines, 1)
 
     out('')
@@ -117,7 +117,7 @@ def main(argv):
         out('[存疑] 请求成功，但读到 %d，与系统电量 %d%% 不符（差 %d）。'
             % (low_byte, ps['battery_pct'], diff))
         out('可能：该地址在本机型不是电量，或返回值的字节序/宽度不同。')
-        out('按红线：不再试别的地址或布局，先把这个结果报给用户决定下一步。')
+        out('按安全约束：不再试别的地址或布局，先把这个结果报给用户决定下一步。')
         return _finish(lines, 2)
     out('[成功] 请求被驱动接受并返回数据（%d）。该地址没有独立参照，不做「已证实」的断言。'
         % low_byte)

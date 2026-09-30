@@ -4,7 +4,7 @@
   * 纯 Python 紧循环只压 CPU 整数单元，噪声大、和真实使用没关系，
     实测四档差距本来就只有 5~9%，噪声一盖就出现「省电档分数比性能档高」；
   * zstd 的 -b 基准模式是官方自带的真实负载（CPU + 内存带宽 + 多线程调度），
-    输出直接是 MB/s，机主看得懂、也没法被我们的解析代码编出来。
+    输出直接是 MB/s，用户看得懂、也没法被我们的解析代码编出来。
 工具来源：facebook/zstd v1.5.7 官方 GitHub Release（BSD-3-Clause / GPL-2.0 双许可），
 便携单文件放在 tools/bin/，不进仓库、不装系统、不写注册表。
 输入文件用固定随机种子生成，每次跑的内容完全一样，档位之间才可比。
@@ -356,7 +356,7 @@ class Bench:
     def run(self, label='', tier='', extra=None, progress=None):
         """跑一整轮。进度百分比按「这一步大概占多少时间」给，保证条子匀速往前走。
 
-        上一版的进度是按步骤号算的，一步卡住条子就完全不动，机主只能干等；
+        上一版的进度是按步骤号算的，一步卡住条子就完全不动，用户只能干等；
         而且最后停在 98%，看着就像没跑完。
         """
         def step(msg, pct):
@@ -573,13 +573,13 @@ def power_verdict():
         reason = ('实测性能档比省电档快 %s%%（%s），Windows 电源档位在本机有效。'
                   % (round(best_gain if best_gain is not None else spread, 1), freq_txt))
     else:
-        # 只说「压不住」等于把机主晾在半路：他真正要知道的是那什么才压得住。
-        # 本机实测（README 6.2 / 6.4）：EC 风扇字节就是硬件模式总开关，按一次键
+        # 只说「压不住」等于把用户晾在半路：他真正要知道的是那什么才压得住。
+        # 本机实测（notes/hardware-channels.md 6.2 / 6.4）：EC 风扇字节就是硬件模式总开关，按一次键
         # PL1_SETTING_VALUE 75W↔10W、风扇 PWM 表、TGP 整组跟着换，满载差 23~26%。
         reason = ('实测性能档只比省电档快 %s%%（%s），说明 BIOS/EC 接管了频率，'
                   'powercfg 那一层压不住。这台机器的性能墙在 EC 侧：风扇字节就是'
                   '硬件模式总开关，它一档 PL1 就在 75W/10W 之间换，满载实测差 23~26%%'
-                  '（README 6.2、6.4），所以面板在性能档会把它推到强冷；'
+                  '（notes/hardware-channels.md 6.2、6.4），所以面板在性能档会把它推到强冷；'
                   '反过来直接写 PL1_SETTING_VALUE 实测不生效（写完自清零），'
                   '所以不裸写功耗墙。'
                   % (round(best_gain if best_gain is not None else (spread or 0), 1), freq_txt))

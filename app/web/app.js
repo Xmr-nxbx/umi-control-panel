@@ -1,8 +1,8 @@
 'use strict';
 
-// 意图 → 档位的对应关系写在这里，面板上照着念，别让机主去猜。
+// 意图 → 档位的对应关系写在这里，面板上照着念，别让用户去猜。
 // 全项目只有一套模式词：省电/均衡/流畅/性能。意图就是「自适应 / 锁定某模式」，
-// 不再另造「办公/狂暴」——机主反馈过两套词并存根本对不上号。
+// 不再另造「办公/狂暴」——用户反馈过两套词并存根本对不上号。
 // tier=null 表示不锁档位（自适应），标题就显示调度器当前实际落在哪一档。
 const INTENTS = [
   { id: 'auto', name: '自适应', tier: null,
@@ -20,9 +20,9 @@ const TIERS = { perf: '性能', mid: '流畅', bal: '均衡', eco: '省电' };
 const BOOST_TEXT = { 0: '禁用', 1: '启用', 2: '激进', 3: '高效', 4: '高效激进', 5: '保证频率' };
 // 风扇模式字节取值来自 OEM 自己的枚举（MyFanCTLByteFlag）。这个字节就是本机硬件
 // 模式的总开关：按一次实体键，它 0x10↔0xA0 的同时 PL1_SETTING_VALUE 75↔10、
-// 风扇 PWM 表、TGP 整组跟着换（README 6.2）。
+// 风扇 PWM 表、TGP 整组跟着换（notes/hardware-channels.md 6.2）。
 // 中文词表不在这里存第二份——统一从后端 meta.fan_mode_words 拿，
-// 机主报过「网页一套词、弹窗一套词，对不上号」。
+// 用户报过「网页一套词、弹窗一套词，对不上号」。
 const FAN_KEY_FLAGS = ['Normal_Mode', 'User_Fan_HiMode', 'Turbo_Mode'];
 
 let META = { cap_labels: {}, mode_labels: {}, tier_labels: {}, fan_mode_words: {} };
@@ -63,7 +63,7 @@ function toast(text, bad) {
 }
 
 // ---------- 自动探测硬件通道 ----------
-// 以前要点「重新探测通道」才更新，机主点一次看到「自检通过」就不敢再动了，
+// 以前要点「重新探测通道」才更新，用户点一次看到「自检通过」就不敢再动了，
 // 也不知道下一次该什么时候点。现在改成：页面看得见就定时探，切回来也探一次，全部带防抖。
 // 防抖是必须的：一次探测要把 EC 的 125 个寄存器按 2 秒一轮的限速读一遍，
 // 快速来回切标签页要是每次都触发，等于让 EC 白忙，日志也会被刷满。
@@ -129,7 +129,7 @@ function renderPills(s) {
     pills.push(`<span class="pill warn">刚升上来，先稳住 ${Math.round(s.dwell_left)} 秒再考虑降档</span>`);
   }
   if (s.pending) {
-    // 「防抖」是工程词，机主看不懂。这里说清楚：想降档，但要连续观察一段时间才真降。
+    // 「防抖」是工程词，用户看不懂。这里说清楚：想降档，但要连续观察一段时间才真降。
     pills.push(`<span class="pill warn">准备换到 `
       + `${esc((META.tier_labels || {})[s.pending.tier] || s.pending.tier)}，`
       + `再观察 ${Math.round(s.pending.in_s)} 秒（免得来回跳档）</span>`);
@@ -242,7 +242,7 @@ function renderHardware(s) {
           : '未知', hw.battery_pct_ec != null),
     // 「未设限」这个说法是错的：本机根本没有百分比这套机制（封顶走充电电压，
     // 而那个寄存器 host 写不住）。这两个字节恒为 0，照实说清楚，别让人以为
-    // 「打开某个开关就能设 80%」。（README 6.11 第三节）
+    // 「打开某个开关就能设 80%」。（notes/hardware-channels.md 6.11 第三节）
     hwRow('充电阈值', hw.charge_limit_up
           ? (hw.charge_limit_up + '% / 回落 ' + (hw.charge_limit_down || '?') + '%')
           : '本机不按百分比设限（寄存器恒为 0）', hw.charge_limit_up != null),
@@ -303,12 +303,12 @@ function renderHardware(s) {
   const hints = [];
   if (lockLeft) hints.push(`${lockBy || '人工'}优先，${Math.round(lockLeft)} 秒内面板不自动改硬件模式`);
   else if (owned) hints.push('当前是低功耗档（自定义曲线），面板不会自动改（点上面的按钮可接管）');
-  // 这一态不是「只改风扇」：全表差分抓到 PL1 被压到 10W，满载实测慢 23~26%（README 6.4）
+  // 这一态不是「只改风扇」：全表差分抓到 PL1 被压到 10W，满载实测慢 23~26%（notes/hardware-channels.md 6.4）
   if ((hw.fan_mode_flag || '').indexOf('User_Fan') === 0) {
     hints.push('⚠ 这一态把功耗墙压到 10W，满载实测慢 23~26%，换来的是安静和低温');
   }
   // 上一版这里没有这条说明，结果「性能模式」按钮写着「功耗墙 75W」却是假的：
-  // 实测裸写那个字节 100 秒、52 个采样点，PL1 一次都没动（README 6.11 十五）。
+  // 实测裸写那个字节 100 秒、52 个采样点，PL1 一次都没动（notes/hardware-channels.md 6.11 十五）。
   if (canFan) hints.push('上面那三个按钮只改指示灯和字节，**改不动功耗墙**——要改墙请用下面的「OEM 硬件档」');
   if (!canWrite) hints.push('OEM 档位不可写：' + ((mqttCh.detail || {}).mode_write_reason || why(mqttCh)));
   if (!canFan) hints.push('硬件模式不可写：' + ((ecCh.detail || {}).fan_mode_reason || why(ecCh)));
@@ -317,7 +317,7 @@ function renderHardware(s) {
 }
 
 // GCUBridge 报上来的开关状态。这一块**只读**：语义还没逐条验证过，
-// 先让机主看得见「OEM 自己认为现在是什么状态」，再谈写（README 6.7）。
+// 先让用户看得见「OEM 自己认为现在是什么状态」，再谈写（notes/hardware-channels.md 6.7）。
 function onOff(v, onWord, offWord) {
   return v == null ? '未知' : (v ? onWord : offWord);
 }
@@ -412,7 +412,7 @@ function renderOem(s) {
 }
 
 // ---------- 风扇曲线（EC 直读，只读） ----------
-// 表布局来自同源机型反编译出的 SetEcFanTable/GetEcFanTable（README 6.11）：
+// 表布局来自同源机型反编译出的 SetEcFanTable/GetEcFanTable（notes/hardware-channels.md 6.11）：
 // 升温点 mem[base+i-1]、降温点 mem[base+0x11+i]、占空比 mem[base+0x20+i]/2。
 // 这块**按需**取数：一轮近百次读约 3 秒，不进 2 秒轮询，页面不点就不打 EC。
 let curveData = null;
@@ -490,7 +490,7 @@ async function loadFanCurve(say) {
         : ('读取不完整：' + (curveData.reason || '未知原因')), !curveData.ok);
     }
   } catch (e) {
-    // 读失败不清掉上一次的结果：机主宁可看着旧表也不想看到卡片突然空掉。
+    // 读失败不清掉上一次的结果：用户宁可看着旧表也不想看到卡片突然空掉。
     // 旧表有多旧，提示行里写着（缓存几秒前 / 什么时候读的）。
     if (say) toast('读取失败：' + e.message, true);
   }
@@ -523,7 +523,7 @@ function renderTier(s) {
   const it = INTENT_BY_ID[s && s.intent] || INTENT_BY_ID.auto;
   const locked = !!(s && s.intent && s.intent !== 'auto');
   // 标题必须同时说清「你选了什么」和「机器现在在哪一档」：
-  // 之前只显示档位，机主选了自适应却看到标题一会儿流畅一会儿性能，以为按键坏了。
+  // 之前只显示档位，用户选了自适应却看到标题一会儿流畅一会儿性能，以为按键坏了。
   $('tier-intent').textContent = s
     ? `控制意图：${it.name}${locked ? '' : '（不锁模式，按负载自动换）'}`
     : '控制意图：--';
@@ -798,7 +798,7 @@ async function loadLogs() {
 
 $('btn-refresh-logs').onclick = loadLogs;
 $('btn-diag').onclick = async () => {
-  // 机主不用截图、也不用描述「我点了什么」：体检结果 + 最近日志一次拷走
+  // 用户不用截图、也不用描述「我点了什么」：体检结果 + 最近日志一次拷走
   try {
     const h = await api('/api/health');
     const logs = await api('/api/logs?n=40');
@@ -826,7 +826,7 @@ $('btn-diag').onclick = async () => {
 };
 $('btn-bench-current').onclick = () => startBench('current');
 $('btn-bench-compare').onclick = () => startBench('compare');
-// 风扇曲线不自动读：一轮近百次读约 3 秒，只有机主点了才打 EC
+// 风扇曲线不自动读：一轮近百次读约 3 秒，只有用户点了才打 EC
 $('btn-fan-curve').onclick = () => loadFanCurve(true);
 $('btn-stop').onclick = async () => {
   if (!confirm('确定停止面板服务？停止后自适应调度与掉档守护都会失效。')) return;
@@ -844,7 +844,7 @@ setInterval(loadLogs, 10000);
 setInterval(loadHistory, 5000);
 setInterval(scheduleProbe, PROBE_EVERY_MS);
 // 切回这个页面时：立刻补一次数据，再顺带探一次通道（都带防抖）。
-// 页面看不见时什么都不发——面板是常驻的，机主可能几天不看一眼，
+// 页面看不见时什么都不发——面板是常驻的，用户可能几天不看一眼，
 // 没必要在后台一直打 HTTP 和读 EC 寄存器。
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;

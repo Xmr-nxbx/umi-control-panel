@@ -27,7 +27,7 @@ STATUS_TOPICS = ('Tray/Status', 'Fan/Status', 'Setting/Status', 'Keyboard/Status
 # OperatingMode 的取值只认 OEM 自己枚举里有的：OperatingMode{Office:0, Turbo:2}
 # （tools/oem_constant_dump.ps1 导出）。以前这张表还写了 1→balance、3→turbo，
 # 那是照抄别家的猜测，和 OEM 枚举直接矛盾；实测 Tray/Status 报的就是 1/2 这类
-# 没定义的值，硬翻译成「均衡」等于在面板上编一个本机不存在的档（机主明确说过
+# 没定义的值，硬翻译成「均衡」等于在面板上编一个本机不存在的档（用户明确说过
 # Creator Center 里没有办公/均衡/狂暴）。认不出来就写 unknown，并把原始值暴露出去。
 MODE_FIELD = {'0': 'office', '2': 'turbo'}
 MODE_ACTION = {'office': 'OPERATING_OFFICE_MODE', 'turbo': 'OPERATING_TURBO_MODE'}
@@ -224,7 +224,7 @@ class MqttChannel(Channel):
         self.alive = True
         self.caps[CAP_MODE_READ] = 'verified'
         self.caps[CAP_PL_READ] = 'verified'
-        # 写档位：2026-09-30 12:19-12:24 做完整可逆验证（README 6.11 十五）。
+        # 写档位：2026-09-30 12:19-12:24 做完整可逆验证（notes/hardware-channels.md 6.11 十五）。
         # 关键发现是**方向反了**：EC 的 `0x0751`（面板风扇模式字节）是**服务的输出，不是输入**。
         # 只写那个字节 → PL1 死守 10 W，100 秒 52 个采样点一次没动；
         # 改发本动作 → 约 24 秒后 PL1 从 10 爬到 75，服务同时把 `0x0751` 写成 0x10。
@@ -244,13 +244,13 @@ class MqttChannel(Channel):
         # 延迟约 6 秒），再下发 WINKEY_LOCK 又回到 1，EC 直读与 Setting/Status 两条通道
         # 读数一致。天然可逆、无温度风险，所以升成 verified，面板可以点亮这个开关。
         self.caps[CAP_WINKEY_WRITE] = 'verified'
-        # 电池充电三档：动作名和 EC 落点都对上了（README 6.8），但没做过可逆验证，
+        # 电池充电三档：动作名和 EC 落点都对上了（notes/hardware-channels.md 6.8），但没做过可逆验证，
         # 而且上游 Linux 驱动因为 2020 年前后的机型出过「开充电限制把电池搞坏」的事故，
         # 直接封死了强开路径（CVE-2026-64143）。本机正是那一代，所以保持 unknown。
         self.caps[CAP_BATTERY_MODE_WRITE] = 'unknown'
         self.detail['battery_write_reason'] = ('档位语义已确认，但充电门控在同代机型上有'
                                                '损坏电池的前例（CVE-2026-64143），'
-                                               '机主点头之前不下发')
+                                               '用户点头之前不下发')
         self.detail['reason'] = '已连接 GCUBridge'
         cli.publish('Setting/Control', json.dumps({'Action': 'GETSTATUS'}))
         last_ping = time.time()
@@ -358,7 +358,7 @@ class MqttChannel(Channel):
 
         这些字段的值就是 OEM 的原文（WINKEY_STATUS_LOCK 这种），照实转成布尔/词，
         并把原文留在 `_raw` 里，认不出来就是 None——面板不猜。
-        2026-09-30 00:27 那一条 GETSTATUS 的完整回报见 README 6.6/6.7。
+        2026-09-30 00:27 那一条 GETSTATUS 的完整回报见 notes/hardware-channels.md 6.6/6.7。
         """
         def data(topic):
             return (payloads.get(topic) or {}).get('data') or {}
@@ -390,7 +390,7 @@ class MqttChannel(Channel):
         out = {
             # Win 键锁定：OEM 原文 WINKEY_STATUS_LOCK / _UNLOCK，命令是
             # Setting/Control {"Action":"WINKEY_LOCK"|"WINKEY_UNLOCK"}。
-            # 2026-09-30 01:16 观察3 已确认：机主连点三次，这里的 LOCK/UNLOCK/LOCK
+            # 2026-09-30 01:16 观察3 已确认：用户连点三次，这里的 LOCK/UNLOCK/LOCK
             # 与 EC 的 ADDR_STAUTS_BYTE 0→1→0→1 逐条对齐。
             'win_key_locked': flag(setting.get('WinKey'), 'LOCK'),
             # 触摸板：本机触摸板上有个**实体拨动开关**，这是它的读数。OEM 字符串表里
