@@ -233,6 +233,24 @@ function battText(hw) {
   return '未知';
 }
 
+// OEM 自己报的功耗墙边界（10~120 W 那种）。边界由哪条通道报不写死：找带 detail.pl_bounds
+// 的那一条，找不到就整块不显示——不编默认值，也不显示成 0~255 那种假区间。
+function wallBoundsRows(hw) {
+  const ch = (hw.channels || []).find((c) => (c.detail || {}).pl_bounds);
+  const bounds = ch ? ch.detail.pl_bounds : null;
+  if (!bounds) return [];
+  const out = [];
+  for (const [name, lo, hi] of [['PL1', 'pl1_min', 'pl1_max'],
+                                ['PL2', 'pl2_min', 'pl2_max'],
+                                ['PL4', 'pl4_min', 'pl4_max']]) {
+    const a = bounds[lo], b = bounds[hi];
+    // 缺半边就不显示这一条：只有下限没有上限的区间是假话
+    if (a == null || b == null) continue;
+    out.push(hwRow(`${name} 允许范围`, `${a} ~ ${b} W`, true));
+  }
+  return out;
+}
+
 function renderHardware(s) {
   const caps = s.capabilities || {};
   const hw = s.hardware || {};
@@ -258,6 +276,11 @@ function renderHardware(s) {
           : '未知', hw.fan_duty_l != null),
     hwRow('PL1 / PL2' + plNote, hw.pl1 != null ? (hw.pl1 + 'W / ' + (hw.pl2 != null ? hw.pl2 + 'W' : '?'))
           : '未知', verified('power_limit.read')),
+    hwRow('功耗墙 PL1/PL2/PL4', hw.pl1_setting != null
+          ? ([hw.pl1_setting, hw.pl2_setting, hw.pl4_setting]
+               .map((v) => (v == null ? '—' : v + ' W')).join(' / '))
+          : '未知', verified('power_limit.write')),
+    ...wallBoundsRows(hw),
     // 这一行是为了不让人误读上面那三个 TCC 默认值（0x07D8-0x07DA，本机 5/5/5）：
     // 那三个数只有在 0x0786 的使能位（APTN, bit7）置起来时才生效，而参考仓库
     // 实机抓取里这个字节一直是 0x00。所以「降频点 = TjMax−5 = 95 °C」是错的推论。
@@ -720,6 +743,10 @@ const SERIES = {
     { key: 'gpu_pct', label: 'GPU 占用', axis: 'L', unit: '%', color: '#4a9df8', max: 100 },
     { key: 'fan_rpm', label: '风扇转速', axis: 'R', unit: ' RPM', color: '#4ade80' },
   ],
+  // 墙单独一轴：60 W 和 1500 MHz 差 25 倍，和工作温度/占用塞同轴会把墙压成一条直线
+  wall: [
+    { key: 'pl1_setting', label: 'PL1 功耗墙', axis: 'L', unit: ' W', color: '#c084fc' },
+  ],
 };
 
 function niceMax(v, floor) {
@@ -847,6 +874,7 @@ async function loadHistory() {
     histData = d;
     drawChart('chart-temp', SERIES.temp, d);
     drawChart('chart-load', SERIES.load, d);
+    drawChart('chart-wall', SERIES.wall, d);
     const n = (d.samples || []).length;
     $('hist-range').textContent = n ? `最近 ${Math.round(((d.samples[d.samples.length - 1].t - d.samples[0].t) / 60) || 0)} 分钟 · ${n} 个点` : '暂无数据';
   } catch (e) { /* 服务未就绪时静默 */ }
@@ -923,4 +951,5 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('resize', () => {
   drawChart('chart-temp', SERIES.temp, histData);
   drawChart('chart-load', SERIES.load, histData);
+  drawChart('chart-wall', SERIES.wall, histData);
 });

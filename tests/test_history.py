@@ -132,6 +132,22 @@ def _():
         os.path.exists(path) and os.unlink(path)
 
 
+@case('功耗墙 PL1 进历史：有值存成数字，缺了是 null 不是 0')
+def _():
+    from app.history import FIELDS
+    assert 'pl1_setting' in FIELDS, FIELDS
+    h, path = mk()
+    try:
+        h.record({'sensor': {}, 'hardware': {'pl1_setting': 60}}, 'bal', now=1000.0)
+        assert h.samples[0]['pl1_setting'] == 60.0, h.samples[0]['pl1_setting']
+        # 缺读数必须是 None：0 会被画成「墙被压到 0」，那是假话
+        h.record({'sensor': {}, 'hardware': {}}, 'bal', now=1005.0)
+        assert h.samples[1]['pl1_setting'] is None, h.samples[1]['pl1_setting']
+    finally:
+        h.close()
+        os.path.exists(path) and os.unlink(path)
+
+
 def main():
     print('历史缓冲：%d 个场景' % len(CASES))
     bad = 0

@@ -1,0 +1,103 @@
+# -*- coding: utf-8 -*-
+"""功耗墙「只读展示」的边界：展示字段不许变成写路径（不连硬件）。
+
+    runtime\\python.exe tests\\test_pl_readonly.py
+
+这一批给面板加了三样只读的东西：读数行（PL1/PL2/PL4）、历史曲线（pl1_setting）、
+OEM 边界（detail.pl_bounds）。它们都必须是**展示**，不能顺手变成写口：
+`pl_bounds` 出现在 set_power_limits / send_action 的函数体里就意味着边界被拿去写，
+而不是给人看；`httpd.py` 里多一条 POST 就是多一个能改状态的入口。
+"""
+import inspect
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app.act.channels import mqtt_gcu   # noqa: E402
+
+CASES = []
+
+
+def case(name):
+    def deco(fn):
+        CASES.append((name, fn))
+        return fn
+    return deco
+
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def read_src(*parts):
+    with open(os.path.join(REPO, *parts), encoding='utf-8') as f:
+        return f.read()
+
+
+@case('mqtt_gcu 源码里确实挂了 pl_bounds（只读展示字段）')
+def _():
+    src = read_src('app', 'act', 'channels', 'mqtt_gcu.py')
+    assert "self.detail['pl_bounds']" in src
+
+
+@case('pl_bounds 不许出现在 set_power_limits 的函数体里（展示字段不是写路径）')
+def _():
+    body = inspect.getsource(mqtt_gcu.MqttChannel.set_power_limits)
+    assert 'pl_bounds' not in body, body
+
+
+@case('pl_bounds 不许出现在 send_action 的函数体里')
+def _():
+    body = inspect.getsource(mqtt_gcu.MqttChannel.send_action)
+    assert 'pl_bounds' not in body, body
+
+
+@case('httpd.py 没有新增 POST 路由（do_POST 里 elif path == 仍是 8 条）')
+def _():
+    src = read_src('app', 'server', 'httpd.py')
+    seg = src.split('def do_POST', 1)[1]
+    seg = re.split(r'\n    def ', seg, 1)[0]          # 截到下一个方法定义
+    n = len(re.findall(r'elif path ==', seg))
+    assert n == 8, 'POST 路由数变了（%d 条），这一批只该做只读展示' % n
+
+
+@case('httpd.py 源码里没有 pl_bounds（展示字段不进 HTTP 层，走 hardware 快照）')
+def _():
+    assert 'pl_bounds' not in read_src('app', 'server', 'httpd.py')
+
+
+@case('前端三样都在：读数行 / 独立曲线组 / OEM 边界行')
+def _():
+    js = read_src('app', 'web', 'app.js')
+    assert "hwRow('功耗墙 PL1/PL2/PL4'" in js
+    assert 'wall: [' in js and "key: 'pl1_setting'" in js
+    assert 'wallBoundsRows' in js and 'pl_bounds' in js
+    html = read_src('app', 'web', 'index.html')
+    assert 'id="chart-wall"' in html
+
+
+@case('功耗墙说明原文照抄，没有被改写（机主不是开发者，这句话是给他看的）')
+def _():
+    html = read_src('app', 'web', 'index.html')
+    assert '由 OEM 服务按档位下发' in html and '几十秒内改回去' in html
+
+
+def main():
+    bad = 0
+    for name, fn in CASES:
+        try:
+            fn()
+            print('  ok  %s' % name)
+        except AssertionError as exc:
+            bad += 1
+            print('  FAIL %s -> %r' % (name, exc))
+        except Exception as exc:                          # noqa: BLE001
+            bad += 1
+            print('  ERR  %s -> %s: %s' % (name, type(exc).__name__, exc))
+    print('%d/%d 通过' % (len(CASES) - bad, len(CASES)))
+    return 1 if bad else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

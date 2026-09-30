@@ -20,7 +20,7 @@ KEEP_S = 30 * 60.0          # 屏幕上保留 30 分钟
 SAVE_EVERY_S = 60.0
 MAX_SAMPLES = int(KEEP_S / SAMPLE_S) + 4
 FIELDS = ('cpu_pct', 'gpu_pct', 'cpu_temp', 'cpu_mhz', 'fan_rpm', 'fan2_rpm',
-          'fan_duty_l', 'battery_pct_ec')
+          'fan_duty_l', 'battery_pct_ec', 'pl1_setting')
 
 
 class History:
