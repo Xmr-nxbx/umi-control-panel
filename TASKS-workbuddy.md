@@ -1,7 +1,8 @@
 # 交接：给 workbuddy 的三条活（2026-09-30 第二批）
 
-基线：分支 `workbuddy/assist2` 与 `main` 同点，就是**本文档所在的那个提交**
-（下面所有 diff 命令都写成 `main..workbuddy/assist2`，不依赖具体哈希）。指针我已建好，你自己 `git switch`。
+基线：**本文档所在的那个提交**（`git log -1 --format=%h -- TASKS-workbuddy.md` 自己查）。
+你直接在当前工作树的 `main` 上提交，**不切分支**（原因见「交付方式」第 1 条）。
+下面凡是写 `<基线>..main` 的地方，都指这一段。
 上一条交接（`run_tests.py` / `app/fanrules.py` / `tools/selfcheck.py`）已合并，文档已删；
 这次沿用同一套规矩：**三条活、文件互不重叠、净 diff 只许出现约定文件**。
 
@@ -130,7 +131,7 @@
    ③ `app/server/httpd.py` 源码里**没有**新增 POST 路由
    （数一下 `do_POST` 里 `elif path ==` 的条数，与基线一致）。
 
-**验收**：`run_tests.py` 全绿；`git diff --stat main..workbuddy/assist2 -- app/server/httpd.py`
+**验收**：`run_tests.py` 全绿；`git diff --stat <基线>..main -- app/server/httpd.py`
 必须是空的（这个文件你根本不该碰）。
 
 ---
@@ -213,17 +214,22 @@
 
 ## 交付方式
 
-1. 分支 `workbuddy/assist2`（基线见文首）。**切分支前先确认面板已停**：
-   切工作树会把 `main.py` / `app/` 换成另一份，正在跑的面板会读到不一致的文件。
-   你不许自己停面板（铁律 1）——所以要切分支，先在交付说明里写一句让我来切。
+1. **就在当前工作树的 `main` 上干，不许切分支、不许建分支、不许 `git worktree add`。**
+   面板正跑在这个工作树上：切分支会把 `main.py` / `app/` 换成另一份，让它读到不一致的文件；
+   而停面板的代价是机器当场卡（铁律 1）。所以这一批**不走分支隔离**，改用「基线 + 提交在本地待审」：
+   基线 = 本文档最后一次被修改的那个提交，用
+   `git log -1 --format=%h -- TASKS-workbuddy.md` 自己查；你的提交叠在它上面。
+   （`workbuddy/assist2` 那个指针我留着当退路，你不用切过去。）
 2. **一条任务一个提交**，提交信息中文，照 `git log --oneline -6` 的风格：
    一句话说清「为什么」，不是「改了什么」。
+   **我 review 通过之后才会 push**，所以你的提交会先在本地 `main` 上待着——
+   这不是问题，别因为「怕污染 main」就改成不提交或者一把梭一个大提交。
 3. `git add` **只加你被允许的文件**。**不许 `git add -A` / `git add .`**：
    你自己的 `.workbuddy/` 我已经写进 `.git/info/exclude`（本地生效、不进仓库），
    所以正常情况下 `git status` 应该**始终是干净的**；
    如果你那边冒出别的未跟踪文件，先停下来在交付说明里问，别自己决定加不加。
 4. **不许 push。**
-5. 交付说明写在仓库根 `HANDOFF-RESULT.md`（我合并时会删掉），内容：
+5. 交付说明写在仓库根 `HANDOFF-RESULT.md`（我收活后会删掉），内容：
    每条任务的实测命令与输出摘要、你自己发现的疑点、以及任何你**没做**的事和原因。
 6. 交付前自己跑一遍：
    ```
@@ -244,12 +250,12 @@
 - 功耗墙的**写入** UI：先解决「服务 30 秒改回去」和「档位除了墙还改了什么」再说。
 - 退出时是否把档位交还 OEM 服务（未决，机主还没表态）。
 
-## 我合并时会查什么
+## 我收活时会查什么
 
-- `git diff --stat main..workbuddy/assist2` 只出现约定的文件；
+- `git diff --stat <基线>..main` 只出现约定的文件；
   出现 `app/server/httpd.py`、`app/act/hardware.py`、`app/act/power.py`、`app/policy/`、
   `.gitignore`、`data/` 任一改动 → 直接退回。
-- `git diff main..workbuddy/assist2 -- app/act/` 只允许 `mqtt_gcu.py` 那一行 `pl_bounds`。
+- `git diff <基线>..main -- app/act/` 只允许 `mqtt_gcu.py` 那一行 `pl_bounds`。
 - 你新增的文件里 grep 到 `ctypes` / `CreateFile` / `DeviceIoControl` / `paho` /
   `socket.socket` / `requests` 任一个 → 退回（`selfcheck.py` 已有的 `urllib` 不算，那是它本来的）。
 - 测试文件我自己通读一遍，并且自己造一个失败用例，确认你的断言**真的会红**。
