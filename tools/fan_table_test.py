@@ -26,6 +26,7 @@ GPU 点 13/14/15 的占空比槽是厂商信箱、不写。括号 `0x07C6` bit2 
 import os
 import socket
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -33,8 +34,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import app.fanrules as fanrules                          # noqa: E402
 from app.act.channels.ec_gpd import FAN_TABLE_BASE       # noqa: E402
 from app.act.channels.ec_gpd import EcChannel            # noqa: E402
+from app.act.channels.mqtt_gcu import MqttChannel        # noqa: E402
+from app.bench import Bench                              # noqa: E402
 from app.config import Config                            # noqa: E402
 from app.logx import Log                                 # noqa: E402
+from app.sense.clock import ClockSense                   # noqa: E402
+from app.sense.gpu import GpuSense                       # noqa: E402
 from app.sense.system import power_status                # noqa: E402
 from app.sense.thermal import Thermal                    # noqa: E402
 
@@ -43,9 +48,13 @@ PANEL_ADDR = ('127.0.0.1', 8747)
 TEMP_GUARD_C = 85.0
 GAP_S = 0.05            # 每字节之间的节流：EC 是慢设备，狂写会丢字节
 OBSERVE_S = 45.0        # EC 平滑 30~40 秒，短了量不到
+LOAD_S = 40.0           # 只给 CPU 表用：0xA0 档实测点 1 触发温度 53 °C、空载只有 47 °C
+MODE_WAIT_S = 40.0      # 切档实测 24 秒生效，留到 40 秒
+TABLE_FOLLOW_DEV = 8.0  # 实测占空与表里该点的占空差几个点以上，就认定 EC 没在看这张表
 FAIL_BREAK = 5
 BASE_ADDR = dict(FAN_TABLE_BASE)
 RPM_KEY = {'CPU': 'fan_rpm', 'GPU': 'fan2_rpm'}
+DUTY_KEY = {'CPU': 'fan_duty_l', 'GPU': 'fan_duty_r'}   # 左右各一路：测 GPU 表看右路
 
 
 class Report:
@@ -151,25 +160,29 @@ def active_point(points, temp):
     return hit
 
 
-def sample(ec, thermal, seconds, rep, which, label, ref=None, bench=None, load_s=0.0):
+def sample(ec, thermal, seconds, rep, which, label, ref=None, bench=None, load_s=0.0,
+           read_temp=None):
     """采一轮转速/占空/温度。判据就看这里的 rpm 序列。
 
     `ref` 给一张表就能把「这张表在当前温度下要求的占空比」打在旁边——没有参照的话
-    占空比涨了也不知道是不是我们要的那张表在起作用。
+    占空比涨了也不知道是不是我们要的那张表在起作用。旁边还顺手记下两者的**差**：
+    差得多就说明 EC 此刻压根不看这张表（0xA0 手动档就是这样），写下去白写。
     `load_s` 用 zstd 全核负载把温度顶过点 1 的阈值：不加载的话机器停在点 0，
     而点 0 的占空比按硬规则必须是 0 %，整轮实验量不到任何东西。
+    `read_temp` 是温度来源：改 GPU 表就得看 GPU 的温度，CPU 温度管不着 GPU 那张表。
     """
     if bench is not None and load_s > 0:
         threading.Thread(target=lambda: bench.load(target_s=load_s), daemon=True).start()
         rep.out('  [%s] 已起 %.0f 秒全核负载，把温度顶过表里的触发点' % (label, load_s))
-    rpms, duties, temps = [], [], []
+    rpms, duties, temps, devs = [], [], [], []
+    temp_of = read_temp if read_temp else (lambda: thermal.read()[0])
     end = time.time() + seconds
     while time.time() < end:
         ec._last_fast = 0.0
         ec.tick()
         snap = ec.read()
-        temp, _ = thermal.read()
-        rpm, duty = snap.get(RPM_KEY[which]), snap.get('fan_duty_l')
+        temp = temp_of()
+        rpm, duty = snap.get(RPM_KEY[which]), snap.get(DUTY_KEY[which])
         if rpm:
             rpms.append(rpm)
         if duty is not None:
@@ -177,6 +190,8 @@ def sample(ec, thermal, seconds, rep, which, label, ref=None, bench=None, load_s
         if temp:
             temps.append(temp)
         want = active_point(ref, temp) if ref else None
+        if want and duty is not None and want['duty_pct'] is not None:
+            devs.append(abs(duty - want['duty_pct']))
         rep.out('  [%s] 转速=%s RPM 实测占空=%s%% 表里该=%s%%（点%s）温度=%s°C' % (
             label, rpm, duty, want and want['duty_pct'], want and want['id'], temp))
         if temp and temp >= TEMP_GUARD_C:
@@ -186,7 +201,49 @@ def sample(ec, thermal, seconds, rep, which, label, ref=None, bench=None, load_s
     return {'rpm_max': max(rpms) if rpms else None,
             'rpm_avg': round(sum(rpms) / len(rpms)) if rpms else None,
             'duty_max': max(duties) if duties else None,
+            'dev_min': round(min(devs), 1) if devs else None,
+            'dev_max': round(max(devs), 1) if devs else None,
             'temp_max': max(temps) if temps else None, 'n': len(rpms)}
+
+
+def hold_mode(ec, cfg, log, rep, res):
+    """实验期间自己握住 MQTT 连接，并把档位锁在 turbo（EC 的 `0x0751` 应为 `0x10`）。
+
+    两件事都是实测逼出来的，不是保险起见：
+    ① `0xA0`（User_Fan_HiMode，造物者的手动风扇档）下 EC **根本不看这张温度表**——
+       实测 CPU 47~50 °C 时占空 53~56 %、转速 3500~3690 RPM，而表里点 0 按硬规则是 0 %。
+       在那一档写表，量不到任何东西。
+    ② 工具的 MQTT 一断开，服务会把它自己存的档位重新下发（实测断开约 30 秒后
+       `0x10`/75 W → `0xA0`/60 W）。所以这条连接不能「发完就撤」，得从握手握到收尾。
+    """
+    mq = MqttChannel(cfg, log)
+    res['mqtt'] = mq
+    mq.start()
+    for _ in range(30):
+        if mq.alive:
+            break
+        time.sleep(0.5)
+    if not mq.alive:
+        rep.out('[停止] MQTT 连不上 broker（面板必须已经停掉，否则身份互踢）：'
+                '%s' % (mq.detail.get('reason') or '未知'))
+        return False
+    ok, msg = mq.set_mode('turbo')
+    rep.out('  下发 turbo：%s｜%s' % ('已接受' if ok else '被拒', msg))
+    if not ok:
+        return False
+    rep.out('  等档位生效（实测 9~26 秒，最长等 %.0f 秒）……' % MODE_WAIT_S)
+    end = time.time() + MODE_WAIT_S
+    while time.time() < end:
+        ec._last_fast = 0.0
+        ec.tick()
+        byte = ec.read().get('fan_ctl_byte')
+        if byte == 0x10:
+            rep.out('  已生效：风扇模式字节 0x%02X，连接保持到实验结束' % byte)
+            return True
+        time.sleep(2.0)
+    rep.out('[停止] 等了 %.0f 秒字节还没变成 0x10，EC 现在看的还是那张手动档的表，'
+            '写了也白写。**一个字节都没写。**' % MODE_WAIT_S)
+    return False
 
 
 def main(argv):
@@ -196,10 +253,11 @@ def main(argv):
     delta = next((float(a.split('=', 1)[1]) for a in argv if a.startswith('--raise=')), 15.0)
     observe = next((float(a.split('=', 1)[1]) for a in argv if a.startswith('--observe=')),
                    OBSERVE_S)
+    load_s = next((float(a.split('=', 1)[1]) for a in argv if a.startswith('--load=')), LOAD_S)
     rep = Report()
-    res = {'ec': None, 'thermal': None}
-    rep.out('风扇表写入可逆验证  %s｜表=%s 抬高=%.0f%% 观察=%.0fs 模式=%s' % (
-        time.strftime('%Y-%m-%d %H:%M:%S'), which, delta, observe,
+    res = {'ec': None, 'thermal': None, 'clock': None, 'mqtt': None}
+    rep.out('风扇表写入可逆验证  %s｜表=%s 抬高=%.0f%% 观察=%.0fs 负载=%.0fs 模式=%s' % (
+        time.strftime('%Y-%m-%d %H:%M:%S'), which, delta, observe, load_s,
         '真下发' if write else '演练（不发）'))
     try:
         if which not in BASE_ADDR:
@@ -222,11 +280,32 @@ def main(argv):
         log = Log('fan-table-test')
         ec, thermal = EcChannel(cfg, log), Thermal()
         res['ec'], res['thermal'] = ec, thermal
+        # 负载是判据的一部分，不是可选项：不加载温度顶不过点 1 的触发点，风扇根本不转
+        clock = ClockSense() if load_s > 0 else None
+        res['clock'] = clock
+        bench = Bench(log=log, thermal=thermal, clock=clock) if load_s > 0 else None
         detail = ec.probe()
         rep.out('EC 通道=%s allow_write=%s' % (detail.get('state'), ec.allow_write))
         if not ec.alive or not ec.allow_write:
             rep.out('[停止] EC 不可用或写入未开启，没什么可验的。')
             return 1
+
+        # 顺序有讲究：切档时服务的 SetUserProfile 会把**整块表**重灌一遍，
+        # 所以现表必须在档位稳住之后读，否则读到的表在实验中途就被盖掉了。
+        if write:
+            if not hold_mode(ec, cfg, log, rep, res):
+                return 1
+        else:
+            rep.out('  演练模式不切档（切档本身就是硬件写入），按当前档位读。')
+
+        gpu = GpuSense() if which == 'GPU' else None
+        if gpu is not None and not gpu.bin:
+            rep.out('[停止] 找不到 nvidia-smi，测 GPU 表必须有 GPU 温度（%s）。'
+                    '改用 --which=CPU，或先确认驱动可用。' % gpu.error)
+            return 1
+        # 改哪张表就用那张表的温度：CPU 温度到 90 °C 也不会让 GPU 那张表升一档
+        read_temp = ((lambda: (gpu.read() or {}).get('temp_c')) if gpu is not None
+                     else (lambda: thermal.read()[0]))
 
         curve = ec.fan_curve()
         if not curve.get('ok'):
@@ -235,18 +314,18 @@ def main(argv):
         points = curve['tables'][which]
         ctx = curve['context']
         bracket = ec.dev.read(fanrules.BRACKET_ADDR)
-        temp0, _ = thermal.read()
-        rep.out('现况：风扇模式字节=0x%02X(%s) 括号 0x07C6=%s 分表=%s 转速=%s RPM 温度=%s°C' % (
+        temp0 = read_temp()
+        rep.out('现况：风扇模式字节=0x%02X(%s) 括号 0x07C6=%s 分表=%s 转速=%s RPM %s温度=%s°C' % (
             ctx.get('fan_ctl_byte') or 0, ctx.get('fan_mode_flag'),
             '读不到' if bracket is None else '0x%02X' % bracket,
-            ctx.get('split_tables'), ec.read().get(RPM_KEY[which]), temp0))
+            ctx.get('split_tables'), ec.read().get(RPM_KEY[which]), which, temp0))
         if bracket is None:
             rep.out('[停止] 括号字节 0x07C6 没读到，不能拿默认值凑——夹子开错方向会抢服务的写表窗口。')
             return 1
-        temp, _ = thermal.read()
+        temp = read_temp()
         act = active_point(points, temp)
-        rep.out('当前温度 %s°C 落在点 %s（占空 %s%%）' % (
-            temp, act and act['id'], act and act['duty_pct']))
+        rep.out('当前 %s 温度 %s°C 落在点 %s（占空 %s%%）' % (which, temp, act and act['id'],
+                                                        act and act['duty_pct']))
 
         errors, warnings = fanrules.validate(which, points)
         rep.out('现表自检：错误 %d 条，警告 %s' % (len(errors), warnings or '无'))
@@ -282,8 +361,33 @@ def main(argv):
             return 1
 
         rep.out('')
-        rep.out('=== 基线采样（%.0f 秒，先知道现在多吵）===' % observe)
-        base = sample(ec, thermal, observe, rep, which, '基线')
+        rep.out('=== 基线采样（%.0f 秒，带 %.0f 秒全核负载，先知道现在多吵）===' % (observe, load_s))
+        base = sample(ec, thermal, observe, rep, which, '基线',
+                      ref=points, bench=bench, load_s=load_s, read_temp=read_temp)
+
+        # 触发温度取点 1 的 up_t（0xA0 档实测 53 °C）。基线连它都没顶过，风扇全程停在点 0
+        # （占空比按硬规则必须是 0 %），写下去只会得到「转速没动」的**假阴性**。
+        trig = next((p['up_t'] for p in points
+                     if p.get('id') and (p.get('duty_pct') or 0) > 0
+                     and p.get('up_t') is not None), None)
+        if trig is not None and (base['temp_max'] or 0) < trig:
+            rep.out('[停止] 基线最高只有 %s °C，没顶过 %s 表点 1 的触发温度 %s °C——风扇全程不会转，'
+                    '这一轮写了也量不到东西。**一个字节都没写。**'
+                    '多半是功耗墙被服务压回去了，先抬墙再跑。'
+                    % (base['temp_max'], which, trig))
+            return 1
+
+        # 第二道闸，量的是「EC 此刻到底在不在看这张表」。用**最小**偏差而不是最大：
+        # EC 平滑要 30~40 秒，升温途中占空比一定暂时落后于表（偏差可以很大，不是异常）；
+        # 但只要有一瞬间对得上，就说明有人在读这张表。反例是 0xA0 手动档——实测一直
+        # 53~56 %、表里点 0 要 0 %，全程一次都没对上过（最小偏差 53 个百分点）。
+        if base.get('dev_min') is not None and base['dev_min'] > TABLE_FOLLOW_DEV:
+            rep.out('[停止] 基线 45 秒里实测占空比和表里要求的**最小**偏差都有 %.1f 个百分点'
+                    '（阈值 %.0f）——EC 这段时间一次都没跟着这张表走，写下去只是改一块没人读的'
+                    '内存。**一个字节都没写。**' % (base['dev_min'], TABLE_FOLLOW_DEV))
+            return 1
+        rep.out('  EC 在看这张表：实测与表里的偏差最小 %.1f、最大 %.1f 个百分点' % (
+            base.get('dev_min'), base.get('dev_max')))
 
         rep.out('')
         rep.out('=== 写入新表 ===')
@@ -295,14 +399,16 @@ def main(argv):
 
         rep.out('')
         rep.out('=== 生效后采样（%.0f 秒；EC 平滑要 30~40 秒，别提前下结论）===' % observe)
-        after = sample(ec, thermal, observe, rep, which, '新表')
+        after = sample(ec, thermal, observe, rep, which, '新表',
+                       ref=target, bench=bench, load_s=load_s, read_temp=read_temp)
 
         rep.out('')
         rep.out('=== 还原（写回现表原值）===')
         ok2, bad2, refused2 = apply_plan(ec, back, rep, which)
         rep.out('  还原写 %d 个字节、失败 %d、挡住 %d' % (ok2, bad2, refused2))
         verify_written(ec, back, rep)
-        restored = sample(ec, thermal, observe, rep, which, '还原后')
+        restored = sample(ec, thermal, observe, rep, which, '还原后',
+                          ref=points, bench=bench, load_s=load_s, read_temp=read_temp)
 
         rep.out('')
         rep.out('--- 判读 ---')
@@ -325,10 +431,13 @@ def main(argv):
         else:
             rep.out('  结论：转速反而掉了（%s→%s），这不合理，按异常处理：别再写第二次，'
                     '人工确认现在的表还是不是我们还原的那份。' % (b, a2))
+        rep.out('  档位停在 turbo（0x0751=0x10）：这一轮是我们握着 MQTT 切的，'
+                '工具退出后服务会按它存的档位继续管。要交还给 OEM 就用面板或实体键切一次，'
+                '服务的 SetUserProfile 会重灌整张表。')
         rep.out('  本进程 EC 读 %d 次、写 %d 次' % (ec.dev.reads, ec.dev.writes))
         return 0
     finally:
-        for key in ('thermal', 'ec'):
+        for key in ('mqtt', 'clock', 'thermal', 'ec'):
             try:
                 if res[key] is not None:
                     res[key].close()

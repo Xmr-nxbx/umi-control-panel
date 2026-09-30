@@ -12,6 +12,7 @@
 哪怕你觉得某处判据不够严，也只写进交付说明，不在这里放宽或收紧断言。
 """
 import importlib.util
+import inspect
 import os
 import sys
 
@@ -191,6 +192,26 @@ def _():
 @case('active_point：temp=None 时返回 None（还没读到温度）')
 def _():
     assert ftt.active_point(cpu(), None) is None
+
+
+@case('测哪张表就读哪一路：GPU 必须落在 fan2_rpm / fan_duty_r')
+def _():
+    # 早先 sample() 把占空比写死成 fan_duty_l，测 GPU 表时量的是**左路（CPU 风扇）**，
+    # 于是「转速没动」的结论其实来自读错通道。方向不能反过来。
+    assert ftt.RPM_KEY['CPU'] == 'fan_rpm' and ftt.RPM_KEY['GPU'] == 'fan2_rpm'
+    assert ftt.DUTY_KEY['CPU'] == 'fan_duty_l'
+    assert ftt.DUTY_KEY['GPU'] == 'fan_duty_r'
+
+
+@case('「EC 在不在看这张表」的闸有阈值，且 sample 会算出偏差')
+def _():
+    # 0xA0 手动档实测差 53 个百分点：没有这道闸就会把「没人读这块内存」误判成「写入无效」
+    assert ftt.TABLE_FOLLOW_DEV == 8.0
+    src = inspect.getsource(ftt.sample)
+    assert "devs.append(abs(duty - want['duty_pct']))" in src
+    assert "'dev_min'" in src and "'dev_max'" in src
+    # 闸用的是最小偏差：EC 平滑途中偏差大是正常，一次都没对上才是「没人读这张表」
+    assert 'dev_min' in inspect.getsource(ftt.main)
 
 
 def main():
