@@ -310,6 +310,9 @@ function renderHardware(s) {
   // 上一版这里没有这条说明，结果「性能模式」按钮写着「功耗墙 75W」却是假的：
   // 实测裸写那个字节 100 秒、52 个采样点，PL1 一次都没动（notes/hardware-channels.md 6.11 十五）。
   if (canFan) hints.push('上面那三个按钮只改指示灯和字节，**改不动功耗墙**——要改墙请用下面的「OEM 硬件档」');
+  // 能写也要说延迟：实测下发 OEM 档位约 24 秒后功耗墙才动，Win 锁约 6 秒，
+  // 不说这一句用户会以为没点上，接着连点几次。
+  if (canWrite) hints.push('OEM 硬件档按钮改的是功耗墙，**生效约需 24 秒**，点了别重复按');
   if (!canWrite) hints.push('OEM 档位不可写：' + ((mqttCh.detail || {}).mode_write_reason || why(mqttCh)));
   if (!canFan) hints.push('硬件模式不可写：' + ((ecCh.detail || {}).fan_mode_reason || why(ecCh)));
   $('hw-hint').textContent = hints.join('；');
@@ -389,9 +392,11 @@ function renderOem(s) {
   // 后 EC 的 ADDR_STAUTS_BYTE 1→0，再下发 LOCK 又回到 1，EC 与 Setting/Status 两条
   // 通道读数一致），所以整张卡片只给它一个按钮，其余照旧只读。
   const btns = $('oem-buttons');
+  // canWin 与 winNote 在 if 外面算：卡片底下那行说明也要用同一句话
+  const canWin = ((s.capabilities || {})['winkey.write'] || {}).state === 'verified'
+    && oem.win_key_locked != null;
+  const winNote = (mqCh.detail || {}).winkey_write_reason || '';
   if (btns) {
-    const canWin = ((s.capabilities || {})['winkey.write'] || {}).state === 'verified'
-      && oem.win_key_locked != null;
     btns.innerHTML = canWin
       ? `<button id="btn-winkey">${oem.win_key_locked ? '解锁 Win 键' : '锁定 Win 键'}</button>` : '';
     const b = $('btn-winkey');
@@ -408,7 +413,8 @@ function renderOem(s) {
   hint.textContent = '数据来自 GCUBridge 的 Setting/Status · HidLightbar/Status · Fan/Status · Keyboard/Status'
     + '，全是 OEM 自己报的读数。只有做过「下发 → EC 回读 → 还原」可逆验证的开关才给按钮，'
     + '其余一律只读；认不出来的值照实写「未知」，不猜。'
-    + '「OEM 允许范围」是 Fan/Status 里 OEM 自己写的上下限，以后任何写入都拿它当护栏。';
+    + '「OEM 允许范围」是 Fan/Status 里 OEM 自己写的上下限，以后任何写入都拿它当护栏。'
+    + (canWin && winNote ? ' ' + winNote : '');
 }
 
 // ---------- 风扇曲线（EC 直读，只读） ----------

@@ -244,6 +244,8 @@ class MqttChannel(Channel):
         # 延迟约 6 秒），再下发 WINKEY_LOCK 又回到 1，EC 直读与 Setting/Status 两条通道
         # 读数一致。天然可逆、无温度风险，所以升成 verified，面板可以点亮这个开关。
         self.caps[CAP_WINKEY_WRITE] = 'verified'
+        self.detail['winkey_write_reason'] = (
+            '这个开关从下发到 EC 生效实测约 6 秒，点了之后状态不会马上翻，别连着点。')
         # 电池充电三档：动作名和 EC 落点都对上了（notes/hardware-channels.md 6.8），但没做过可逆验证，
         # 而且上游 Linux 驱动因为 2020 年前后的机型出过「开充电限制把电池搞坏」的事故，
         # 直接封死了强开路径（CVE-2026-64143）。本机正是那一代，所以保持 unknown。
