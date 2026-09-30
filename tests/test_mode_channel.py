@@ -31,7 +31,8 @@ from app.act.channels.base import (MODES, MODE_LABELS, MODE_VERIFIED,  # noqa: E
                                    HW_MODE_BY_FAN_FLAG)
 from app.act.channels import ec_gpd, mqtt_gcu                        # noqa: E402
 from app.config import DEFAULTS                                      # noqa: E402
-from app.policy.scheduler import TIER_LABELS                         # noqa: E402
+from app.policy.scheduler import TIER_LABELS                          # noqa: E402
+from app.tray import fankey                                           # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CASES = []
@@ -154,6 +155,89 @@ def t_set_mode_arms_window():
         '招呼打晚了，回声可能已经先被处理'
 
 
+@case('回声到达时必须回调一次「已生效」，不然用户以为没点上')
+def t_echo_landing_fires_applied_callback():
+    st = _stub(echo_left=30.0)
+    ec_gpd.EcChannel._watch(st)
+    assert st.applied == ['applied'], '回声没触发生效回调：%s' % st.applied
+    ec_gpd.EcChannel._watch(st)          # 同一窗口里再来一次也只认一次
+    assert st.applied == ['applied'], '生效提示弹了不止一次：%s' % st.applied
+    assert st.took == [], '生效回调不该顺手抢按键优先锁'
+
+
+@case('面板点档位必须弹提示：这条路约 24 秒才生效，不弹等于没反应')
+def t_panel_mode_click_announces():
+    src = _daemon_src()
+    body = _block(src, 'def set_mode_now')
+    assert 'mode_send_text' in body and 'self._osd' in body, '点档位没弹屏幕提示：%s' % body
+    assert 'on_applied' in body, '没挂生效回调，约 24 秒后不会有第二条反馈'
+    late = _block(src, 'def on_mode_applied')
+    assert 'mode_applied_text' in late and 'self._osd' in late, '生效了不吭声：%s' % late
+
+
+@case('自动跟随与息屏拦截那条路不许弹：干活干到一半跳东西是打扰')
+def t_auto_paths_stay_silent():
+    daemon = _daemon_src()
+    hw = io.open(os.path.join(ROOT, 'app', 'act', 'hardware.py'), encoding='utf-8').read()
+    # 自适应切档（daemon）和息屏拦截（hardware）两处调用都不许挂 on_applied
+    sched = _line_with(daemon, "hw.set_mode(want, reason='调度档位")
+    assert sched and 'on_applied' not in sched, '自适应换档挂了生效提示：%s' % sched
+    guard = _line_with(hw, "set_mode(want_mode, reason='息屏")
+    assert guard and 'on_applied' not in guard, '息屏拦截挂了生效提示：%s' % guard
+
+
+@case('生效延迟的秒数要写进文案，且不许低于实测的 24 秒')
+def t_send_text_states_the_delay():
+    assert fankey.MODE_DELAY_S >= 24, fankey.MODE_DELAY_S
+    for m in MODE_VERIFIED:
+        title, sub = fankey.mode_send_text(m)
+        assert str(fankey.MODE_DELAY_S) in sub, '%s 的提示没写延迟：%s' % (m, sub)
+        assert title and '未知' not in title, m
+    # 没实测过的档位不给具体瓦数
+    title, sub = fankey.mode_send_text('balance')
+    assert 'W' not in sub, 'balance 的功耗墙没实测过，文案里不许编数字：%s' % sub
+    assert title == '硬件档位已下发', title
+
+
+@case('档位文案沿用同一套模式词，不许长出「办公/狂暴」')
+def t_mode_texts_use_one_vocabulary():
+    words = ' '.join('%s %s' % (t, s) for t, s in fankey.MODE_RESULT_TEXT.values())
+    for banned in ('办公', '狂暴'):
+        assert banned not in words, banned
+
+
+def _daemon_src():
+    return io.open(os.path.join(ROOT, 'app', 'daemon.py'), encoding='utf-8').read()
+
+
+def _block(src, header):
+    """从某个 def 开始截到下一个同缩进的 def 为止。"""
+    i = src.index(header)
+    rest = src[i:]
+    lines = rest.split('\n')
+    out = [lines[0]]
+    for ln in lines[1:]:
+        if ln.startswith('    def ') or ln.startswith('class ') or ln.startswith('def '):
+            break
+        out.append(ln)
+    return '\n'.join(out)
+
+
+def _line_with(src, needle):
+    i = src.find(needle)
+    if i < 0:
+        return None
+    line = src[i:].split('\n')[0]
+    # 调用可能跨行：把后续以缩进继续的行也并进来
+    tail = src[i:].split('\n')[1:4]
+    for t in tail:
+        if t.startswith(' ' * 10) or t.strip().startswith('reason='):
+            line += ' ' + t.strip()
+        else:
+            break
+    return line
+
+
 def _stub(echo_left):
     """造一个只够 _watch 用的假通道：只有档位字节会变。"""
     class _Dev:
@@ -175,6 +259,10 @@ def _stub(echo_left):
             self.hold_until = 0.0
             self._fan_key_echo_until = time.time() + echo_left
             self._fan_key_echo_why = '面板下发 turbo'
+            # 生效回调：用列表假装，回声到达时往里追加一次
+            self.applied = []
+            self._fan_key_echo_applied = (lambda: self.applied.append('applied')
+                                          if echo_left > 0 else None)
 
         def addr(self, name):
             return 5 if name == ec_gpd.FAN_KEY else None

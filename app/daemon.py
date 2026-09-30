@@ -405,11 +405,25 @@ class Daemon:
         return True
 
     def set_mode_now(self, mode):
-        """直接下发硬件档位（不改编排意图）。"""
-        ok, detail = self.hw.set_mode(mode, reason='面板手动')
+        """直接下发硬件档位（不改编排意图）。
+
+        这条路必须弹提示：它是**人动手**点的按钮，而且约 24 秒后才真的生效。
+        上一版一个字都不弹，用户 2026-09-30 实测「点了两次没有弹窗」，
+        只能靠重复点确认；自动跟随那条路（调度档位 / 息屏拦截）不传 on_applied，照旧不弹。
+        """
+        ok, detail = self.hw.set_mode(mode, reason='面板手动',
+                                      on_applied=lambda: self.on_mode_applied(mode))
         if ok:
             self.wanted_hw_mode = mode
-        return ok, detail
+            self._osd(*fankey.mode_send_text(mode))
+            # 网页上的 toast 也说一句延迟：用户点完可能只看浏览器，不在屏幕前等那条 OSD
+            return True, '%s（约 %d 秒后生效，期间别重复点）' % (detail, fankey.MODE_DELAY_S)
+        return False, detail
+
+    def on_mode_applied(self, mode):
+        """EC 的档位字节被服务写回来了 —— 这才是生效的那一刻（实测延迟 24~26 秒）。"""
+        self.log.info('[硬件] %s 已生效（服务写回档位字节）' % MODE_LABELS.get(mode, mode))
+        self._osd(*fankey.mode_applied_text(mode))
 
     def set_fan_mode(self, flag):
         """直接写 EC 风扇模式（自动/强冷/加速）。"""

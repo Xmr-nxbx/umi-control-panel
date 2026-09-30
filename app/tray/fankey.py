@@ -109,3 +109,29 @@ def fan_text(flag):
 
 def profile_text(label, desc):
     return '调度性格：%s' % label, desc
+
+
+# ---------- 面板点「OEM 硬件档」按钮 ----------
+# 这条路是**唯一改得动功耗墙的**（裸写档位字节改不动，见模块开头的 ⚠️），
+# 但服务收到命令后要过约 24 秒才真的写回来。上一版这里一个字都不弹，
+# 用户 2026-09-30 实测「点了两次没有弹窗」——没有反馈就等于让人重复点。
+# 所以分两段：下发时立刻弹一句"在路上了"，服务写回来之后再弹一句"生效了"。
+MODE_DELAY_S = 24
+MODE_RESULT_TEXT = {'office': ('省电模式', '功耗墙降到 10W'),
+                    'turbo': ('性能模式', '功耗墙 75W、风扇强冷')}
+
+
+def mode_send_text(mode):
+    """刚下发：告诉用户这还没生效，别重复点。数字只有验过的档位才敢说。"""
+    got = MODE_RESULT_TEXT.get(mode)
+    if not got:
+        return '硬件档位已下发', '约 %d 秒后生效，期间别重复点' % MODE_DELAY_S
+    return got[0], '已下发，约 %d 秒后生效（%s），期间别重复点' % (MODE_DELAY_S, got[1])
+
+
+def mode_applied_text(mode):
+    """服务真的把档位字节写回来了 —— 这才是生效的那一刻。"""
+    got = MODE_RESULT_TEXT.get(mode)
+    if not got:
+        return '硬件档位已生效', ''
+    return got[0], '已生效：%s' % got[1]

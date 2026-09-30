@@ -134,7 +134,7 @@ class Hardware:
             return dict(self.state)
 
     # ---------- 写 ----------
-    def set_mode(self, mode, reason=''):
+    def set_mode(self, mode, reason='', on_applied=None):
         if mode not in MODE_LABELS:
             return False, '未知档位：%s' % mode
         self._last_write_ts = time.time()
@@ -148,8 +148,10 @@ class Hardware:
                     # （那个字节是它的输出，见 notes/hardware-channels.md 6.11 十五）。提前跟 EC 通道打招乎，
                     # 别把这次回声归因成「有人按了造物者键」——否则既弹假消息，
                     # 又会下一个 900 秒按键优先锁把自动跟随冻住（待办 #39 的实测现场）。
+                    # on_applied 是回声到达时的「真生效」提示，由调用方决定弹不弹。
                     self.ec.expect_fan_key_change(
-                        why='面板下发 %s（%s）' % (mode, reason or '手动'))
+                        why='面板下发 %s（%s）' % (mode, reason or '手动'),
+                        on_applied=on_applied)
                     self.log.info('[硬件] 切档 %s（%s）：%s' % (MODE_LABELS[mode], reason or '-', detail))
                     with self.lock:
                         self.state['mode'] = mode

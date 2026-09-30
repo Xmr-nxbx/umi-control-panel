@@ -330,13 +330,15 @@ class EcChannel:
         # 那段时间里这个字节的变化不许算成「有人按了实体键」，见 expect_fan_key_change()。
         self._fan_key_echo_until = 0.0
         self._fan_key_echo_why = ''
+        self._fan_key_echo_applied = None
         # 外部改风扇字节时的回调 fn(old, new)：由上层（cli）挂屏幕提示，
         # 通道本身不认识任何 UI，免得硬件层反过来依赖界面。
         # 注意回调跑在 EC 轮询线程里，必须不阻塞（屏幕提示用 PostMessage 就满足）。
         self.on_key = None
 
     # ---------- 人工意图优先 ----------
-    def expect_fan_key_change(self, seconds=FAN_KEY_ECHO_S, why='面板刚下发过 OEM 档位命令'):
+    def expect_fan_key_change(self, seconds=FAN_KEY_ECHO_S, why='面板刚下发过 OEM 档位命令',
+                              on_applied=None):
         """接下来一段时间里，`0x0751` 变了**不许**当成「有人按了实体键」。
 
         为什么要这个：这个字节是服务的**输出**（见 notes/hardware-channels.md 6.11 十五），
@@ -344,10 +346,15 @@ class EcChannel:
         上一版把这种回声认成按键，于是①给自己下一把 900 秒的按键优先锁
         （自动跟随被冻住），②给用户弹一句"你按了造物者键"的假消息（实测复现两次：
         12:24:29 与 12:59:39，两次都没人碰键盘）。
-        变化本身照旧记录，只是不再归因成按键、不再触发屏幕提示。
+        变化本身照旧记录，只是不再归因成按键、不再触发按键提示。
+
+        on_applied：回声真的到了，说明我们那条命令生效了，回调一次就清空。
+        用户 2026-09-30 反馈「点了两次没有弹窗」——压掉假提示的同时，
+        必须给一条**真**的生效提示，否则这条路看起来像没反应。
         """
         self._fan_key_echo_until = time.time() + float(seconds)
         self._fan_key_echo_why = why
+        self._fan_key_echo_applied = on_applied
 
     def fan_lock_left(self, now=None):
         """还有多少秒不允许面板自动改风扇字节（0 = 可以自由跟随）。"""
@@ -518,6 +525,14 @@ class EcChannel:
                     if self.log:
                         self.log.info('[EC变化] %s: %s → %s 判为**档位命令的回声**（%s），不算按键'
                                       % (name, old, value, entry['echo']))
+                    cb = self._fan_key_echo_applied
+                    self._fan_key_echo_applied = None      # 一条命令只认一次生效
+                    if cb:
+                        try:
+                            cb()
+                        except Exception as exc:           # noqa: BLE001
+                            if self.log:
+                                self.log.warn('[EC变化] 生效回调异常（忽略）：%r' % (exc,))
                     continue
                 # 实体按键刚被按过：一段时间内把风扇交给用户，面板不再自动跟随。
                 # 上一版没有这个让步，实测到按键改完 0 秒就被面板写回去。
