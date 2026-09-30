@@ -144,6 +144,10 @@ class MqttChannel(Channel):
     name = 'mqtt'
     label = 'OEM GCUBridge（兜底）'
     RECONNECT_MIN = 5.0
+    # 下发命令后的追问节奏：窗口要盖住最慢的那条（档位 9~26 秒），间隙 3 秒
+    # 够快了——前端「正在生效」最长挂 20 秒。窗口一过就回到 45 秒的例行问。
+    ASK_BURST_S = 30.0
+    ASK_BURST_GAP_S = 3.0
 
     def __init__(self, cfg, log):
         super().__init__(cfg, log)
@@ -165,6 +169,8 @@ class MqttChannel(Channel):
         self._mode_cb = None
         self.last_mode = None
         self._last_probe_ts = 0.0
+        self._last_ask_ts = 0.0
+        self._ask_until = 0.0
         self._kick_reason = None
         for cap in (CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ, CAP_PL_WRITE, CAP_RGB,
                     CAP_DGPU, CAP_WINKEY_WRITE, CAP_BATTERY_MODE_WRITE):
@@ -276,13 +282,18 @@ class MqttChannel(Channel):
         last_ping = time.time()
         cli.sock.settimeout(1.0)
         while not self._stop.is_set():
+            code, body = 0, b''
             try:
                 code, body = cli.read_packet()
             except socket.timeout:
                 if time.time() - last_ping > 25:
                     cli.ping()
                     last_ping = time.time()
-                continue
+                # 超时不等于「这一轮什么都不用做」：OEM 不主动推状态，
+                # 以前这里 continue 会跳过下面的发送队列，于是只有「恰好有包进来」
+                # 时才把攒着的 GETSTATUS/命令发出去。2026-09-30 15:57 实测：写完背光
+                # 25 秒里队列一条都没出去，面板读数卡住不动——用户说的「开关时间太长」
+                # 根子是这里，不是那个 45 秒的周期。
             if code & 0xF0 == 0x30 and len(body) >= 2:
                 tlen = struct.unpack('>H', body[:2])[0]
                 topic = body[2:2 + tlen].decode('utf-8', 'replace')
@@ -353,6 +364,9 @@ class MqttChannel(Channel):
         if not self.alive:
             return False, 'GCUBridge 未连接'
         self._outq.put((topic, json.dumps(obj, ensure_ascii=False)))
+        # 写完就开追问窗口（见 request_status）：放在通道里而不是调用方，
+        # 这样以后再多一条写路径也不会漏掉回读。
+        self.request_status()
         return True, note or action
 
     def set_mode(self, mode):
@@ -541,12 +555,40 @@ class MqttChannel(Channel):
         }
         return out
 
+    def request_status(self):
+        """刚写完东西，开一段「追问窗口」，别等 45 秒那个周期 tick。
+
+        为什么需要：`Setting/Status` 不是周期广播，不问了就不推。
+        用户 2026-09-30 15:45 反馈「背光和 Win 锁的开关启动关闭时间太长」——
+        命令本身 0.3~6 秒就生效了，慢的是**面板上那行读数**，最长要等下一次 tick。
+
+        为什么是窗口不是单发一条：服务收到命令后要过几秒才落到 EC（Win 锁约 6 秒、
+        档位 9~26 秒），只问一次拿回来的还是旧值，等于没问。
+        """
+        if not self.alive:
+            return False
+        now = time.time()
+        # 先问一次：背光这种 0.3 秒就生效的，早一秒问到面板就早一秒翻
+        if now - self._last_ask_ts >= 1.0:
+            self._ask_status()
+        self._ask_until = max(self._ask_until, now + self.ASK_BURST_S)
+        return True
+
+    def _ask_status(self):
+        self._last_ask_ts = time.time()
+        self._outq.put(('Setting/Control', json.dumps({'Action': 'GETSTATUS'})))
+
     def tick(self):
         now = time.time()
+        if now < self._ask_until:
+            # 追问期：每 3 秒问一次，问到值变了前端自己会撤「正在生效」
+            if self.alive and now - self._last_ask_ts >= self.ASK_BURST_GAP_S:
+                self._ask_status()
+            return
         if now - self._last_probe_ts > 45:
             self._last_probe_ts = now
             if self.alive:
-                self._outq.put(('Setting/Control', json.dumps({'Action': 'GETSTATUS'})))
+                self._ask_status()
 
     def close(self):
         self._stop.set()

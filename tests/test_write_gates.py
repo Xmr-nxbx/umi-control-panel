@@ -71,6 +71,18 @@ def _channel(allow_write, verified=()):
     return ch
 
 
+def _next_keyb(ch):
+    """倒出下一条 Keyboard/Ctrl 报文。
+
+    写完命令通道会顺带追问一次状态（Setting/Control 的 GETSTATUS），队列里不止一条，
+    所以不能拿「第一条」当命令本身。
+    """
+    while True:
+        topic, payload = ch._outq.get_nowait()
+        if topic == 'Keyboard/Ctrl':
+            return json.loads(payload)
+
+
 @case('本机页面发来的写请求放行（Origin 与 Host 一致）')
 def _():
     for host in ('127.0.0.1:8747', 'localhost:8747'):
@@ -140,16 +152,14 @@ def _():
     ch = _channel(True, ('lighting.rgb.write',))
     ok, detail = ch.send_action('KB_POWER_ON')
     assert ok is True, detail
-    topic, payload = ch._outq.get_nowait()
-    assert topic == 'Keyboard/Ctrl', topic
-    data = json.loads(payload)
+    data = _next_keyb(ch)
     # OEM 的 Keyboard/Ctrl 用的是 function，不是 Action（读 GCUService 的 switch 确认）
-    assert data['function'] == 'SetPower', payload
-    assert data['powerstatus'] == 1, payload
-    assert 'Action' not in data, payload
+    assert data['function'] == 'SetPower', data
+    assert data['powerstatus'] == 1, data
+    assert 'Action' not in data, data
     ok2, _ = ch.send_action('KB_POWER_OFF')
     assert ok2 is True
-    assert json.loads(ch._outq.get_nowait()[1])['powerstatus'] == 0
+    assert _next_keyb(ch)['powerstatus'] == 0
 
 
 @case('白名单里每条命令的形状由条目自己声明，代码不许写死')

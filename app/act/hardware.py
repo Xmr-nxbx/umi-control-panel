@@ -187,6 +187,8 @@ class Hardware:
     def send_action(self, action, extra=None, note=''):
         for ch in self.channels:
             if hasattr(ch, 'send_action') and ch.alive:
+                # 通道自己会在写成功后开追问窗口（mqtt_gcu.send_action），
+                # 这里不重复催：Setting/Status 不问了不推，忘了开就要等 45 秒才翻。
                 return ch.send_action(action, extra, note)
         return False, 'GCUBridge 未连接，命令不下发'
 

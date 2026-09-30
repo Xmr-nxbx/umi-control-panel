@@ -62,6 +62,36 @@ function toast(text, bad) {
   toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
 }
 
+// ---------- 开关的「正在生效」等待态 ----------
+// OEM 的开关不是写完就翻：实测键盘背光约 0.3 秒、Win 键锁定约 6 秒才回读得到新值。
+// 这段空窗里按钮和读数还是旧的，用户以为没点上会再点一次（真实反馈过两次）。
+// 所以下发成功后本地记一笔「我希望它变成什么」，按钮先改成等待态，
+// 直到 /api/state 里的值真的对上才撤；超时没对上就撤并说一声，别让人以为还在等。
+const PENDING = {};
+const PENDING_WORD = '正在生效…';
+// 等待窗口 = 实测生效时间再放宽一档（背光约 0.3 秒、Win 锁约 6 秒，之后还要等 OEM
+// 服务答一次 GETSTATUS）。它只决定「正在生效」挂多久，不影响要不要下发。
+const WINKEY_WAIT_S = 20;
+const KB_WAIT_S = 10;
+
+function markPending(key, want, secs, label) {
+  PENDING[key] = { want: want, secs: secs, until: Date.now() + secs * 1000, label: label };
+}
+
+// cur 是当前读数：对上了就销账（返回 null），没对上返回这条等待记录。
+function pendingFor(key, cur) {
+  const p = PENDING[key];
+  if (!p) return null;
+  if (cur === p.want) { delete PENDING[key]; return null; }
+  if (Date.now() > p.until) {
+    delete PENDING[key];
+    toast(p.label + '：等了约 ' + p.secs + ' 秒没等到回读，可能被别的程序改回去了，'
+      + '照现在的读数再决定要不要重发', true);
+    return null;
+  }
+  return p;
+}
+
 // ---------- 自动探测硬件通道 ----------
 // 以前要点「重新探测通道」才更新，用户点一次看到「自检通过」就不敢再动了，
 // 也不知道下一次该什么时候点。现在改成：页面看得见就定时探，切回来也探一次，全部带防抖。
@@ -342,6 +372,11 @@ function renderOem(s) {
   }
   hint.classList.remove('err');
 
+  // 等待态在这里算一次、两处（读数行 + 按钮）共用：pendingFor 会销账也会超时，
+  // 同一轮渲染里算两遍会出现「行上还在等、按钮已经好了」的错位。
+  const winPend = pendingFor('winkey', oem.win_key_locked);
+  const kbPend = pendingFor('kbpower', oem.kb_power_on);
+
   const lim = oem.limits || {};
   const limText = lim.pl1_min != null
     ? `PL1 ${lim.pl1_min}~${lim.pl1_max}W · PL4 ≤${lim.pl4_max}W · TGP ${lim.tgp_min}~${lim.tgp_max} · Boost ${lim.boost_min}~${lim.boost_max} · GPU 目标温度 ${lim.gpu_temp_min}~${lim.gpu_temp_max}°C`
@@ -364,11 +399,13 @@ function renderOem(s) {
 
   box.innerHTML = [
     hwRow('Win 键锁定', onOff(oem.win_key_locked, '已锁定', '未锁定')
-          + '（与 EC 的 STAUTS_BYTE 已对上号）', oem.win_key_locked != null),
+          + '（与 EC 的 STAUTS_BYTE 已对上号）'
+          + (winPend ? ' · ' + PENDING_WORD : ''),
+          oem.win_key_locked != null),
     hwRow('触摸板', onOff(oem.touchpad_on, '开', '关')
           + '（触摸板上还有个实体拨动开关；OEM 也有 TOUCHPAD_TOGGLE_ON/OFF，'
           + '但没验证过会不会被实体开关盖掉，所以面板不写）', oem.touchpad_on != null),
-    hwRow('键盘背光', kbText, oem.kb_power_on != null),
+    hwRow('键盘背光', kbText + (kbPend ? ' · ' + PENDING_WORD : ''), oem.kb_power_on != null),
     hwRow('单色背光功能', onOff(oem.kb_single_color_on, '开', '关'), oem.kb_single_color_on != null),
     // 用户/Creator Center 叫它「海岸灯」，面板跟着叫，别让他对不上号
     hwRow('海岸灯（灯条）', barText, oem.lightbar_on != null),
@@ -402,15 +439,19 @@ function renderOem(s) {
   const winNote = (mqCh.detail || {}).winkey_write_reason || '';
   if (btns) {
     btns.innerHTML = (canWin
-      ? `<button id="btn-winkey">${oem.win_key_locked ? '解锁 Win 键' : '锁定 Win 键'}</button>` : '')
+      ? `<button id="btn-winkey"${winPend ? ' disabled' : ''}>${
+          winPend ? PENDING_WORD : (oem.win_key_locked ? '解锁 Win 键' : '锁定 Win 键')}</button>` : '')
       + (canKb
-        ? `<button id="btn-kbpower">${oem.kb_power_on ? '关闭键盘背光' : '打开键盘背光'}</button>` : '');
+        ? `<button id="btn-kbpower"${kbPend ? ' disabled' : ''}>${
+            kbPend ? PENDING_WORD : (oem.kb_power_on ? '关闭键盘背光' : '打开键盘背光')}</button>` : '');
     const b = $('btn-winkey');
     if (b) {
       b.onclick = async () => {
-        const act = oem.win_key_locked ? 'WINKEY_UNLOCK' : 'WINKEY_LOCK';
+        const lock = !oem.win_key_locked;
+        const act = lock ? 'WINKEY_LOCK' : 'WINKEY_UNLOCK';
         try { const r = await api('/api/action', { action: act }); toast(r.detail || '已下发'); }
-        catch (e) { toast('下发失败：' + e.message, true); }
+        catch (e) { toast('下发失败：' + e.message, true); return; }
+        markPending('winkey', lock, WINKEY_WAIT_S, 'Win 键锁定');
         poll();
       };
     }
@@ -418,10 +459,12 @@ function renderOem(s) {
     if (kb) {
       kb.onclick = async () => {
         // 被闸门拒绝时后端回 409，api() 会抛错，detail 原样弹出来（不静默吞掉）
+        const on = !oem.kb_power_on;
         try { const r = await api('/api/action',
-               { action: oem.kb_power_on ? 'KB_POWER_OFF' : 'KB_POWER_ON' });
+                 { action: on ? 'KB_POWER_ON' : 'KB_POWER_OFF' });
                toast(r.detail || '已下发'); }
-        catch (e) { toast('下发失败：' + e.message, true); }
+        catch (e) { toast('下发失败：' + e.message, true); return; }
+        markPending('kbpower', on, KB_WAIT_S, '键盘背光');
         poll();
       };
     }
