@@ -207,6 +207,31 @@ def sample(ec, thermal, seconds, rep, which, label, ref=None, bench=None, load_s
             'temp_max': max(temps) if temps else None, 'n': len(rpms)}
 
 
+def wait_stable(ec, rep, which, label, timeout_s=150.0, stable_n=3):
+    """等 EC 把占空调到稳态再判读，返回稳定后的占空比。
+
+    23:07 那一轮实测：EC 改占空是**缓慢爬升/下降**的，还原之后 30 %→44.5 %→78 %
+    走了约 3 分钟。50 秒的观察窗只看到半路，于是把「还在路上」误判成「没回到位」。
+    判据是连续 stable_n 次读数不变（每 5 秒一次），超时也照样返回最后一个值。
+    """
+    run, last, t0 = 0, None, time.time()
+    while time.time() - t0 < timeout_s:
+        ec._last_fast = 0.0
+        ec.tick()
+        snap = ec.read()
+        duty, rpm = snap.get(DUTY_KEY[which]), snap.get(RPM_KEY[which])
+        run = run + 1 if duty == last else 1
+        last = duty
+        if run >= stable_n and duty is not None:
+            rep.out('  [%s] 占空稳在 %s%%（%s RPM），等了 %.0f 秒'
+                    % (label, duty, rpm, time.time() - t0))
+            return duty
+        time.sleep(5.0)
+    rep.out('  [%s] 等了 %.0f 秒占空还在动（最后 %s%%），按这个值判读'
+            % (label, timeout_s, last))
+    return last
+
+
 def hold_mode(ec, cfg, log, rep, res):
     """实验期间自己握住 MQTT 连接，并把档位锁在 turbo（EC 的 `0x0751` 应为 `0x10`）。
 
@@ -408,6 +433,8 @@ def main(argv):
 
         rep.out('')
         rep.out('=== 写入新表 ===')
+        # 写之前也要等稳态：EC 可能还在上一轮的爬升途中，拿半路的值当基线会误判方向
+        duty_base = wait_stable(ec, rep, which, '基线')
         ok, bad, refused = apply_plan(ec, plan, rep, which)
         rep.out('  写了 %d 个字节、失败 %d、白名单挡住 %d' % (ok, bad, refused))
         verify_written(ec, plan, rep)
@@ -415,7 +442,8 @@ def main(argv):
             rep.out('  [注意] 这一轮没写全，仍然先还原，再判读。')
 
         rep.out('')
-        rep.out('=== 生效后采样（%.0f 秒；EC 平滑要 30~40 秒，别提前下结论）===' % observe)
+        rep.out('=== 生效后：先等占空爬到稳态，再采样 ===')
+        duty_after = wait_stable(ec, rep, which, '新表')
         after = sample(ec, thermal, observe, rep, which, '新表',
                        ref=target, bench=bench, load_s=load_s, read_temp=read_temp)
 
@@ -424,41 +452,47 @@ def main(argv):
         ok2, bad2, refused2 = apply_plan(ec, back, rep, which)
         rep.out('  还原写 %d 个字节、失败 %d、挡住 %d' % (ok2, bad2, refused2))
         verify_written(ec, back, rep)
+        # 还原之后同样要等：EC 往回爬也是几分钟量级，不等就会误报「没回到位」
+        duty_back = wait_stable(ec, rep, which, '还原后')
         restored = sample(ec, thermal, observe, rep, which, '还原后',
                           ref=points, bench=bench, load_s=load_s, read_temp=read_temp)
 
         rep.out('')
         rep.out('--- 判读 ---')
+        rep.out('  占空（都等到稳态）基线 %s%% → 新表 %s%% → 还原后 %s%%' % (
+            duty_base, duty_after, duty_back))
         rep.out('  转速 基线 %s → 新表 %s → 还原后 %s RPM（平均）' % (
             base['rpm_avg'], after['rpm_avg'], restored['rpm_avg']))
         rep.out('  温度 基线 %s → 新表 %s → 还原后 %s °C（最高）' % (
             base['temp_max'], after['temp_max'], restored['temp_max']))
-        b, a2 = base['rpm_avg'] or 0, after['rpm_avg'] or 0
-        # 判据看的是「转速往我们要的方向动了没有」，不是「转速涨了没有」。
-        # turbo 档两张表在可达温度区间里都饱和在 100 %，往上抬会被封顶成一次无效实验；
-        # 往下压才有肉眼/耳朵都分得出的变化，所以 delta 的符号决定期望方向。
+        # 主判据是**稳态占空**往我们要的方向动了没有，转速只是旁证。
+        # 用占空而不是转速：EC 调占空是几分钟量级的缓慢爬升，转速跟着它走，
+        # 但转速还受温度影响；占空是 EC 直接从表里算出来的那个量。
         want_up = delta > 0
-        moved = (a2 >= b * 1.05) if want_up else (a2 <= b * 0.95)
-        flat = abs(a2 - b) <= b * 0.05
-        back_ok = abs((restored['rpm_avg'] or 0) - b) <= b * 0.08
+        ok_all = (duty_base is not None and duty_after is not None
+                  and duty_back is not None)
+        moved = ok_all and abs(duty_after - duty_base) >= 5 and (
+            (duty_after > duty_base) if want_up else (duty_after < duty_base))
+        back_ok = ok_all and abs(duty_back - duty_base) <= 5
         if bad or refused:
             rep.out('  结论：没写全，判据不成立。不补写、不重试第二轮，先看失败在哪几个地址。')
-        elif not b or not a2:
-            rep.out('  结论：转速没读到（%s→%s），判据不成立——一次硬件写入都没法凭这个下结论。'
-                    % (base['rpm_avg'], after['rpm_avg']))
+        elif not ok_all:
+            rep.out('  结论：占空比没读全（%s→%s→%s），判据不成立，凭这个下不了结论。'
+                    % (duty_base, duty_after, duty_back))
+        elif moved and back_ok:
+            rep.out('  结论：占空比从 %s%% %s到了 %s%%，还原后回到 %s%% —— '
+                    '**风扇表写入这条路是通的，而且可逆**。'
+                    % (duty_base, '抬' if want_up else '压', duty_after, duty_back))
         elif moved:
-            rep.out('  结论：转速跟着占空比往%s走了（%.0f%%），**风扇表写入这条路是通的**。'
-                    '还原后回到 %s RPM%s' % (
-                        '上' if want_up else '下', (a2 / b - 1) * 100, restored['rpm_avg'],
-                        '，可逆性成立' if back_ok else '，但没回到位'))
-        elif flat:
-            rep.out('  结论：字节写进去了、回读也一致，但转速没动——EC 很可能整块丢了这张表'
-                    '（硬规则违反了会静默退回内置曲线），或者这个档位下服务不采纳外部表。'
-                    '不猜，下一步只做静态分析。')
+            rep.out('  结论：占空比动了（%s%%→%s%%）但**还原后没回到位**（现在 %s%%）——'
+                    '写入生效、可逆性不成立。这是必须人工处理的状态：切一次档位让服务的 '
+                    'SetUserProfile 重灌整张表，再回读确认。'
+                    % (duty_base, duty_after, duty_back))
         else:
-            rep.out('  结论：转速往**反方向**动了（%s→%s，我们要的是%s），这不合理，'
-                    '按异常处理：别再写第二次，人工确认现在的表还是不是我们还原的那份。'
-                    % (b, a2, '抬' if want_up else '压'))
+            rep.out('  结论：字节写进去了、回读也一致，但稳态占空没动（%s%%→%s%%）——'
+                    'EC 很可能整块丢了这张表（硬规则违反了会静默退回内置曲线），'
+                    '或者这个档位下它不采纳外部表。不猜，下一步只做静态分析。'
+                    % (duty_base, duty_after))
         rep.out('  档位停在 turbo（0x0751=0x10）：这一轮是我们握着 MQTT 切的，'
                 '工具退出后服务会按它存的档位继续管。要交还给 OEM 就用面板或实体键切一次，'
                 '服务的 SetUserProfile 会重灌整张表。')
