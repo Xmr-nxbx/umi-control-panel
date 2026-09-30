@@ -142,6 +142,26 @@ def sec_logs(logs):
     return lines, bad
 
 
+def sec_power_wall(hw):
+    """功耗墙现状。加这一条是因为机主报「电脑超级卡」时，原有 13 项体检**全绿**——
+    没有一项看功耗墙，而真正的根子是面板停着那段时间 GCUService 把 PL1 压回了 10 W。
+    数据只从 hw['state'] 取，不发任何请求、不碰 EC，也只报现象不猜原因。"""
+    lines = []
+    state = hw.get('state') if isinstance(hw, dict) else None
+    state = state if isinstance(state, dict) else {}
+    pl1 = state.get('pl1_setting')
+    if not _is_num(pl1):
+        # 通道掉线时 sec_channels 已经报过了，这里重复报会淹掉真问题，所以归「可选」
+        return ['功耗墙：EC 没报到 PL1（通道不在线或寄存器表里没有这一项）'], 0
+    if pl1 <= 15:
+        lines.append('功耗墙：PL1=%s W，低到会把全核压在 1 GHz 上下（机器会明显卡）；'
+                     '这通常是 OEM 服务按它自己存的档位下发的' % pl1)
+    else:
+        who = state.get('mode') or state.get('hw_mode')
+        lines.append('功耗墙：PL1=%s W（档位=%s）' % (pl1, who if who else '未知'))
+    return lines, 1 if pl1 <= 15 else 0
+
+
 def sec_health(health):
     """体检接口只取「不通过且非可选」的行，给总判定参考。"""
     rows = health.get('rows') if isinstance(health, dict) else None
@@ -208,6 +228,10 @@ def main(argv=None):
     print('\n'.join(lines))
     print()
     lines, bad = sec_caps(hw)
+    problems += bad
+    print('\n'.join(lines))
+    print()
+    lines, bad = sec_power_wall(hw)
     problems += bad
     print('\n'.join(lines))
     print()
