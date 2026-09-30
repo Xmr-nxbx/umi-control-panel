@@ -51,6 +51,9 @@ OBSERVE_S = 45.0        # EC 平滑 30~40 秒，短了量不到
 LOAD_S = 40.0           # 只给 CPU 表用：0xA0 档实测点 1 触发温度 53 °C、空载只有 47 °C
 MODE_WAIT_S = 40.0      # 切档实测 24 秒生效，留到 40 秒
 DUTY_MATCH_PCT = 3.0    # 实测占空与表里某个档位差多少以内，算「落在表上」
+EC_DUTY_FLOOR = 30.0    # 固件常量地板 0x3C：目标为 0 且退避计数没归零时强制给 30 %
+                        # （逆向仓库 ec/decompiled/bank0/8C46.asm:99-109）。空转就读到它，
+                        # 目标持续为 0 约 180 秒后退避计数归零，才允许风扇真停转。
 FAIL_BREAK = 5
 BASE_ADDR = dict(FAN_TABLE_BASE)
 RPM_KEY = {'CPU': 'fan_rpm', 'GPU': 'fan2_rpm'}
@@ -393,27 +396,32 @@ def main(argv):
                       ref=points, bench=bench, load_s=load_s, read_temp=read_temp)
 
         # 触发闸：判据要用 **EC 自己给出的占空**，不是我们读到的温度。
-        # 22:44 实测：我们读 50.1 °C（表里点 1 的触发是 53 °C），EC 却已经给到 78 %——
-        # 它查表用的温度源比我们读的高几度。拿我们的温度当闸会一直误判「风扇还没转」。
-        # 真正要挡的是「EC 停在点 0、占空 0 %、风扇不转」那种一轮白跑的局面。
+        # 22:44 实测：我们读 50.1 °C（点 1 的升温阈值是 53 °C），EC 却给到 78 %。
+        # 原因不是「EC 的温度源和我们不同」——逆向仓库证实它查表只吃 0x043E/0x044F，
+        # 和 coretemp 只差 1 °C；真正的原因是**滞回**：判定是「温度 > 升温阈值就升档，
+        # 温度 < 降温阈值才降档，中间保持」，而本机点 1 的降温阈值正好是 50 °C，
+        # 所以 49~50 °C 会一直停在点 1 给 78 %。拿我们的温度当闸必然误判「风扇还没转」。
         trig = next((p['up_t'] for p in points
                      if p.get('id') and (p.get('duty_pct') or 0) > 0
                      and p.get('up_t') is not None), None)
         if not base.get('duty_max'):
-            rep.out('[停止] 基线 45 秒里 EC 给的占空一直是 %s%%（我们读到最高 %s °C，'
-                    '表里点 1 的触发是 %s °C）——风扇停在点 0 没转，这一轮写了也量不到东西。'
+            rep.out('[停止] 基线里 EC 给的占空一直是 %s%%（我们读到最高 %s °C，'
+                    '表里点 1 的升温阈值是 %s °C）——风扇停在点 0 没转，这一轮写了也量不到东西。'
                     '**一个字节都没写。**' % (base.get('duty_max'), base['temp_max'], trig))
             return 1
-        rep.out('  风扇已经在转：EC 给到 %s%%（我们读到最高 %s °C，表里点 1 触发 %s °C——'
-                'EC 的温度源比我们读的高几度，属正常）' % (base['duty_max'], base['temp_max'], trig))
+        rep.out('  风扇已经在转：EC 给到 %s%%（我们读到最高 %s °C，点 1 升温阈值 %s °C；'
+                '停在上一档是滞回，不是温度源不同）'
+                % (base['duty_max'], base['temp_max'], trig))
 
         # 第二道闸，量的是「EC 此刻到底在不在按这张表给占空」。
         # 判据是**实测占空有没有落在表里的档位集合上**，不是「和表里该点差多少」：
-        # 22:2x 实测过，拿我们的温度去查表会误杀——EC 查表用的温度带滞后、也不是我们读的
-        # 这个源（54~59 °C 时它给 100 %，正是表里 57 °C 那档；46 °C 时给 0 %、风扇直接停转，
-        # 正是表里点 0）。而 0xA0 手动档的特征是给出 90 %/87 % 这种**表里根本没有的值**。
+        # 拿我们的温度去查表比差值会误杀（滞回 + 每 3 tick 走 0.5 % 的斜坡会产生
+        # 44.5/49.5/56.5 这种表里没有的半步中间态）。而 0xA0 手动档的特征是给出
+        # 90 %/87 % 这种既不在表里、也不是地板值的数。
+        # 允许值里必须带上 30 %：那是**固件常量地板 0x3C**（目标为 0 且退避计数未归零时
+        # 强制给 30 %），空转时就会读到它，不带上会把正常状态误判成「没在查表」。
         table_duties = sorted({round(p['duty_pct']) for p in points
-                               if p.get('duty_pct') is not None})
+                               if p.get('duty_pct') is not None} | {round(EC_DUTY_FLOOR)})
         seen = base.get('duty_vals') or []
         on_table = [d for d in seen
                     if any(abs(d - t) <= DUTY_MATCH_PCT for t in table_duties)]
@@ -426,7 +434,7 @@ def main(argv):
             return 1
         rep.out('  EC 在按这张表给占空：实测 %s%% 里有 %s%% 落在表档位 %s%% 上'
                 '（与「我们的温度查表」的偏差 最小 %.1f / 最大 %.1f，仅供参考——'
-                'EC 用的温度源带滞后，偏差大是正常的）'
+                '滞回和每 3 tick 走 0.5 %% 的斜坡都会让这个偏差看起来很大）'
                 % ('/'.join(str(d) for d in seen), '/'.join(str(d) for d in on_table),
                    '/'.join(str(t) for t in table_duties),
                    base.get('dev_min'), base.get('dev_max')))

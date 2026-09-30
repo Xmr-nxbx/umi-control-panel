@@ -209,6 +209,10 @@ def _():
     # 拿「我们的温度 → 表里该点」硬比会把活表误杀（54~59 °C 给 100 % 正是表里 57 °C 那档）。
     # 手动档的真特征是给出表里**没有**的占空值（90 %/87 %，表里只有 0/78/100）。
     assert ftt.DUTY_MATCH_PCT == 3.0
+    # 30 % 是固件常量地板（0x3C），空转时就读到它；不把它算进「表里的档位」，
+    # 正常空转状态会被误判成「EC 没在查表」而拒写
+    assert ftt.EC_DUTY_FLOOR == 30.0
+    assert 'EC_DUTY_FLOOR' in inspect.getsource(ftt.main)
     assert not hasattr(ftt, 'TABLE_FOLLOW_DEV'), '旧的偏差闸已经废了，别再留着'
     src = inspect.getsource(ftt.sample)
     assert "'duty_vals'" in src, src
