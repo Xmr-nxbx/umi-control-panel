@@ -23,6 +23,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from app.act.channels.base import CAP_PL_WRITE           # noqa: E402
 from app.act.channels.mqtt_gcu import MqttChannel        # noqa: E402
 
 CASES = []
@@ -165,6 +166,16 @@ def t_shape_from_whitelist():
     assert spec['value'] == 'SET_OPERATING_MODE_DETAIL', spec
     assert spec['cap'] == 'power_limit.write', spec
     assert spec['topic'] == 'fan_control', spec
+
+
+@case('能力表要把功耗墙写成 unknown 并说明缺什么，通道掉线时也要能复位')
+def t_cap_reported_and_reset():
+    src = inspect.getsource(MqttChannel._session)
+    assert "self.caps[CAP_PL_WRITE] = 'unknown'" in src, '能力状态没上报，面板画不出这一行'
+    assert 'pl_write_reason' in src, '没写清楚缺的是哪一步'
+    whole = inspect.getsource(sys.modules[MqttChannel.__module__])
+    assert 'CAP_PL_READ, CAP_PL_WRITE' in whole, \
+        '复位列表里没有它：通道掉线后会留着上一次的 verified 骗人'
 
 
 def main():

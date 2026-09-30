@@ -17,7 +17,7 @@ import threading
 import time
 
 from app.act.channels.base import (Channel, CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ,
-                                   CAP_RGB, CAP_DGPU, CAP_WINKEY_WRITE,
+                                   CAP_PL_WRITE, CAP_RGB, CAP_DGPU, CAP_WINKEY_WRITE,
                                    CAP_BATTERY_MODE_WRITE, MODE_LABELS, MODE_VERIFIED)
 
 ACTIONS_PATH = os.path.join(os.path.dirname(__file__), 'gcu_actions.json')
@@ -165,8 +165,8 @@ class MqttChannel(Channel):
         self.last_mode = None
         self._last_probe_ts = 0.0
         self._kick_reason = None
-        for cap in (CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ, CAP_RGB, CAP_DGPU,
-                    CAP_WINKEY_WRITE, CAP_BATTERY_MODE_WRITE):
+        for cap in (CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ, CAP_PL_WRITE, CAP_RGB,
+                    CAP_DGPU, CAP_WINKEY_WRITE, CAP_BATTERY_MODE_WRITE):
             self.caps[cap] = 'unsupported'
         self.detail = {'enabled': self.enabled, 'broker': '%s:%s' % (self.host, self.port)}
 
@@ -224,6 +224,13 @@ class MqttChannel(Channel):
         self.alive = True
         self.caps[CAP_MODE_READ] = 'verified'
         self.caps[CAP_PL_READ] = 'verified'
+        # 精细功耗墙：护栏代码已经就位（set_power_limits 会拿 Fan/Status 的边界夹），
+        # 但**还没做过一次在场验证**，所以照旧不点亮，能力表写 unknown 并说明缺什么。
+        self.caps[CAP_PL_WRITE] = 'unknown'
+        self.detail['pl_write_reason'] = (
+            '护栏已就位（越界拒发、没边界不发），缺一次有人在场的一次验证：'
+            '下发界内值 → 看 EC 0x0783 真的变了 → 还原。'
+            '注意 0x0783-0x0785 还有 ACPI 侧写者，还原值可能不是原值，验证时要对照前后读数')
         # 写档位：2026-09-30 12:19-12:24 做完整可逆验证（notes/hardware-channels.md 6.11 十五）。
         # 关键发现是**方向反了**：EC 的 `0x0751`（面板风扇模式字节）是**服务的输出，不是输入**。
         # 只写那个字节 → PL1 死守 10 W，100 秒 52 个采样点一次没动；
