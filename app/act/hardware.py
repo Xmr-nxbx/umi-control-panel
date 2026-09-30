@@ -17,6 +17,14 @@ from app.act.channels.mqtt_gcu import MqttChannel
 # 上一版这个窗口只有 8 秒，所以面板把自己发的每一次切档都认成了「有人按了造物者键」，
 # 于是既给用户弹假消息，又给自己下一把 900 秒的按键优先锁。
 ECHO_SUPPRESS_S = 45.0
+# 有些命令我们只发给了 GCUBridge，**真正写 EC 的是服务**，所以轮询眼里那是一次"别人"的改动。
+# 不提前打招呼，日志就会写成「不是本面板写的：实体按键或其它软件在改」——是句假话，
+# 2026-09-30 16:05 实测：下发 Win 锁后 1~2 秒 ADDR_STAUTS_BYTE 就变了，却被归因成外部改动。
+# 值域照实测写宽一点（这条实测 1~6 秒，取 15 秒），只影响归因、不影响任何写入。
+ACTION_EC_ECHO = {
+    'WINKEY_LOCK': ('ADDR_STAUTS_BYTE', 15.0, '面板下发锁定 Win 键'),
+    'WINKEY_UNLOCK': ('ADDR_STAUTS_BYTE', 15.0, '面板下发解锁 Win 键'),
+}
 # 通道能给出的额外语义值，一并进快照供面板展示（EC 的寄存器语义 + GCUBridge 报的开关状态）
 STATE_KEYS = ('mode', 'hw_mode', 'pl1', 'pl2', 'pl4', 'fan_rpm', 'fan2_rpm', 'fan_boost',
               'fan_mode',
@@ -189,7 +197,12 @@ class Hardware:
             if hasattr(ch, 'send_action') and ch.alive:
                 # 通道自己会在写成功后开追问窗口（mqtt_gcu.send_action），
                 # 这里不重复催：Setting/Status 不问了不推，忘了开就要等 45 秒才翻。
-                return ch.send_action(action, extra, note)
+                ok, detail = ch.send_action(action, extra, note)
+                if ok:
+                    reg = ACTION_EC_ECHO.get(action)
+                    if reg:
+                        self.ec.expect_external_change(reg[0], reg[1], reg[2])
+                return ok, detail
         return False, 'GCUBridge 未连接，命令不下发'
 
     # ---------- 息屏/锁屏掉档守护 ----------

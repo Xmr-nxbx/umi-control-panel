@@ -331,6 +331,9 @@ class EcChannel:
         self._fan_key_echo_until = 0.0
         self._fan_key_echo_why = ''
         self._fan_key_echo_applied = None
+        # 其他「我们下发、服务去写」的字节：name -> (到什么时候, 为什么)。
+        # 只影响日志里那句归因，不碰按键优先锁。
+        self._echo_until = {}
         # 外部改风扇字节时的回调 fn(old, new)：由上层（cli）挂屏幕提示，
         # 通道本身不认识任何 UI，免得硬件层反过来依赖界面。
         # 注意回调跑在 EC 轮询线程里，必须不阻塞（屏幕提示用 PostMessage 就满足）。
@@ -355,6 +358,15 @@ class EcChannel:
         self._fan_key_echo_until = time.time() + float(seconds)
         self._fan_key_echo_why = why
         self._fan_key_echo_applied = on_applied
+
+    def expect_external_change(self, name, seconds=15.0, why='面板刚下发过 OEM 命令'):
+        """接下来 N 秒内这个寄存器变了，归因成「我们下发的回声」，不说成外部改动。
+
+        和 `expect_fan_key_change` 同一类问题：命令走 GCUBridge，写 EC 的是服务，
+        轮询看到的是一次"别人"的改动。Win 键锁定就是这一类
+        （2026-09-30 16:05：下发后 1~2 秒 `ADDR_STAUTS_BYTE` 就变了，日志却写「不是本面板写的」）。
+        """
+        self._echo_until[name] = (time.time() + float(seconds), why)
 
     def fan_lock_left(self, now=None):
         """还有多少秒不允许面板自动改风扇字节（0 = 可以自由跟随）。"""
@@ -544,6 +556,19 @@ class EcChannel:
                     except Exception as exc:               # noqa: BLE001
                         if self.log:
                             self.log.warn('[EC变化] 按键回调异常（忽略）：%r' % (exc,))
+            echo = self._echo_until.get(name)
+            if echo and time.time() < echo[0]:
+                # 这条也不是外部改的：命令是我们从 GCUBridge 下发的，但**写 EC 的是服务**，
+                # 轮询眼里就成了"别人"。不标注就会写成「不是本面板写的」，
+                # 下次查问题被这句假话带偏（2026-09-30 16:05 实测到 Win 锁就是这样）。
+                del self._echo_until[name]
+                entry['echo'] = echo[1]
+                if self.log:
+                    self.log.info('[EC变化] %s: %s → %s 判为面板下发的回声（%s），不是外部改动'
+                                  % (name, old, value, entry['echo']))
+                continue
+            for stale in [k for k, v in self._echo_until.items() if time.time() >= v[0]]:
+                del self._echo_until[stale]      # 没等到变化就过期，别留着骗下一次
             if self.log:
                 self.log.info('[EC变化] %s: %s → %s（不是本面板写的：实体按键或其它软件在改）'
                               % (name, old, value))

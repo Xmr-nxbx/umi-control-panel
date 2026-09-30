@@ -259,6 +259,7 @@ def _stub(echo_left):
             self.hold_until = 0.0
             self._fan_key_echo_until = time.time() + echo_left
             self._fan_key_echo_why = '面板下发 turbo'
+            self._echo_until = {}              # 其他字段的回声归因（Win 锁那一类）
             # 生效回调：用列表假装，回声到达时往里追加一次
             self.applied = []
             self._fan_key_echo_applied = (lambda: self.applied.append('applied')
