@@ -1,6 +1,7 @@
 # 交接：给 workbuddy 的三条活（2026-09-30 第二批）
 
-基线：`main` = `bcf5b9c`。分支：`workbuddy/assist2`（我已建好指针，你自己 `git switch`）。
+基线：分支 `workbuddy/assist2` 与 `main` 同点，就是**本文档所在的那个提交**
+（下面所有 diff 命令都写成 `main..workbuddy/assist2`，不依赖具体哈希）。指针我已建好，你自己 `git switch`。
 上一条交接（`run_tests.py` / `app/fanrules.py` / `tools/selfcheck.py`）已合并，文档已删；
 这次沿用同一套规矩：**三条活、文件互不重叠、净 diff 只许出现约定文件**。
 
@@ -144,8 +145,8 @@
 
 **`tools/fan_table_test.py` 本体一行都不许改**——包括你以为的笔误、包括你觉得判据不够严。
 发现问题只许写进交付说明，我来决定改不改。
-（这个文件目前在仓库里是**未跟踪**状态，我还没提交；你可以直接 import 它写测试，
-合并时我会把它一起提交。所以你的 diff 里只许出现 `tests/test_fan_table_tool.py`。）
+（这个文件已在基线里，提交 `46ad4b2`；你可以直接 import 它写测试。
+你的 diff 里只许出现 `tests/test_fan_table_tool.py`。）
 
 **怎么 import**：`tools/` 不是包（没有 `__init__.py`），**不许**写 `import tools.fan_table_test`。
 用 `importlib.util.spec_from_file_location('fan_table_test', <仓库根>/tools/fan_table_test.py)`
@@ -212,13 +213,15 @@
 
 ## 交付方式
 
-1. 分支 `workbuddy/assist2`（基线 `bcf5b9c`）。**切分支前先确认面板已停**：
+1. 分支 `workbuddy/assist2`（基线见文首）。**切分支前先确认面板已停**：
    切工作树会把 `main.py` / `app/` 换成另一份，正在跑的面板会读到不一致的文件。
    你不许自己停面板（铁律 1）——所以要切分支，先在交付说明里写一句让我来切。
 2. **一条任务一个提交**，提交信息中文，照 `git log --oneline -6` 的风格：
    一句话说清「为什么」，不是「改了什么」。
 3. `git add` **只加你被允许的文件**。**不许 `git add -A` / `git add .`**：
-   仓库根有未跟踪的 `.workbuddy/`（你自己的目录）和 `tools/fan_table_test.py`（我的，未提交）。
+   你自己的 `.workbuddy/` 我已经写进 `.git/info/exclude`（本地生效、不进仓库），
+   所以正常情况下 `git status` 应该**始终是干净的**；
+   如果你那边冒出别的未跟踪文件，先停下来在交付说明里问，别自己决定加不加。
 4. **不许 push。**
 5. 交付说明写在仓库根 `HANDOFF-RESULT.md`（我合并时会删掉），内容：
    每条任务的实测命令与输出摘要、你自己发现的疑点、以及任何你**没做**的事和原因。
