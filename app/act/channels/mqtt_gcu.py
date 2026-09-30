@@ -345,6 +345,65 @@ class MqttChannel(Channel):
             return False, '未知档位 %s' % mode
         return self.send_action(action, note='切档 -> %s' % mode)
 
+    # ---------- 精细功耗墙 ----------
+    def pl_limits(self):
+        """OEM 自己在 `Fan/Status` 里写的边界。拿不到就返回 None——没护栏就不发。
+
+        注意 `Fan/Status` 不是周期广播：本机只在被 `GETSTATUS` 问到时才报，
+        所以这一组数经常是空的（面板上那行显示「未报」不是 bug）。
+        """
+        fan = (self.payloads().get('Fan/Status') or {}).get('data') or {}
+
+        def num(key):
+            try:
+                return int(str(fan[key]))
+            except (KeyError, TypeError, ValueError):
+                return None
+
+        out = {'pl1_min': num('CPU_PL1Minimum'), 'pl1_max': num('CPU_PL1Maximum'),
+               'pl4_max': num('CPU_PL4Maximum')}
+        return out if any(v is not None for v in out.values()) else None
+
+    def set_power_limits(self, pl1=None, pl2=None, pl4=None):
+        """唯一那条受支持的改墙路径：`Fan/Control SET_OPERATING_MODE_DETAIL`。
+
+        ⚠️ 服务端对这三个值**完全不做边界校验**：`Convert.ToInt32` 之后直接 `(byte)` 截断，
+        发 300 会静默变成 44 W（notes/hardware-channels.md 6.11 十二）。
+        所以护栏只能我们自己加，而且**越界是拒绝、不是悄悄夹到边上**——
+        悄悄夹会让人以为设成了 300。PL1/PL2/PL4 是三个独立 `if`，一条消息能同时带三个。
+        OEM 没单独报 PL2 的边界，这里借用 PL1 那一组，理由写在拒绝文案里。
+        """
+        want = {'PL1': pl1, 'PL2': pl2, 'PL4': pl4}
+        want = dict((k, v) for k, v in want.items() if v is not None)
+        if not want:
+            return False, '没有要改的值'
+        lim = self.pl_limits()
+        if not lim:
+            return False, ('拿不到 Fan/Status 里 OEM 自己报的上下限，拒绝下发：'
+                           '没有护栏的功耗墙写入不做。Fan/Status 只在被问到时才报，'
+                           '先发一条 GETSTATUS 再试')
+        bounds = {'PL1': (lim.get('pl1_min'), lim.get('pl1_max')),
+                  # OEM 没报 PL2 的独立边界，借用 PL1 那一组（它总不会比 PL1 上限更宽）
+                  'PL2': (lim.get('pl1_min'), lim.get('pl1_max')),
+                  'PL4': (lim.get('pl1_min'), lim.get('pl4_max'))}
+        extra = {}
+        for key, value in want.items():
+            lo, hi = bounds[key]
+            try:
+                iv = int(value)
+            except (TypeError, ValueError):
+                return False, '%s=%r 不是整数' % (key, value)
+            if iv < 0 or iv > 255:
+                return False, ('%s=%d 超出一个字节，服务端会静默截断成 %d W，拒发'
+                               % (key, iv, iv & 0xFF))
+            if lo is None or hi is None:
+                return False, '%s 的 OEM 边界没报（只报了一半），不敢发' % key
+            if not lo <= iv <= hi:
+                return False, '%s=%d 超出 OEM 自己给的区间 %d~%d，拒发' % (key, iv, lo, hi)
+            extra[key] = str(iv)          # OEM 的报文里值是字符串，照它的样子发
+        return self.send_action('SET_PL_DETAIL', extra=extra,
+                                note='功耗墙 %s' % ' '.join('%s=%s' % kv for kv in sorted(extra.items())))
+
     def read(self):
         payloads = self.payloads()
         out = {'source': 'mqtt'}
