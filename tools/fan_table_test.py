@@ -50,7 +50,7 @@ GAP_S = 0.05            # 每字节之间的节流：EC 是慢设备，狂写会
 OBSERVE_S = 45.0        # EC 平滑 30~40 秒，短了量不到
 LOAD_S = 40.0           # 只给 CPU 表用：0xA0 档实测点 1 触发温度 53 °C、空载只有 47 °C
 MODE_WAIT_S = 40.0      # 切档实测 24 秒生效，留到 40 秒
-TABLE_FOLLOW_DEV = 8.0  # 实测占空与表里该点的占空差几个点以上，就认定 EC 没在看这张表
+DUTY_MATCH_PCT = 3.0    # 实测占空与表里某个档位差多少以内，算「落在表上」
 FAIL_BREAK = 5
 BASE_ADDR = dict(FAN_TABLE_BASE)
 RPM_KEY = {'CPU': 'fan_rpm', 'GPU': 'fan2_rpm'}
@@ -97,9 +97,9 @@ def in_table_range(which, addr):
 
 
 def modified(points, delta):
-    """把点 1 以后的占空比整体抬高 delta（封顶 100）。
+    """把点 1 以后的占空比整体平移 delta（上封 100、下封 0，两个方向都要能测）。
 
-    整体抬高是为了保住「单调不减」这条硬规则：原表单调，逐点加同一个数再截顶仍然单调。
+    整体平移是为了保住「单调不减」这条硬规则：原表单调，逐点加同一个数再截顶仍然单调。
     点 0 必须留在 0 %（另一条硬规则），温度阈值一个都不动——动它们等于改触发点，
     量出来的差别就分不清是「风扇更猛」还是「更早升档」。
     """
@@ -107,7 +107,7 @@ def modified(points, delta):
     for p in points:
         q = dict(p)
         if p['id'] != 0 and p.get('duty_pct') is not None:
-            q['duty_pct'] = min(100.0, round(p['duty_pct'] + delta, 1))
+            q['duty_pct'] = max(0.0, min(100.0, round(p['duty_pct'] + delta, 1)))
         out.append(q)
     return out
 
@@ -201,6 +201,7 @@ def sample(ec, thermal, seconds, rep, which, label, ref=None, bench=None, load_s
     return {'rpm_max': max(rpms) if rpms else None,
             'rpm_avg': round(sum(rpms) / len(rpms)) if rpms else None,
             'duty_max': max(duties) if duties else None,
+            'duty_vals': sorted(set(duties)),
             'dev_min': round(min(devs), 1) if devs else None,
             'dev_max': round(max(devs), 1) if devs else None,
             'temp_max': max(temps) if temps else None, 'n': len(rpms)}
@@ -255,8 +256,8 @@ def main(argv):
                    OBSERVE_S)
     load_s = next((float(a.split('=', 1)[1]) for a in argv if a.startswith('--load=')), LOAD_S)
     rep = Report()
-    res = {'ec': None, 'thermal': None, 'clock': None, 'mqtt': None}
-    rep.out('风扇表写入可逆验证  %s｜表=%s 抬高=%.0f%% 观察=%.0fs 负载=%.0fs 模式=%s' % (
+    res = {'ec': None, 'thermal': None, 'clock': None, 'mqtt': None, 'bench': None}
+    rep.out('风扇表写入可逆验证  %s｜表=%s 占空平移=%+.0f%% 观察=%.0fs 负载=%.0fs 模式=%s' % (
         time.strftime('%Y-%m-%d %H:%M:%S'), which, delta, observe, load_s,
         '真下发' if write else '演练（不发）'))
     try:
@@ -284,6 +285,7 @@ def main(argv):
         clock = ClockSense() if load_s > 0 else None
         res['clock'] = clock
         bench = Bench(log=log, thermal=thermal, clock=clock) if load_s > 0 else None
+        res['bench'] = bench      # 被闸门中断时也要收掉 zstd 子进程，否则留孤儿烧 CPU
         detail = ec.probe()
         rep.out('EC 通道=%s allow_write=%s' % (detail.get('state'), ec.allow_write))
         if not ec.alive or not ec.allow_write:
@@ -365,29 +367,44 @@ def main(argv):
         base = sample(ec, thermal, observe, rep, which, '基线',
                       ref=points, bench=bench, load_s=load_s, read_temp=read_temp)
 
-        # 触发温度取点 1 的 up_t（0xA0 档实测 53 °C）。基线连它都没顶过，风扇全程停在点 0
-        # （占空比按硬规则必须是 0 %），写下去只会得到「转速没动」的**假阴性**。
+        # 触发闸：判据要用 **EC 自己给出的占空**，不是我们读到的温度。
+        # 22:44 实测：我们读 50.1 °C（表里点 1 的触发是 53 °C），EC 却已经给到 78 %——
+        # 它查表用的温度源比我们读的高几度。拿我们的温度当闸会一直误判「风扇还没转」。
+        # 真正要挡的是「EC 停在点 0、占空 0 %、风扇不转」那种一轮白跑的局面。
         trig = next((p['up_t'] for p in points
                      if p.get('id') and (p.get('duty_pct') or 0) > 0
                      and p.get('up_t') is not None), None)
-        if trig is not None and (base['temp_max'] or 0) < trig:
-            rep.out('[停止] 基线最高只有 %s °C，没顶过 %s 表点 1 的触发温度 %s °C——风扇全程不会转，'
-                    '这一轮写了也量不到东西。**一个字节都没写。**'
-                    '多半是功耗墙被服务压回去了，先抬墙再跑。'
-                    % (base['temp_max'], which, trig))
+        if not base.get('duty_max'):
+            rep.out('[停止] 基线 45 秒里 EC 给的占空一直是 %s%%（我们读到最高 %s °C，'
+                    '表里点 1 的触发是 %s °C）——风扇停在点 0 没转，这一轮写了也量不到东西。'
+                    '**一个字节都没写。**' % (base.get('duty_max'), base['temp_max'], trig))
             return 1
+        rep.out('  风扇已经在转：EC 给到 %s%%（我们读到最高 %s °C，表里点 1 触发 %s °C——'
+                'EC 的温度源比我们读的高几度，属正常）' % (base['duty_max'], base['temp_max'], trig))
 
-        # 第二道闸，量的是「EC 此刻到底在不在看这张表」。用**最小**偏差而不是最大：
-        # EC 平滑要 30~40 秒，升温途中占空比一定暂时落后于表（偏差可以很大，不是异常）；
-        # 但只要有一瞬间对得上，就说明有人在读这张表。反例是 0xA0 手动档——实测一直
-        # 53~56 %、表里点 0 要 0 %，全程一次都没对上过（最小偏差 53 个百分点）。
-        if base.get('dev_min') is not None and base['dev_min'] > TABLE_FOLLOW_DEV:
-            rep.out('[停止] 基线 45 秒里实测占空比和表里要求的**最小**偏差都有 %.1f 个百分点'
-                    '（阈值 %.0f）——EC 这段时间一次都没跟着这张表走，写下去只是改一块没人读的'
-                    '内存。**一个字节都没写。**' % (base['dev_min'], TABLE_FOLLOW_DEV))
+        # 第二道闸，量的是「EC 此刻到底在不在按这张表给占空」。
+        # 判据是**实测占空有没有落在表里的档位集合上**，不是「和表里该点差多少」：
+        # 22:2x 实测过，拿我们的温度去查表会误杀——EC 查表用的温度带滞后、也不是我们读的
+        # 这个源（54~59 °C 时它给 100 %，正是表里 57 °C 那档；46 °C 时给 0 %、风扇直接停转，
+        # 正是表里点 0）。而 0xA0 手动档的特征是给出 90 %/87 % 这种**表里根本没有的值**。
+        table_duties = sorted({round(p['duty_pct']) for p in points
+                               if p.get('duty_pct') is not None})
+        seen = base.get('duty_vals') or []
+        on_table = [d for d in seen
+                    if any(abs(d - t) <= DUTY_MATCH_PCT for t in table_duties)]
+        if not on_table:
+            rep.out('[停止] 基线里实测占空 %s%% 一个都没落在表里的档位 %s%%（容差 ±%.0f）上——'
+                    'EC 没在按这张表给占空（手动档就是这样），写下去只是改一块没人读的内存。'
+                    '**一个字节都没写。**'
+                    % ('/'.join(str(d) for d in seen) or '读不到',
+                       '/'.join(str(t) for t in table_duties), DUTY_MATCH_PCT))
             return 1
-        rep.out('  EC 在看这张表：实测与表里的偏差最小 %.1f、最大 %.1f 个百分点' % (
-            base.get('dev_min'), base.get('dev_max')))
+        rep.out('  EC 在按这张表给占空：实测 %s%% 里有 %s%% 落在表档位 %s%% 上'
+                '（与「我们的温度查表」的偏差 最小 %.1f / 最大 %.1f，仅供参考——'
+                'EC 用的温度源带滞后，偏差大是正常的）'
+                % ('/'.join(str(d) for d in seen), '/'.join(str(d) for d in on_table),
+                   '/'.join(str(t) for t in table_duties),
+                   base.get('dev_min'), base.get('dev_max')))
 
         rep.out('')
         rep.out('=== 写入新表 ===')
@@ -417,27 +434,38 @@ def main(argv):
         rep.out('  温度 基线 %s → 新表 %s → 还原后 %s °C（最高）' % (
             base['temp_max'], after['temp_max'], restored['temp_max']))
         b, a2 = base['rpm_avg'] or 0, after['rpm_avg'] or 0
+        # 判据看的是「转速往我们要的方向动了没有」，不是「转速涨了没有」。
+        # turbo 档两张表在可达温度区间里都饱和在 100 %，往上抬会被封顶成一次无效实验；
+        # 往下压才有肉眼/耳朵都分得出的变化，所以 delta 的符号决定期望方向。
+        want_up = delta > 0
+        moved = (a2 >= b * 1.05) if want_up else (a2 <= b * 0.95)
+        flat = abs(a2 - b) <= b * 0.05
+        back_ok = abs((restored['rpm_avg'] or 0) - b) <= b * 0.08
         if bad or refused:
             rep.out('  结论：没写全，判据不成立。不补写、不重试第二轮，先看失败在哪几个地址。')
-        elif a2 >= b * 1.05:
-            rep.out('  结论：转速跟着占空比走了（+%.0f%%），**风扇表写入这条路是通的**。'
+        elif not b or not a2:
+            rep.out('  结论：转速没读到（%s→%s），判据不成立——一次硬件写入都没法凭这个下结论。'
+                    % (base['rpm_avg'], after['rpm_avg']))
+        elif moved:
+            rep.out('  结论：转速跟着占空比往%s走了（%.0f%%），**风扇表写入这条路是通的**。'
                     '还原后回到 %s RPM%s' % (
-                        restored['rpm_avg'],
-                        '，可逆性成立' if (restored['rpm_avg'] or 0) <= b * 1.08 else '，但没回到位'))
-        elif a2 >= b * 0.95:
+                        '上' if want_up else '下', (a2 / b - 1) * 100, restored['rpm_avg'],
+                        '，可逆性成立' if back_ok else '，但没回到位'))
+        elif flat:
             rep.out('  结论：字节写进去了、回读也一致，但转速没动——EC 很可能整块丢了这张表'
                     '（硬规则违反了会静默退回内置曲线），或者这个档位下服务不采纳外部表。'
                     '不猜，下一步只做静态分析。')
         else:
-            rep.out('  结论：转速反而掉了（%s→%s），这不合理，按异常处理：别再写第二次，'
-                    '人工确认现在的表还是不是我们还原的那份。' % (b, a2))
+            rep.out('  结论：转速往**反方向**动了（%s→%s，我们要的是%s），这不合理，'
+                    '按异常处理：别再写第二次，人工确认现在的表还是不是我们还原的那份。'
+                    % (b, a2, '抬' if want_up else '压'))
         rep.out('  档位停在 turbo（0x0751=0x10）：这一轮是我们握着 MQTT 切的，'
                 '工具退出后服务会按它存的档位继续管。要交还给 OEM 就用面板或实体键切一次，'
                 '服务的 SetUserProfile 会重灌整张表。')
         rep.out('  本进程 EC 读 %d 次、写 %d 次' % (ec.dev.reads, ec.dev.writes))
         return 0
     finally:
-        for key in ('mqtt', 'clock', 'thermal', 'ec'):
+        for key in ('bench', 'mqtt', 'clock', 'thermal', 'ec'):
             try:
                 if res[key] is not None:
                     res[key].close()

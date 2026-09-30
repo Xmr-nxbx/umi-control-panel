@@ -203,15 +203,32 @@ def _():
     assert ftt.DUTY_KEY['GPU'] == 'fan_duty_r'
 
 
-@case('「EC 在不在看这张表」的闸有阈值，且 sample 会算出偏差')
+@case('「EC 在不在按这张表给占空」的闸看档位集合，不看温度查表的偏差')
 def _():
-    # 0xA0 手动档实测差 53 个百分点：没有这道闸就会把「没人读这块内存」误判成「写入无效」
-    assert ftt.TABLE_FOLLOW_DEV == 8.0
+    # 22:2x 实测推翻了旧判据：EC 查表的温度带滞后、也不是我们读的那个源，
+    # 拿「我们的温度 → 表里该点」硬比会把活表误杀（54~59 °C 给 100 % 正是表里 57 °C 那档）。
+    # 手动档的真特征是给出表里**没有**的占空值（90 %/87 %，表里只有 0/78/100）。
+    assert ftt.DUTY_MATCH_PCT == 3.0
+    assert not hasattr(ftt, 'TABLE_FOLLOW_DEV'), '旧的偏差闸已经废了，别再留着'
     src = inspect.getsource(ftt.sample)
-    assert "devs.append(abs(duty - want['duty_pct']))" in src
-    assert "'dev_min'" in src and "'dev_max'" in src
-    # 闸用的是最小偏差：EC 平滑途中偏差大是正常，一次都没对上才是「没人读这张表」
-    assert 'dev_min' in inspect.getsource(ftt.main)
+    assert "'duty_vals'" in src, src
+    body = inspect.getsource(ftt.main)
+    assert 'table_duties' in body and 'on_table' in body, '闸必须落在档位集合上'
+    assert "dev_min' is not None and base['dev_min'] >" not in body
+
+
+@case('modified：delta 为负时往下平移也不许出负数（turbo 档只有压得动，抬高会撞 100 %）')
+def _():
+    out = ftt.modified(cpu(), -30.0)
+    assert all(p['duty_pct'] >= 0.0 for p in out if p['duty_pct'] is not None), out
+    assert out[0]['duty_pct'] == 0.0
+    assert out[1]['duty_pct'] == 36.0, out[1]['duty_pct']
+    assert out[2]['duty_pct'] == 69.0, out[2]['duty_pct']
+    assert fanrules.validate('CPU', out)[0] == []
+    # 极端负值：整表压到 0 也必须合法（点 0 本来就是 0）
+    deep = ftt.modified(cpu(), -500.0)
+    assert all(p['duty_pct'] == 0.0 for p in deep if p['duty_pct'] is not None), deep
+    assert fanrules.validate('CPU', deep)[0] == []
 
 
 def main():

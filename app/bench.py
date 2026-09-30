@@ -200,31 +200,50 @@ class Bench:
         self.clock = clock or ClockSense()
         self._ips = None
         self._cm_ips = None
-        self._zstd_ips = None
+        self._proc = None          # 正在跑的负载子进程，close() 要靠它收尸
 
     # ---------- 外部负载：开源 zstd ----------
-    def zstd(self, level, threads, iterations=3):
-        """跑一次 `zstd -b<level> -T<threads> -i<迭代>`，返回最高的压缩速度。
+    def zstd(self, level, threads, seconds=3, timeout=300.0):
+        """跑一次 `zstd -b<level> -T<threads> -i<秒>`，返回最高的压缩速度。
 
+        `-i` 的单位是**秒**（zstd 的基准模式里压缩和解压各测这么多秒），不是轮数——
+        名字仍叫 seconds 就是为了不再有人把它当迭代次数折算。
         -T0 = 用满所有线程（吃 CPU + 内存带宽，最能反映散热/功耗限制）；
         -T1 = 单线程（最能反映频率上限，也就是「点东西卡不卡」那部分）。
-        zstd 自己每轮迭代重打一行速度，取最好的那个，和它官方报告的口径一致。
+        zstd 自己每轮重打一行速度，取最好的那个，和它官方报告的口径一致。
         """
         missing = zstd_missing()
         if missing:
             raise RuntimeError(missing)
         args = [ZSTD_EXE, '-b%d' % level, '-T%s' % threads,
-                '-i%d' % iterations, INPUT_FILE]
+                '-i%d' % seconds, INPUT_FILE]
         mon = _Monitor(self.clock, self.thermal)
         mon.start()
         t0 = time.perf_counter()
+        text, err = '', None
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, encoding='utf-8', errors='replace',
+                                creationflags=NO_WINDOW)
+        self._proc = proc
         try:
-            proc = subprocess.run(args, capture_output=True, text=True, encoding='utf-8',
-                                  errors='replace', creationflags=NO_WINDOW, timeout=300)
-            text = (proc.stdout or '') + (proc.stderr or '')
-            err = 'zstd 退出码 %s' % proc.returncode if proc.returncode else None
-        except (OSError, subprocess.TimeoutExpired) as exc:
+            text, _ = proc.communicate(timeout=timeout)
+            if proc.returncode:
+                err = 'zstd 退出码 %s' % proc.returncode
+        except subprocess.TimeoutExpired as exc:
+            # 迭代数是按标定速度折算的，机器一慢就会跑超——超时必须**杀进程**再收残余输出。
+            # 2026-09-30 22:32 实测：一次「40 秒负载」按 1400 MB/s 折成 1286 轮，实际只有
+            # 400 MB/s，跑了两分多钟；调用方被闸门中断退出后它还在后台烧 4 个核，
+            # 把后面每一轮热实验的「空转基线」都抬高了 10 °C。
+            proc.kill()
+            try:
+                text, _ = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                text = exc.stdout or ''
+            err = 'zstd 跑满 %.0f 秒被掐断（折算的迭代数偏多，实际吞吐低于标定）' % timeout
+        except OSError as exc:
             text, err = '', 'zstd 调用失败：%r' % exc
+        finally:
+            self._proc = None
         dt = time.perf_counter() - t0
         mon.halt()
         mon.join(timeout=1.0)
@@ -233,21 +252,35 @@ class Bench:
         out.update(mon.result())
         return out
 
-    def load(self, workers=None, target_s=2.5, level=3):
-        """给 EC 实验用的「全核负载 + 一个可比的吞吐数」，大约跑 target_s 秒。
+    def close(self):
+        """把还在跑的负载子进程收掉。
 
-        用低压缩档 -b3：一遍 44MB 只要 0.1 秒左右，所以能按 target_s 折算迭代次数，
-        误差小，也不会像高档位那样一跑十几秒把机器烤热、干扰后面的测量。
+        实验工具是在守护线程里起负载的：主流程一旦被闸门中断返回，线程随进程死掉，
+        Windows 不会连带杀子进程 —— 于是留下一个孤儿 zstd 一直烧 CPU。
+        凡是起过负载的调用方，收尾都必须调这个。
+        """
+        proc, self._proc = self._proc, None
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            proc.kill()
+            proc.communicate(timeout=10)
+        except Exception:                              # noqa: BLE001 - 收尸失败不该盖掉主结论
+            pass
+
+    def load(self, workers=None, target_s=2.5, level=3):
+        """给 EC 实验用的「全核负载 + 一个可比的吞吐数」，跑约 target_s 秒。
+
+        ⚠️ `zstd -i<N>` 的 N 是**秒**（压缩和解压各测 N 秒），不是「压多少轮」。
+        2026-09-30 22:5x 实测：`-i5` 跑 12.5 秒，`-i1286` 跑了二十多分钟还在烧 CPU。
+        上一版先标定吞吐、再把 target_s 折算成「轮数」传给 `-i`，等于把秒数放大了十几倍：
+        `--load=45` 变成 636 秒、`target_s=2.5` 变成 51 秒；调用方一退出就留下孤儿 zstd，
+        把后面每一轮热实验的「空转基线」都抬高十几度（今晚两次误判都是它造成的）。
         """
         workers = workers or (os.cpu_count() or 4)
-        if self._zstd_ips is None:                 # 每秒能压多少 MB，标定一次就够
-            res = self.zstd(level, str(workers), iterations=3)
-            if not res.get('mb_s'):
-                raise RuntimeError(res.get('error') or 'zstd 没吐出速度，负载不可用')
-            self._zstd_ips = res['mb_s']
-        size_mb = os.path.getsize(INPUT_FILE) / 1048576.0
-        iters = max(1, int(self._zstd_ips * target_s / size_mb))
-        res = self.zstd(level, str(workers), iterations=iters)
+        # 墙钟兜底：实际耗时约是 -i 秒数的 2~3 倍，超时就掐，绝不允许跑到后台去。
+        res = self.zstd(level, str(workers), seconds=max(1, int(round(target_s))),
+                        timeout=target_s * 3 + 20)
         res['workers'] = workers
         return res
 

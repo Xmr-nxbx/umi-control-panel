@@ -193,6 +193,67 @@ def _():
         os.rmdir(tmp)
 
 
+@case('zstd 的 -i 是**秒**：load(target_s=7) 就得传 -i7，不许再按吞吐折算成轮数')
+def _():
+    if bench.zstd_missing():
+        print('     （本机没有 zstd，跳过）')
+        return
+    seen = {}
+
+    class FakeProc:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            seen['timeout'] = timeout
+            return ZSTD_LINE, ''
+
+        def poll(self):
+            return 0
+
+        def kill(self):
+            seen['killed'] = True
+
+    def fake_popen(args, **kw):
+        seen['args'] = args
+        return FakeProc()
+
+    b = bench.Bench.__new__(bench.Bench)      # 不走 __init__：别在测试里起 PDH 计数器
+    b.log, b.thermal, b.clock = None, None, None
+    b._ips = b._cm_ips = b._proc = None
+    old = bench.subprocess.Popen
+    bench.subprocess.Popen = fake_popen
+    try:
+        b.load(workers=2, target_s=7)
+    finally:
+        bench.subprocess.Popen = old
+    # 旧逻辑会先标定吞吐、再折算成上百「轮」，实际等于让 zstd 跑上百秒
+    assert '-i7' in seen['args'], seen['args']
+    assert seen['timeout'] <= 7 * 3 + 20, seen['timeout']
+    assert not hasattr(b, '_zstd_ips') or b.__dict__.get('_zstd_ips') is None
+
+
+@case('Bench.close() 要能掐掉还在跑的负载子进程（孤儿 zstd 会污染后面所有热实验）')
+def _():
+    killed = []
+
+    class FakeProc:
+        def poll(self):
+            return None                       # 还在跑
+
+        def kill(self):
+            killed.append(True)
+
+        def communicate(self, timeout=None):
+            return '', ''
+
+    b = bench.Bench.__new__(bench.Bench)
+    b._proc = FakeProc()
+    b.close()
+    assert killed == [True], '实验被闸门中断时，负载子进程必须跟着收掉'
+    assert b._proc is None
+    b.close()                                 # 没有子进程时重复调用必须是空操作
+
+
 def main():
     print('跑分算分与解析：%d 个场景' % len(CASES))
     bad = 0
