@@ -109,13 +109,20 @@ WATCH_REGS = ('ADDR_MAFAN_CONTROL_BYTE', 'ADDR_MyFanCCI_Mode_Index', 'ADDR_TRIGG
               'ADDR_SUPPORT_BYTE2', 'ADDR_AP_OEM_BYTE', 'ADDR_AP_OEM_BYTE4',
               'ADDR_BIOS_OEM_BYTE')
 WATCH_HISTORY = 60
-# 实体「造物者模式」按键就是在这个字节上循环，而且它是**硬件模式总开关**：
+# 实体「造物者模式」按键在这个字节上循环：
 #   全亮 Turbo_Mode(0x10) ↔ 不亮 User_Fan_HiMode(0xA0)，半亮 Normal_Mode(0x00)
 # 2026-09-30 全表差分（logs/观察EC全表）实测：按一次键，它变的同时
 #   PL1_SETTING_VALUE 75↔10、MYFAN2_L1/L4_PWM、DynamicBoost_MaxinumTGP、
 #   ConfigurableTGP_DynamicBoost_CTRL_BYTE、AP_OEM_BYTE6 整组跟着换。
 # （早前那次「按一次只有这一个字节变」是在 GCUBridge 停着的时候测的，别照抄。）
+# ⚠️ 但**别把它当"总开关"去写**：2026-09-30 12:19 实测，面板写这个字节
+#   PL1 死守 10 W 一百秒不动，只有键盘灯跟着亮——它是服务 SetUserProfile 的
+#   **输出**，不是输入。所以下面这一族只用于读，写入路径已全部关掉（见 set_mode）。
 FAN_KEY = 'ADDR_MAFAN_CONTROL_BYTE'
+# 面板发完 OEM 档位命令后，服务会过一会儿自己写 FAN_KEY。实测延迟 24~26 秒
+# （12:21:34→12:21:57、12:22:28→12:22:48、12:24:20→12:24:29、12:59:12→12:59:38），
+# 取 45 秒留一倍余量。窗口内别把这次变化归因成「有人按了实体键」。
+FAN_KEY_ECHO_S = 45.0
 # MyFanCTLByteFlag 里带这个位的全是「用户自己的曲线」：
 # User_Fan_Mode=0x80、User_Fan_HiMode=0xA0、User_Fan_Level1~5=0x81~0x85
 USER_FAN_BIT = 0x80
@@ -319,12 +326,29 @@ class EcChannel:
         self.hold_until = 0.0
         self.hold_by = None
         self.hold_last = None
+        # 面板刚下发过 OEM 档位命令时，服务会**过一会儿自己写 0x0751**（实测 24~26 秒）。
+        # 那段时间里这个字节的变化不许算成「有人按了实体键」，见 expect_fan_key_change()。
+        self._fan_key_echo_until = 0.0
+        self._fan_key_echo_why = ''
         # 外部改风扇字节时的回调 fn(old, new)：由上层（cli）挂屏幕提示，
         # 通道本身不认识任何 UI，免得硬件层反过来依赖界面。
         # 注意回调跑在 EC 轮询线程里，必须不阻塞（屏幕提示用 PostMessage 就满足）。
         self.on_key = None
 
     # ---------- 人工意图优先 ----------
+    def expect_fan_key_change(self, seconds=FAN_KEY_ECHO_S, why='面板刚下发过 OEM 档位命令'):
+        """接下来一段时间里，`0x0751` 变了**不许**当成「有人按了实体键」。
+
+        为什么要这个：这个字节是服务的**输出**（见 README 6.11 十五），
+        我们发一条 `OPERATING_*_MODE`，服务大约 24~26 秒后会自己把它写一次。
+        上一版把这种回声认成按键，于是①给自己下一把 900 秒的按键优先锁
+        （自动跟随被冻住），②给机主弹一句"你按了造物者键"的假消息（实测复现两次：
+        12:24:29 与 12:59:39，两次都没人碰键盘）。
+        变化本身照旧记录，只是不再归因成按键、不再触发屏幕提示。
+        """
+        self._fan_key_echo_until = time.time() + float(seconds)
+        self._fan_key_echo_why = why
+
     def fan_lock_left(self, now=None):
         """还有多少秒不允许面板自动改风扇字节（0 = 可以自由跟随）。"""
         left = self.hold_until - (now or time.time())
@@ -487,6 +511,14 @@ class EcChannel:
             self.changes.append(entry)
             del self.changes[:-WATCH_HISTORY]
             if name == FAN_KEY:
+                if time.time() < self._fan_key_echo_until:
+                    # 回声：服务应用我们刚下发的档位命令时，会自己写这个字节。
+                    # 变化照旧留在 changes 里，但不抢按键优先锁、不弹按键提示。
+                    entry['echo'] = getattr(self, '_fan_key_echo_why', '')
+                    if self.log:
+                        self.log.info('[EC变化] %s: %s → %s 判为**档位命令的回声**（%s），不算按键'
+                                      % (name, old, value, entry['echo']))
+                    continue
                 # 实体按键刚被按过：一段时间内把风扇交给用户，面板不再自动跟随。
                 # 上一版没有这个让步，实测到按键改完 0 秒就被面板写回去。
                 self.take_fan_control('实体按键')

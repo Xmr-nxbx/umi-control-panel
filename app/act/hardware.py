@@ -12,7 +12,11 @@ from app.act.channels.ec_gpd import EcChannel
 from app.act.channels.hid_ite8291 import HidLightChannel
 from app.act.channels.mqtt_gcu import MqttChannel
 
-ECHO_SUPPRESS_S = 8.0
+# 自己下发的命令，它的回声要压住别当成外部事件报（README 6.11 十五、待办 #39）。
+# 实测服务应用一条档位命令要 **24~26 秒**（12:21:34→12:21:57、12:59:12→12:59:38），
+# 上一版这个窗口只有 8 秒，所以面板把自己发的每一次切档都认成了「有人按了造物者键」，
+# 于是既给机主弹假消息，又给自己下一把 900 秒的按键优先锁。
+ECHO_SUPPRESS_S = 45.0
 # 通道能给出的额外语义值，一并进快照供面板展示（EC 的寄存器语义 + GCUBridge 报的开关状态）
 STATE_KEYS = ('mode', 'hw_mode', 'pl1', 'pl2', 'pl4', 'fan_rpm', 'fan2_rpm', 'fan_boost',
               'fan_mode',
@@ -140,6 +144,12 @@ class Hardware:
                 ok, detail = ch.set_mode(mode)
                 results.append((ch.name, ok, detail))
                 if ok:
+                    # 服务收到这条命令后，约 24~26 秒会**自己写一次** EC 的档位字节
+                    # （那个字节是它的输出，见 README 6.11 十五）。提前跟 EC 通道打招乎，
+                    # 别把这次回声归因成「有人按了造物者键」——否则既弹假消息，
+                    # 又会下一个 900 秒按键优先锁把自动跟随冻住（待办 #39 的实测现场）。
+                    self.ec.expect_fan_key_change(
+                        why='面板下发 %s（%s）' % (mode, reason or '手动'))
                     self.log.info('[硬件] 切档 %s（%s）：%s' % (MODE_LABELS[mode], reason or '-', detail))
                     with self.lock:
                         self.state['mode'] = mode

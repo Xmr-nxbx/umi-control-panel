@@ -22,9 +22,11 @@ import inspect
 import io
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from app.act import hardware as hardware_mod                         # noqa: E402
 from app.act.channels.base import (MODES, MODE_LABELS, MODE_VERIFIED,  # noqa: E402
                                    HW_MODE_BY_FAN_FLAG)
 from app.act.channels import ec_gpd, mqtt_gcu                        # noqa: E402
@@ -116,6 +118,71 @@ def t_byte_still_read_only_mapping():
     assert hw_mode_of_fan_flag('User_Fan_HiMode') == 'eco'
     assert hw_mode_of_fan_flag('Nonsense') is None
     assert hw_mode_of_fan_flag(None) is None
+
+
+@case('档位命令的回声不许被认成实体按键（#39，实测复现两次）')
+def t_echo_window_suppresses_key():
+    st = _stub(echo_left=30.0)
+    ec_gpd.EcChannel._watch(st)
+    assert st.took == [], '回声窗口内还去抢「实体按键」优先锁：%s' % st.took
+    assert st.fired == [], '回声窗口内还触发了按键提示（会给机主弹假消息）：%s' % st.fired
+    assert st.changes and st.changes[0].get('echo'), '变化本身也该照实记下来'
+
+
+@case('窗口过期之后，真实按键仍然认得出来')
+def t_expired_window_still_detects_key():
+    st = _stub(echo_left=0.0)
+    ec_gpd.EcChannel._watch(st)
+    assert st.took == ['实体按键'], '按键优先锁没抢，说明判定被写死了：%s' % st.took
+    assert len(st.fired) == 1, '屏幕提示没响，机主按了键不会有任何反馈'
+    assert st.hold_last, '按键前后值没记录'
+
+
+@case('回声窗口必须大于实测的服务延迟（24~26 秒）')
+def t_window_covers_measured_latency():
+    assert ec_gpd.FAN_KEY_ECHO_S >= 40.0, ec_gpd.FAN_KEY_ECHO_S
+    assert hardware_mod.ECHO_SUPPRESS_S >= ec_gpd.FAN_KEY_ECHO_S - 5.0, \
+        'MQTT 状态回声窗口 %s 秒比 EC 的 %s 秒还短，档位回报仍会被当外部事件' % (
+            hardware_mod.ECHO_SUPPRESS_S, ec_gpd.FAN_KEY_ECHO_S)
+
+
+@case('hardware.set_mode 成功后必须打招呼，不然回声照旧误判')
+def t_set_mode_arms_window():
+    src = inspect.getsource(hardware_mod.Hardware.set_mode)
+    assert 'expect_fan_key_change' in src, '发完档位命令没开回声窗口'
+    assert src.find('expect_fan_key_change') < src.find("self.log.info('[硬件] 切档"), \
+        '招呼打晚了，回声可能已经先被处理'
+
+
+def _stub(echo_left):
+    """造一个只够 _watch 用的假通道：只有档位字节会变。"""
+    class _Dev:
+        def read(self, addr):
+            return 0x10                      # 服务把 Turbo 写了回来
+
+    class _Stub:
+        def __init__(self):
+            self.dev = _Dev()
+            self._watch_prev = {ec_gpd.FAN_KEY: 0xA0}   # 之前是不亮/省电那一态
+            self._expect = {}
+            self.changes = []
+            self.took = []
+            self.fired = []
+            self.hold_last = None
+            self.on_key = lambda o, n: self.fired.append((o, n))
+            self.log = None
+            self.respect_s = 900.0
+            self.hold_until = 0.0
+            self._fan_key_echo_until = time.time() + echo_left
+            self._fan_key_echo_why = '面板下发 turbo'
+
+        def addr(self, name):
+            return 5 if name == ec_gpd.FAN_KEY else None
+
+        def take_fan_control(self, who='面板'):
+            self.took.append(who)
+
+    return _Stub()
 
 
 def main():
