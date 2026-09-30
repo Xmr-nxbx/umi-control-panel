@@ -394,17 +394,33 @@ function renderOem(s) {
   // 通道读数一致），所以整张卡片只给它一个按钮，其余照旧只读。
   const btns = $('oem-buttons');
   // canWin 与 winNote 在 if 外面算：卡片底下那行说明也要用同一句话
-  const canWin = ((s.capabilities || {})['winkey.write'] || {}).state === 'verified'
-    && oem.win_key_locked != null;
+  const caps = s.capabilities || {};
+  const canWin = (caps['winkey.write'] || {}).state === 'verified' && oem.win_key_locked != null;
+  // 键盘背光：2026-09-30 15:31 做完可逆验证（Off→On 约 0.3 秒，关回后亮度/灯效/速度不变），
+  // 所以整张卡片现在有两个按钮。亮度/灯效是另外两条命令，没验，照旧不给按钮。
+  const canKb = (caps['lighting.rgb.write'] || {}).state === 'verified' && oem.kb_power_on != null;
   const winNote = (mqCh.detail || {}).winkey_write_reason || '';
   if (btns) {
-    btns.innerHTML = canWin
-      ? `<button id="btn-winkey">${oem.win_key_locked ? '解锁 Win 键' : '锁定 Win 键'}</button>` : '';
+    btns.innerHTML = (canWin
+      ? `<button id="btn-winkey">${oem.win_key_locked ? '解锁 Win 键' : '锁定 Win 键'}</button>` : '')
+      + (canKb
+        ? `<button id="btn-kbpower">${oem.kb_power_on ? '关闭键盘背光' : '打开键盘背光'}</button>` : '');
     const b = $('btn-winkey');
     if (b) {
       b.onclick = async () => {
         const act = oem.win_key_locked ? 'WINKEY_UNLOCK' : 'WINKEY_LOCK';
         try { const r = await api('/api/action', { action: act }); toast(r.detail || '已下发'); }
+        catch (e) { toast('下发失败：' + e.message, true); }
+        poll();
+      };
+    }
+    const kb = $('btn-kbpower');
+    if (kb) {
+      kb.onclick = async () => {
+        // 被闸门拒绝时后端回 409，api() 会抛错，detail 原样弹出来（不静默吞掉）
+        try { const r = await api('/api/action',
+               { action: oem.kb_power_on ? 'KB_POWER_OFF' : 'KB_POWER_ON' });
+               toast(r.detail || '已下发'); }
         catch (e) { toast('下发失败：' + e.message, true); }
         poll();
       };
@@ -415,7 +431,8 @@ function renderOem(s) {
     + '，全是 OEM 自己报的读数。只有做过「下发 → EC 回读 → 还原」可逆验证的开关才给按钮，'
     + '其余一律只读；认不出来的值照实写「未知」，不猜。'
     + '「OEM 允许范围」是 Fan/Status 里 OEM 自己写的上下限，以后任何写入都拿它当护栏。'
-    + (canWin && winNote ? ' ' + winNote : '');
+    + (canWin && winNote ? ' ' + winNote : '')
+    + (canKb && (mqCh.detail || {}).rgb_write_reason ? ' ' + mqCh.detail.rgb_write_reason : '');
 }
 
 // ---------- 风扇曲线（EC 直读，只读） ----------

@@ -17,8 +17,9 @@ import threading
 import time
 
 from app.act.channels.base import (Channel, CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ,
-                                   CAP_PL_WRITE, CAP_RGB, CAP_DGPU, CAP_WINKEY_WRITE,
-                                   CAP_BATTERY_MODE_WRITE, MODE_LABELS, MODE_VERIFIED)
+                                   CAP_PL_WRITE, CAP_RGB, CAP_RGB_WRITE, CAP_DGPU,
+                                   CAP_WINKEY_WRITE, CAP_BATTERY_MODE_WRITE,
+                                   MODE_LABELS, MODE_VERIFIED)
 
 ACTIONS_PATH = os.path.join(os.path.dirname(__file__), 'gcu_actions.json')
 STATUS_TOPICS = ('Tray/Status', 'Fan/Status', 'Setting/Status', 'Keyboard/Status',
@@ -253,6 +254,16 @@ class MqttChannel(Channel):
         self.caps[CAP_WINKEY_WRITE] = 'verified'
         self.detail['winkey_write_reason'] = (
             '这个开关从下发到 EC 生效实测约 6 秒，点了之后状态不会马上翻，别连着点。')
+        # 键盘背光：2026-09-30 15:31 做过完整可逆验证（tools/kb_power_test.py，用户在场看着灯）：
+        # 初始 Off/亮度4/灯效3/速度1 → 发 {"function":"SetPower","powerstatus":1} →
+        # **0.3 秒**回读 On → 保持 12 秒 → 关回 Off，回读一致，
+        # 亮度/灯效/速度三个值全程没被顺带改掉（这点最重要：SetPower 只管开关，
+        # 亮度是另一条 SetLightingLevel，见 notes/hardware-channels.md 6.11 十八）。
+        # 比 Win 锁快得多，所以这条的提示不写延迟。
+        self.caps[CAP_RGB_WRITE] = 'verified'
+        self.detail['rgb_write_reason'] = (
+            '背光开关已做过可逆验证（Off→On 约 0.3 秒生效，关回后亮度/灯效/速度不变）。'
+            '亮度、灯效是另外两条命令，面板暂时不碰。')
         # 电池充电三档：动作名和 EC 落点都对上了（notes/hardware-channels.md 6.8），但没做过可逆验证，
         # 而且上游 Linux 驱动因为 2020 年前后的机型出过「开充电限制把电池搞坏」的事故，
         # 直接封死了强开路径（CVE-2026-64143）。本机正是那一代，所以保持 unknown。

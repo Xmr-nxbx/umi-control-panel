@@ -13,14 +13,18 @@ http://127.0.0.1:8747/api/action 发 POST（CSRF），而那个接口能下发 O
     前两道闸 2026-09-30 才补上，第三道是同日发现「UI 不点亮 ≠ 执行层不发」之后补的。
 """
 import inspect
+import io
 import json
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from app.act.channels.base import CAP_RGB_WRITE          # noqa: E402
 from app.act.channels.mqtt_gcu import MqttChannel      # noqa: E402
 from app.server.httpd import is_local_same_origin      # noqa: E402
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 CASES = []
 
@@ -179,6 +183,33 @@ def _():
     # 面板按 caps 决定要不要画按钮，所以「没连上」必须等于「画不出按钮」
     for cap in ('winkey.write', 'battery.mode.write', 'mode.write'):
         assert ch.caps.get(cap) == 'unsupported', (cap, ch.caps)
+
+
+@case('背光开关验过之后才升 verified，而且按钮由能力画、不是前端写死')
+def t_backlight_promoted():
+    src = inspect.getsource(MqttChannel._session)
+    assert "self.caps[CAP_RGB_WRITE] = 'verified'" in src, '背光没升上来，面板画不出按钮'
+    assert 'rgb_write_reason' in src, '升 verified 却不写证据，后面没人知道是怎么验的'
+    js = io.open(os.path.join(ROOT, 'app', 'web', 'app.js'), encoding='utf-8').read()
+    assert 'btn-kbpower' in js and 'KB_POWER_ON' in js, '前端没有背光按钮'
+    assert "'lighting.rgb.write'" in js, '按钮没按能力画，写死成一个永远亮着的按钮了'
+
+
+@case('通道里用到的 CAP_*/MODE_* 常量必须真的在命名空间里（漏导入会让整条通道连不上）')
+def t_constants_resolve():
+    """真实事故：2026-09-30 15:33 给 _session 加了一行 caps[CAP_RGB_WRITE]='verified'
+    却没导入这个名字，py_compile 和单测全绿，但 `_session` 一跑就 NameError，
+    兜底通道直接连不起来——只有现场看 /api/state 才暴露。这条用例补上这个盲区。"""
+    import ast
+    import importlib
+    for mod_name in ('mqtt_gcu', 'ec_gpd', 'hid_ite8291', 'base'):
+        mod = importlib.import_module('app.act.channels.' + mod_name)
+        path = os.path.join(ROOT, 'app', 'act', 'channels', '%s.py' % mod_name)
+        tree = ast.parse(io.open(path, encoding='utf-8').read())
+        used = set(n.id for n in ast.walk(tree) if isinstance(n, ast.Name))
+        missing = sorted(u for u in used
+                         if u.startswith(('CAP_', 'MODE_', 'HW_MODE')) and not hasattr(mod, u))
+        assert not missing, '%s 用了却没定义/导入的常量：%s' % (mod_name, missing)
 
 
 def main():
