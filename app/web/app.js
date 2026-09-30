@@ -235,8 +235,9 @@ function battText(hw) {
 
 // OEM 自己报的功耗墙边界（10~120 W 那种）。边界由哪条通道报不写死：找带 detail.pl_bounds
 // 的那一条，找不到就整块不显示——不编默认值，也不显示成 0~255 那种假区间。
-function wallBoundsRows(hw) {
-  const ch = (hw.channels || []).find((c) => (c.detail || {}).pl_bounds);
+function wallBoundsRows(s) {
+  // 通道列表在 s.channels，不在 s.hardware：hardware 是拍平的 EC 读数，套上去会永远找不到
+  const ch = (s.channels || []).find((c) => (c.detail || {}).pl_bounds);
   const bounds = ch ? ch.detail.pl_bounds : null;
   if (!bounds) return [];
   const out = [];
@@ -279,8 +280,8 @@ function renderHardware(s) {
     hwRow('功耗墙 PL1/PL2/PL4', hw.pl1_setting != null
           ? ([hw.pl1_setting, hw.pl2_setting, hw.pl4_setting]
                .map((v) => (v == null ? '—' : v + ' W')).join(' / '))
-          : '未知', verified('power_limit.write')),
-    ...wallBoundsRows(hw),
+          : '未知', verified('power_limit.read')),
+    ...wallBoundsRows(s),
     // 这一行是为了不让人误读上面那三个 TCC 默认值（0x07D8-0x07DA，本机 5/5/5）：
     // 那三个数只有在 0x0786 的使能位（APTN, bit7）置起来时才生效，而参考仓库
     // 实机抓取里这个字节一直是 0x00。所以「降频点 = TjMax−5 = 95 °C」是错的推论。

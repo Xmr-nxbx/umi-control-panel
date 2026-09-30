@@ -83,6 +83,21 @@ def _():
     assert '由 OEM 服务按档位下发' in html and '几十秒内改回去' in html
 
 
+@case('边界行的取数路径：通道在 s.channels，读数行用只读能力点灯')
+def _():
+    # 踩过一次：写成 hw.channels 永远找不到通道（hardware 是拍平的 EC 读数，没有 channels），
+    # 结果是「OEM 允许范围」整块静默不显示，测试还全绿。所以把取数路径钉住。
+    js = read_src('app', 'web', 'app.js')
+    seg = js.split('function wallBoundsRows', 1)[1].split('\n}', 1)[0]
+    assert 's.channels' in seg, seg
+    assert 'hw.channels' not in seg, seg
+    assert 'wallBoundsRows(s)' in js, '调用点传的必须是快照 s'
+    # 展示 EC 读数的行不许挂在写能力上：写能力哪天降级，只读行会跟着变灰
+    row = js.split("hwRow('功耗墙 PL1/PL2/PL4'", 1)[1].split('wallBoundsRows', 1)[0]
+    assert 'power_limit.read' in row, row
+    assert 'power_limit.write' not in row, row
+
+
 def main():
     bad = 0
     for name, fn in CASES:
