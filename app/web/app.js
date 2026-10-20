@@ -588,8 +588,149 @@ async function loadFanCurve(say) {
   curveLoading = false;
   btn.disabled = false;
   btn.textContent = curveData ? '重新读取（约 3 秒）' : '读取曲线（约 3 秒）';
+  if (curveData && curveData.ok) {
+    oemCurve = null; oemOrig = null;
+    const box2 = $('fan-curve-editor'); if (box2) box2.innerHTML = '';
+    const tag = $('fan-curve-tag'); if (tag) tag.textContent = 'EC 直读 · 只读';
+  }
   renderFanCurve();
   poll();     // 读成功会把 fan.curve 能力点成「可用」，顺手刷新能力矩阵
+}
+
+// ---------- 风扇曲线（OEM 表，可写占空） ----------
+// 写入走 GCUBridge 的 SET_FAN_SPEED_CURVE_SETTING（服务落盘 + 写 EC），
+// 首次可逆验证见 tools/fan_curve_mqtt_write_test.py 与 notes/creator-center-features.md。
+// 只能改 Duty；Name 必须用服务报的当前表名（切档会变），绝不写死。
+let oemCurve = null;
+let oemOrig = null;
+let oemType = 'CPU';
+let oemLoading = false;
+
+function oemWritable() {
+  const cap = (((lastState || {}).capabilities) || {})['fan.curve.write'] || {};
+  return cap.state === 'verified';
+}
+
+function renderOemCurve() {
+  const box = $('fan-curve-editor');
+  if (!box) return;
+  if (!oemCurve) { box.innerHTML = ''; return; }
+  const hint = $('fan-curve-hint');
+  if (!oemCurve.ok && !oemCurve.tables) {
+    box.innerHTML = '';
+    hint.classList.add('err');
+    hint.textContent = 'OEM 表读不到：' + (oemCurve.reason || '未知原因');
+    return;
+  }
+  hint.classList.remove('err');
+  const points = (oemCurve.tables || {})[oemType] || [];
+  const can = oemWritable();
+  const ctx = hwRow('表名', oemCurve.name || '未报', !!oemCurve.name)
+    + hwRow('表状态', oemCurve.activated ? '已激活' : '未激活', oemCurve.activated != null)
+    + hwRow('CPU/GPU 独立控制', triText(oemCurve.fan_control_respective, '开', '关'),
+            oemCurve.fan_control_respective != null)
+    + hwRow('数据来源', 'OEM 服务内存里的表（不是 EC 实时值）', true);
+  const rows = points.map((p) => {
+    const up = p.up_t != null ? (p.sentinel ? '0xFF 哨兵' : p.up_t) : '—';
+    return `<tr><td>${p.id}</td><td>${esc(up)}</td>
+      <td>${p.down_t != null ? p.down_t : '—'}</td>
+      <td><input class="curve-duty" data-idx="${p.id}" type="number" min="0" max="100"
+           step="1" value="${p.duty_pct != null ? Math.round(p.duty_pct) : 0}"
+           ${can ? '' : 'disabled'}></td></tr>`;
+  }).join('');
+  box.innerHTML = `<div class="curve-ctx">${ctx}</div>
+    <div class="btn-row">
+      <select id="curve-type" class="curve-type">
+        <option value="CPU" ${oemType === 'CPU' ? 'selected' : ''}>CPU 表</option>
+        <option value="GPU" ${oemType === 'GPU' ? 'selected' : ''}>GPU 表</option>
+      </select>
+      <button id="btn-curve-apply" class="primary" ${can ? '' : 'disabled'}>下发这张表</button>
+      <button id="btn-curve-restore" ${can && oemOrig ? '' : 'disabled'}>还原到本次读取时</button>
+    </div>
+    <table class="curve"><caption>${esc(CURVE_WORD[oemType] || oemType)}（OEM 表 · 只改占空）</caption>
+    <thead><tr><th>点</th><th>升温 °C</th><th>降温 °C</th><th>占空比 %</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+  $('curve-type').onchange = (e) => { oemType = e.target.value; renderOemCurve(); };
+  $('btn-curve-apply').onclick = () => applyOemCurve(false);
+  $('btn-curve-restore').onclick = () => applyOemCurve(true);
+  hint.textContent = 'OEM 表是服务内存里的表，EC 直读是硬件里的值；本机验证时两张表逐点一致。'
+    + '只能改占空；升温/降温阈值要停服务改 JSON，面板不做。'
+    + 'EC 会把非零但低于 30 % 的占空夹到 30 %，0 % 要等约 180 秒才真停转；'
+    + '改完风扇转速是慢慢爬的（约 5 %/秒），别连着点。'
+    + (can ? '' : ' 写入能力当前不可用（GCUBridge 未连接或高温保护），按钮已置灰。');
+}
+
+async function loadOemCurve(say) {
+  if (oemLoading) return;
+  oemLoading = true;
+  const btn = $('btn-fan-curve-oem');
+  btn.disabled = true; btn.textContent = '读取 OEM 表…';
+  try {
+    oemCurve = await api('/api/fan-curve?source=mqtt');
+    if (oemCurve && oemCurve.ok) {
+      // 只有用户主动点开（或第一次载入）才重置「还原点」；
+      // 下发后的自动刷新不重置，否则刚改完就再也回不到原来那张表了。
+      if (say || !oemOrig) {
+        oemOrig = {};
+        ['CPU', 'GPU'].forEach((k) => {
+          oemOrig[k] = ((oemCurve.tables || {})[k] || []).map((p) => Math.round(p.duty_pct));
+        });
+      }
+      if (say) {
+        toast(`OEM 表读到了：${oemCurve.name || '未报名'}，`
+          + (oemCurve.stale ? `这是 ${oemCurve.age_s} 秒前的缓存` : '新鲜应答'));
+      }
+    } else if (say) {
+      toast('OEM 表读不到：' + ((oemCurve || {}).reason || '未知原因'), true);
+    }
+  } catch (e) {
+    if (say) toast('读取 OEM 表失败：' + e.message, true);
+  }
+  oemLoading = false;
+  btn.disabled = false; btn.textContent = 'OEM 表（可编辑）';
+  if (oemCurve && oemCurve.ok) {
+    curveData = null;
+    const box = $('fan-curve'); if (box) box.innerHTML = '';
+    const tag = $('fan-curve-tag'); if (tag) tag.textContent = 'OEM 表 · 可写占空';
+  }
+  renderOemCurve();
+  poll();
+}
+
+async function applyOemCurve(restore) {
+  if (!oemCurve || !oemCurve.ok) return;
+  if (!oemWritable()) { toast('写曲线当前不可用（GCUBridge 未连接或高温保护）', true); return; }
+  let duties;
+  if (restore) {
+    duties = ((oemOrig || {})[oemType] || []).slice();
+    if (duties.length !== 16) { toast('没有可还原的原始值，先重新读一次 OEM 表', true); return; }
+  } else {
+    duties = Array.from(document.querySelectorAll('.curve-duty')).map((el) => Number(el.value));
+    if (duties.length !== 16 || duties.some((v) => !Number.isFinite(v) || v < 0 || v > 100)) {
+      toast('16 个占空都要填，且只能是 0~100 的整数', true);
+      return;
+    }
+  }
+  const label = `${oemCurve.name || '当前表'} ${oemType}`;
+  const what = restore ? '还原到本次读取时的值' : '下发到 OEM 服务';
+  if (!confirm(`把 ${label} 的 16 个占空${what}？\n\n`
+      + '风扇会按新曲线转；EC 的斜坡约 5%/秒，改完不会立刻听到变化。')) return;
+  const btnApply = $('btn-curve-apply');
+  const btnRestore = $('btn-curve-restore');
+  [btnApply, btnRestore].forEach((b) => { if (b) b.disabled = true; });
+  toast('已下发，等待服务回读…');
+  try {
+    const r = await api('/api/fan-curve', { duties, type: oemType });
+    const detail = r.detail || '已下发';
+    // 用户要求延迟生效的动作给两段反馈：这里是「已下发」→「已生效」。
+    toast(detail.includes('回读一致') ? '已生效：' + detail : detail);
+    await loadOemCurve(false);
+  } catch (e) {
+    toast('下发失败：' + e.message, true);
+  } finally {
+    [btnApply, btnRestore].forEach((b) => { if (b) b.disabled = false; });
+    renderOemCurve();
+  }
 }
 
 function renderCaps(s) {
@@ -924,6 +1065,8 @@ $('btn-bench-current').onclick = () => startBench('current');
 $('btn-bench-compare').onclick = () => startBench('compare');
 // 风扇曲线不自动读：一轮近百次读约 3 秒，只有用户点了才打 EC
 $('btn-fan-curve').onclick = () => loadFanCurve(true);
+// OEM 表走 GCUBridge，读得快；编辑器里只有做过可逆验证的「写占空」是亮的
+$('btn-fan-curve-oem').onclick = () => loadOemCurve(true);
 $('btn-stop').onclick = async () => {
   if (!confirm('确定停止面板服务？停止后自适应调度与掉档守护都会失效。')) return;
   try { await api('/api/shutdown', {}); toast('服务已停止'); }

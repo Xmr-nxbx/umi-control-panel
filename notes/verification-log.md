@@ -240,6 +240,15 @@
       见 6.11 第十四节 ②）：`F1DC`+`F1CM`@`0x0E8C` 与 `F2DC`+`F2CM`@`0x0E9D`
       **在本机这条通道上读出来都是 `0x00`**，和同段的 `CPUT`（实际 47 °C 却读 0）一样，
       属于"名字在本机 DSDT 里存在、数据不在这条通道上"。所以**不要再拿它们当写靶**。
+- [x] 风扇曲线**写入**（2026-10-20，MQTT 服务路径，已做可逆验证）：
+      改走 OEM 服务的 `SET_FAN_SPEED_CURVE_SETTING`（`Name`+`Type`+`T0..T15`，
+      只改 Duty、服务落盘并写 EC），不再裸写 `0x0F00`。
+      验证只改 CPU 哨兵点 15（`UpT=255`，永远查不到）的占空：EC `0x0F2F` 200→180，
+      其余 15 个 Duty 与全部 UpT/DownT 一个没变；原样写回后 EC 与 OEM 表**逐点零差异**。
+      读侧 `Fan/Table` 与 EC 直读的 `M3T1` 16 点也逐点一致（GPU 13-15 是 EC 信箱槽）。
+      `fan.curve.write` 已升 verified；面板「风扇曲线」卡有 OEM 表编辑器（CPU/GPU、下发/还原）。
+      五条闸在 `MqttChannel.set_fan_curve`（allow_write / verified / 16 点 0-100 /
+      表名来自服务 / 高温保护置位拒发）。见 `notes/creator-center-features.md` 3.4。
 - [ ] `ADDR_MYFAN2_L1~L5_PWM` 与 `User_Fan_Level1~5(0x81~0x85)` 看着是一对，
       全表观察也抓到按硬件模式时 `MYFAN2_L1/L4_PWM` 会跟着换（3↔7、5↔15）。
       EC 侧真正吃「用户风扇模式」的是 **`0x0751` bit7(USER)**：bank1 `0x9432` 的

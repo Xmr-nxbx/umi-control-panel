@@ -205,6 +205,13 @@ class Hardware:
                 return ok, detail
         return False, 'GCUBridge 未连接，命令不下发'
 
+    def set_fan_curve(self, duties, type_='CPU'):
+        """经 OEM 服务写风扇曲线（只改 Duty）。通道自己的五条闸在 mqtt_gcu 里。"""
+        for ch in self.channels:
+            if hasattr(ch, 'set_fan_curve') and ch.alive:
+                return ch.set_fan_curve(duties, type_)
+        return False, 'GCUBridge 未连接，风扇曲线写不了'
+
     # ---------- 息屏/锁屏掉档守护 ----------
     def _on_mode_event(self, mode, payload):
         with self.lock:

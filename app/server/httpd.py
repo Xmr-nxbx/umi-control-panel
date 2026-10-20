@@ -144,7 +144,12 @@ def make_handler(daemon, cfg, on_shutdown):
             elif path == '/api/fan-curve':
                 # 只读：一轮 92 个地址约 3 秒，通道内部有 10 秒缓存与并发闸，
                 # 所以放在 GET 上、由页面按钮触发，不进 2 秒轮询。
-                self._send(200, daemon.hw.ec.fan_curve())
+                # `?source=mqtt` 走 OEM 服务的 Fan/Table（它内存里的表，不是 EC 实时值），
+                # 用来和 EC 直读交叉核对；同样只读，不需要 allow_write。
+                if 'source=mqtt' in self.path.split('?', 1)[-1]:
+                    self._send(200, daemon.hw.mqtt.fan_curve())
+                else:
+                    self._send(200, daemon.hw.ec.fan_curve())
             elif path == '/api/bench':
                 self._send(200, daemon.bench_view())
             elif path == '/api/ping':
@@ -179,6 +184,16 @@ def make_handler(daemon, cfg, on_shutdown):
                 extra = body.get('extra') if isinstance(body.get('extra'), dict) else None
                 ok, detail = daemon.hw.send_action(action, extra)
                 self._send(200 if ok else 409, {'ok': ok, 'detail': detail})
+            elif path == '/api/fan-curve':
+                # 写曲线只有一条路：OEM 服务的 SET_FAN_SPEED_CURVE_SETTING。
+                # 五条闸（allow_write / verified / 16 点 0-100 / 表名来自服务 /
+                # 高温保护）都在 MqttChannel.set_fan_curve 里，这里只转发。
+                duties = body.get('duties')
+                if not isinstance(duties, list):
+                    self._send(400, {'ok': False, 'detail': 'duties 必须是 16 个数的数组'})
+                else:
+                    ok, detail = daemon.hw.set_fan_curve(duties, str(body.get('type', 'CPU')))
+                    self._send(200 if ok else 409, {'ok': ok, 'detail': detail})
             elif path == '/api/fan-mode':
                 ok, detail = daemon.set_fan_mode(str(body.get('flag', '')))
                 self._send(200 if ok else 409, {'ok': ok, 'detail': detail})

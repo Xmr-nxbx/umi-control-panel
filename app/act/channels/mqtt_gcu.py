@@ -18,13 +18,15 @@ import time
 
 from app.act.channels.base import (Channel, CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ,
                                    CAP_PL_WRITE, CAP_RGB, CAP_RGB_WRITE, CAP_DGPU,
-                                   CAP_WINKEY_WRITE, CAP_BATTERY_MODE_WRITE,
-                                   MODE_LABELS, MODE_VERIFIED)
+                                   CAP_WINKEY_WRITE, CAP_BATTERY_MODE_WRITE, CAP_FAN_CURVE,
+                                   CAP_FAN_CURVE_WRITE, MODE_LABELS, MODE_VERIFIED)
 
 ACTIONS_PATH = os.path.join(os.path.dirname(__file__), 'gcu_actions.json')
-STATUS_TOPICS = ('Tray/Status', 'Fan/Status', 'Setting/Status', 'Keyboard/Status',
+STATUS_TOPICS = ('Tray/Status', 'Fan/Status', 'Fan/Table', 'Setting/Status', 'Keyboard/Status',
                  'HidLightbar/Status', 'Display/Status', 'Monitor/Status',
                  'WhisperMode/Status', 'ProcessControl/Status', 'Customize/Status')
+FAN_TABLE_TOPIC = 'Fan/Table'
+FAN_CURVE_GET = 'GET_FAN_SPEED_CURVE_SETTING'
 # OperatingMode 的取值只认 OEM 自己枚举里有的：OperatingMode{Office:0, Turbo:2}
 # （tools/oem_constant_dump.ps1 导出）。以前这张表还写了 1→balance、3→turbo，
 # 那是照抄别家的猜测，和 OEM 枚举直接矛盾；实测 Tray/Status 报的就是 1/2 这类
@@ -176,7 +178,8 @@ class MqttChannel(Channel):
         self._ask_until = 0.0
         self._kick_reason = None
         for cap in (CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ, CAP_PL_WRITE, CAP_RGB,
-                    CAP_DGPU, CAP_WINKEY_WRITE, CAP_BATTERY_MODE_WRITE):
+                    CAP_DGPU, CAP_WINKEY_WRITE, CAP_BATTERY_MODE_WRITE, CAP_FAN_CURVE,
+                    CAP_FAN_CURVE_WRITE):
             self.caps[cap] = 'unsupported'
         self.detail = {'enabled': self.enabled, 'broker': '%s:%s' % (self.host, self.port)}
 
@@ -221,7 +224,7 @@ class MqttChannel(Channel):
                 # 掉线就把**所有**已验证的写能力收回：否则面板还亮着按钮，点了只会失败。
                 # 上一版只收了 Win 锁，功耗墙升 verified 之后这个口子会更明显。
                 for cap in (CAP_MODE_WRITE, CAP_PL_WRITE, CAP_RGB_WRITE, CAP_WINKEY_WRITE,
-                            CAP_BATTERY_MODE_WRITE):
+                            CAP_BATTERY_MODE_WRITE, CAP_FAN_CURVE, CAP_FAN_CURVE_WRITE):
                     self.caps[cap] = 'unsupported'
                 self.detail['reason'] = '未连接：%s' % self._kick_reason
                 for _ in range(int(backoff * 10)):
@@ -237,6 +240,19 @@ class MqttChannel(Channel):
         self.alive = True
         self.caps[CAP_MODE_READ] = 'verified'
         self.caps[CAP_PL_READ] = 'verified'
+        # 曲线读取：连上只代表「能问」，真收到一份 16 点的 Fan/Table 才升 verified
+        # （和 EC 侧同一个规矩，见 ec_gpd.py 的 fan_curve）。
+        self.caps[CAP_FAN_CURVE] = 'unknown'
+        # 写曲线：2026-10-20 做完首次可逆验证（tools/fan_curve_mqtt_write_test.py）：
+        # 只改 CPU 哨兵点 15（UpT=255，永远不会被查到）的占空，EC 0x0F2F 由 200→180，
+        # 另外 15 个 Duty 与全部 UpT/DownT 一个没变；原样写回后 EC 与 OEM 表逐点零差异。
+        # 活动点的效果由 #31 的 EC 直写实验佐证（同一批字节、同一张表）。
+        self.caps[CAP_FAN_CURVE_WRITE] = 'verified'
+        self.detail['fan_curve_write_reason'] = (
+            '已做可逆验证（2026-10-20）：一条 SET_FAN_SPEED_CURVE_SETTING 只改了哨兵点 15 '
+            '（UpT=255）的占空，EC 0x0F2F 200→180，写回后整表逐点归零差异。'
+            '只改 Duty，不改 UpT/DownT；高温保护 0x07A5 bit3 置位时服务只落盘不写 EC，'
+            '所以置位时我们拒绝下发。风扇转速的爬升另算（EC 斜坡 + 30% 地板）。')
         # 精细功耗墙：2026-09-30 19:51 做完在场可逆验证（tools/pl_detail_test.py --PL1=60 --write）：
         # EC 直读 0x0783 由 10 → 60 用了约 2 秒，再发原值 20 秒后回到 10，全程本脚本 EC 写 0 次。
         # 比档位命令快得多（那条要 24~26 秒）。注意**只验过 PL1**，PL2/PL4 是同一条命令的另外
@@ -322,6 +338,12 @@ class MqttChannel(Channel):
             return
         with self._lock:
             self._payloads[topic] = {'ts': time.time(), 'data': data}
+        if topic == FAN_TABLE_TOPIC:
+            # 服务发的是它内存里的表（GetFanTable 只做 TableTransform，不读 EC）。
+            # 形状对不上就不点亮能力——宁可显示「未知」，也不拿半张表充数。
+            rows = data.get('CPU')
+            if isinstance(rows, list) and len(rows) == 16:
+                self.caps[CAP_FAN_CURVE] = 'verified'
         if topic == 'Tray/Status' and 'OperatingMode' in data:
             raw = str(data['OperatingMode'])
             mode = MODE_FIELD.get(raw)
@@ -386,6 +408,153 @@ class MqttChannel(Channel):
         if not action:
             return False, '未知档位 %s' % mode
         return self.send_action(action, note='切档 -> %s' % mode)
+
+    # ---------- 风扇曲线（读） ----------
+    def request_fan_curve(self):
+        """只读：让服务把内存里的当前表发到 `Fan/Table`。
+
+        不需要 allow_write——这条消息不改任何硬件状态（服务侧 Receive 只做
+        TableTransform + Publish）。应答主题是 `Fan/Table`，不是 `Fan/Status`。
+        """
+        if not self.alive:
+            return False, 'GCUBridge 未连接'
+        topic = self.actions['topics'].get('fan_control', 'Fan/Control')
+        self._outq.put((topic, json.dumps({'Action': FAN_CURVE_GET})))
+        return True, '已请求风扇曲线'
+
+    def fan_curve(self, wait_s=2.0):
+        """发一条 GET 并等这次请求之后的新 `Fan/Table`；等不到就退回旧缓存并标明 age。"""
+        sent_ts = time.time()
+        ok_send, detail = self.request_fan_curve()
+        if not ok_send:
+            return {'ok': False, 'source': 'mqtt', 'reason': detail}
+        payload = None
+        deadline = time.time() + max(0.0, wait_s)
+        while time.time() < deadline:
+            with self._lock:
+                got = self._payloads.get(FAN_TABLE_TOPIC)
+                if got and got['ts'] >= sent_ts:
+                    payload = {'ts': got['ts'], 'data': dict(got['data'])}
+            if payload:
+                break
+            time.sleep(0.05)
+        if payload is None:
+            with self._lock:
+                got = self._payloads.get(FAN_TABLE_TOPIC)
+                if got:
+                    payload = {'ts': got['ts'], 'data': dict(got['data']), 'stale': True}
+        if payload is None:
+            return {'ok': False, 'source': 'mqtt',
+                    'reason': '%.1f 秒内没收到 Fan/Table（服务没在跑，或命令没发出去）' % wait_s}
+        data = payload['data']
+        tables, ok = {}, True
+        for which in ('CPU', 'GPU'):
+            points = self._curve_points(data.get(which))
+            tables[which] = points
+            if len(points) != 16 or any(p['duty_pct'] is None for p in points):
+                ok = False
+        return {'ok': ok, 'source': 'mqtt', 'stale': bool(payload.get('stale')),
+                'age_s': round(time.time() - payload['ts'], 1),
+                'name': data.get('Name'), 'activated': data.get('Activated'),
+                'fan_control_respective': data.get('FanControlRespective'),
+                'tables': tables, 'points': 16,
+                'note': 'OEM 服务内存里的表，不是 EC 实时值；写盘路径见 notes/creator-center-features.md'}
+
+    @staticmethod
+    def _curve_points(rows):
+        out = []
+        for i, row in enumerate(rows or []):
+            if not isinstance(row, dict):
+                continue
+
+            def num(key):
+                try:
+                    return int(row.get(key))
+                except (TypeError, ValueError):
+                    return None
+
+            pid, up, duty = num('ID'), num('UpT'), num('Duty')
+            out.append({'id': i if pid is None else pid, 'up_t': up,
+                        'down_t': num('DownT'),
+                        'duty_pct': None if duty is None else float(duty),
+                        'duty_raw': None if duty is None else duty * 2,
+                        'sentinel': up == 255, 'mailbox': False})
+        return out
+
+    def _status_fresh(self, wait_s=2.0):
+        """要一份这次请求之后的 `Fan/Status`（高温保护位在里面）。"""
+        sent = time.time()
+        self._outq.put(('Fan/Control', json.dumps({'Action': 'GETSTATUS'})))
+        end = time.time() + max(0.0, wait_s)
+        while time.time() < end:
+            with self._lock:
+                got = self._payloads.get('Fan/Status')
+                if got and got['ts'] >= sent:
+                    return dict(got['data'])
+            time.sleep(0.05)
+        with self._lock:
+            got = self._payloads.get('Fan/Status')
+        return dict(got['data']) if got else None
+
+    def set_fan_curve(self, duties, type_='CPU'):
+        """经 OEM 服务写一张表的 16 个占空（只改 Duty）。
+
+        五条闸，缺一条都不发：
+          1. allow_write；
+          2. `fan.curve.write` 必须是 verified（本机 2026-10-20 做过一条哨兵点的可逆验证）；
+          3. 16 个值、0~100 的整数；
+          4. 先 GET 当前表拿到 `Name`——名字绝不写死，切档后表名会变（M3T1/M2T1）；
+          5. `Fan/Status.FAN_SafetyProtect` 必须是 0。置位时服务只落盘不写 EC，
+             面板会以为改了，等保护解除/切档重灌时值才突然生效。
+        """
+        if not self.allow_write:
+            return False, '写操作未在配置中允许（config.hardware.ec.allow_write=false）'
+        if self.caps.get(CAP_FAN_CURVE_WRITE) != 'verified':
+            return False, ('写风扇曲线还没验证（当前 %s），拒绝下发'
+                           % (self.caps.get(CAP_FAN_CURVE_WRITE) or '未上报'))
+        if type_ not in ('CPU', 'GPU'):
+            return False, '只认 CPU/GPU 两张表，收到 %r' % (type_,)
+        try:
+            values = [int(v) for v in duties]
+        except (TypeError, ValueError):
+            return False, '占空必须是 16 个 0~100 的整数'
+        if len(values) != 16:
+            return False, '必须一次给齐 16 个点，收到 %d 个' % len(values)
+        if any(v < 0 or v > 100 for v in values):
+            return False, '占空必须在 0~100 之间：%s' % values
+
+        current = self.fan_curve(wait_s=2.0)
+        if not current.get('ok'):
+            return False, '拿不到当前风扇表，拒绝写：%s' % (current.get('reason') or '未知原因')
+        name = current.get('name')
+        if not name:
+            return False, '当前表没报名字，拒绝写（名字必须是服务给的，不能写死）'
+        point_count = len(current['tables'].get(type_) or [])
+        if point_count != 16:
+            return False, '当前 %s 表不是 16 点（%d），拒绝写' % (type_, point_count)
+
+        status = self._status_fresh()
+        protect = (status or {}).get('FAN_SafetyProtect')
+        if str(protect).strip() != '0':
+            return False, ('高温保护开着（FAN_SafetyProtect=%r）：服务只会落盘不写 EC，'
+                           '改了也不会立刻生效，拒发' % (protect,))
+
+        extra = {'Name': name, 'Type': type_}
+        for i, value in enumerate(values):
+            extra['T%d' % i] = value
+        ok, detail = self.send_action('SET_FAN_CURVE', extra=extra,
+                                      note='风扇曲线 %s %s' % (name, type_))
+        if not ok:
+            return False, detail
+
+        after = self.fan_curve(wait_s=2.5)
+        got = [int(p['duty_pct']) for p in (after.get('tables') or {}).get(type_) or []
+               if p.get('duty_pct') is not None]
+        if after.get('ok') and got == values:
+            return True, ('已下发并回读一致：%s %s，16 点占空已写入服务并落盘'
+                          % (name, type_))
+        return True, ('已下发，但回读还没确认（服务可能正忙）。'
+                      '风扇转速的爬升另算：EC 每 tick 走 0.5%%，且 30%% 以下会被夹住')
 
     # ---------- 精细功耗墙 ----------
     def pl_limits(self):

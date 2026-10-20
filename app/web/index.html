@@ -46,12 +46,15 @@
   </section>
 
   <section class="card span-2">
-    <h2>风扇曲线（EC 直读）<span class="tag">只读 · 写入还没做可逆验证</span></h2>
+    <h2>风扇曲线 <span class="tag" id="fan-curve-tag">EC 直读 · OEM 表可写占空</span></h2>
     <div class="btn-row">
-      <button id="btn-fan-curve" class="primary">读取曲线（约 3 秒）</button>
+      <button id="btn-fan-curve" class="primary">EC 直读（约 3 秒）</button>
+      <button id="btn-fan-curve-oem">OEM 表（可编辑）</button>
     </div>
     <div id="fan-curve"></div>
-    <p class="hint" id="fan-curve-hint">点一下才读：一轮要读近百个 EC 寄存器，所以不放进 2 秒轮询里。</p>
+    <div id="fan-curve-editor"></div>
+    <p class="hint" id="fan-curve-hint">点一下才读：EC 一轮要读近百个寄存器，所以不放进 2 秒轮询里。
+      OEM 表走 GCUBridge，只改占空比，16 个点一次下发；不改升温/降温阈值。</p>
   </section>
 
   <section class="card span-2">

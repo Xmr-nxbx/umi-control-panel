@@ -149,6 +149,12 @@ table.curve td { font-variant-numeric: tabular-nums; }
 table.curve tr.sentinel td { color: var(--dim); }
 table.curve tr.mailbox td { color: var(--amber); }
 table.curve tr.na td { color: var(--red); }
+.curve-duty { width: 72px; padding: 2px 6px; background: var(--panel-2); color: var(--txt);
+  border: 1px solid var(--line); border-radius: 4px; text-align: right;
+  font: inherit; font-variant-numeric: tabular-nums; }
+.curve-duty:focus { outline: none; border-color: var(--cyan); }
+.curve-type { padding: 6px 10px; background: var(--panel-2); color: var(--txt);
+  border: 1px solid var(--line); border-radius: 6px; font: inherit; }
 .curve-ctx { display: grid; grid-template-columns: repeat(2, minmax(280px, 1fr)); gap: 8px; margin-top: 12px; }
 
 .verdict {

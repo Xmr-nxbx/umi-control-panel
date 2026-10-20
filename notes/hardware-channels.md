@@ -2301,3 +2301,48 @@ temp < DownT[idx] → idx--
 
 
 
+
+## 6.11 第二十五节：风扇曲线走 OEM 服务写通了——一个哨兵点、一次可逆验证（2026-10-20）
+
+这一节只记结果；完整的功能地图与每个 MQTT 动作的清单在 `notes/creator-center-features.md`。
+
+### 一、两条读路径对上了
+
+- `GET_FAN_SPEED_CURVE_SETTING` 的应答走 **`Fan/Table`**（不是 `Fan/Status`），
+  返回的是服务**内存里的** `FanTable1p5`，不是 EC 实时值。
+- 本机 `M3T1` 的 CPU/GPU 16 点与 EC 直读逐点一致（`tools/fan_curve_mqtt_probe.py`）。
+  GPU 13-15 在 EC 侧是信箱槽（`0x0F5D-0x0F5F`），EC 不报占空；OEM 表照实报 100%。
+
+### 二、写入：只改 Duty，16 点一次给齐
+
+```json
+{"Action":"SET_FAN_SPEED_CURVE_SETTING","Name":"M3T1","Type":"CPU","T0".."T15"}
+```
+
+- `Name` 必须用 `Fan/Table` 报的当前表名（切档会变），`Type` 只认 CPU/GPU。
+- 缺一个 T 值 → `Convert.ToByte(null)` 抛异常并被 `catch` 吞掉，表现是「什么都没发生」。
+- 服务做三件事：灌 `Duty[0..15]` → 写 `UserFanTables\<Name>.json` → 写 EC 47 字节。
+  **不走 `0x07C6` bit2 的 bracket**（和 OEM 拖滑块一致）；只改 Duty，不改 UpT/DownT。
+- 高温保护 `0x07A5` bit3 置位时服务**只落盘不写 EC**，所以我们的实现直接拒发，
+  免得「以为改了，等保护解除/切档时突然生效」。
+
+### 三、首次可逆验证（`tools/fan_curve_mqtt_write_test.py --write`）
+
+纸上预期先写死：只改 CPU 点 15（`UpT=255`，永远查不到的哨兵）的占空，100 % → 90 %；
+EC `0x0F2F` 应 200 → 180，其余 15 个 Duty 与全部 UpT/DownT 不变；写回后整表归零差异。实测：
+
+- EC `0x0F2F` = 180，占空变化点列表恰好 `[(15, 100.0, 90.0)]`；
+- 原样写回后，EC 与 OEM 表的逐点差异都是 `[]`；
+- 没做负载、没停面板、没有风扇/温度变化（点 15 是死点）。
+
+能力 `fan.curve.write` 升 verified（MQTT 通道），面板「风扇曲线」卡新增 OEM 表编辑器：
+CPU/GPU 切换、16 个 0-100 输入框、下发/还原；只读接口是
+`GET /api/fan-curve?source=mqtt`，写入是 `POST /api/fan-curve`。
+五条闸在 `MqttChannel.set_fan_curve`：allow_write / verified / 16 点 0-100 /
+表名来自服务 / 高温保护置位拒发。
+
+### 四、这条路径与 #31 裸写 EC 的区别
+
+#31 证明的是「EC 会用我们写进 `0x0F00` 的表」；这条路证明的是「OEM 服务愿意替我们写，
+并且会落盘」。好处是重启、AC 插拔、模式切换、唤醒之后服务重灌的就是我们改过的那份，
+不需要任何看门狗去对抗。限制仍是那三条：只能改 Duty、30 % 地板、高温保护。
