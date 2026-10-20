@@ -41,8 +41,8 @@
    `runtime\python.exe tests\test_history.py`。聚合跑用 `runtime\python.exe run_tests.py`
    （当前 20 个文件，你交付后应该是 22 个）。
 9. 输出中文，控制台可能是 GBK 乱码：跑之前设 `PYTHONIOENCODING=utf-8`。
-10. Git Bash 会把 `/s`、`/c`、`tasklist /FI` 这类参数当路径吃掉。要用 PowerShell 就整条
-    `powershell.exe -NoProfile -Command "..."`。
+10. Git Bash 会把 `/s`、`/c`、`tasklist /FI` 这类参数当路径吃掉。项目不使用 PowerShell；
+    需要查 WMI/程序集元数据时走 `runtime\python.exe tools\dotnet_probe.py ...`。
 11. 注释写中文，风格照现有文件：**只写「为什么」**（约束、实测结论、坑），
     不写「这行在干什么」。别写多段文档字符串。
 

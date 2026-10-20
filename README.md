@@ -45,8 +45,8 @@
 ## 2. 快速开始
 
 ```bat
-:: 1) 准备运行时（便携 Python 3.12，不入库）
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup_runtime.ps1
+:: 1) 准备运行时（便携 Python 3.12，不入库；纯 cmd，不调用 PowerShell）
+scripts\准备运行时.bat
 
 :: 2) 生成本机 EC 寄存器表（只需一次，读取本机已装的 Creator Center 元数据）
 scripts\生成EC寄存器表.bat
@@ -150,7 +150,7 @@ tests/                      见下一节
 for %f in (tests\test_*.py) do runtime\python.exe %f
 ```
 
-24 个测试文件覆盖调度决策、跑分算分、屏幕提示文案、历史缓冲、守护卡死判定、
+25 个测试文件覆盖调度决策、跑分算分、屏幕提示文案、历史缓冲、守护卡死判定、
 会话事件、配置读写、单实例与端口、OEM 状态解析、寄存器解码、写入闸门、
 功耗墙护栏、风扇表解码与 MQTT 曲线写入、灯效编码、档位通道。改文案或改阈值时留意有几条用例专门盯着
 「网页 / 托盘 / 弹窗用同一套模式词」，漏改一处就会红。

@@ -21,7 +21,7 @@
 **证据链（全部离线只读，可复现）**：
 
 1. IOCTL 码来自 `GCUService.exe`（.NET）的常量表，
-   用 `tools/oem_constant_dump.ps1` 反射读出（`IOCTL_GPD_ACPI_ECREAD=0x9C40A488` 等 27 个）；
+   用 `tools/dotnet_probe.py constants` 反射读出（`IOCTL_GPD_ACPI_ECREAD=0x9C40A488` 等 27 个）；
 2. 这些码在**正在运行的** `UWACPIDriver.sys` 分发链里逐个确认存在
    （`tools/ioctl_layout_probe.py`：`cmp dword [rsp+24h], 9C40A488h; je …`）；
 3. 缓冲布局是把驱动的 ECREAD/ECWRITE 处理函数字节级读出来的：
@@ -157,11 +157,11 @@
 OEM 服务目录 `C:\Program Files\OEM\CreatorCenter\UniwillService\`。
 所以「同方平台的 WMI 接口」在这台机器上不一定存在。
 
-本机探测结果**不作数**：`tools/wmi_scan.ps1` 与 `tools/wmi_guid_probe.ps1`（都只读、
+本机探测结果**不作数**：`tools\dotnet_probe.py wmi -Mode scan` 与 `... wmi -Mode guid`（都只读、
 只列类名方法名、不调用任何方法）在普通权限下连微软自己的 WMI 映射 GUID
 `05901221-D566-11D1-B2F0-00A0C9062910` 都查不到，说明这个权限级别根本看不见任何
 GUID 类——所以「查不到 B60BFB48」既不能证明它不在，也不能证明它在。
-要下定论只有一条路：**用管理员权限再跑一次 `tools\wmi_guid_probe.ps1`**（只读，不写硬件）。
+要下定论只有一条路：**用管理员权限再跑一次 `tools\dotnet_probe.py wmi -Mode guid`**（只读，不写硬件）。
 
 在那之前，不基于这条线索写任何代码。
 

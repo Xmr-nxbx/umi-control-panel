@@ -39,7 +39,7 @@ CAPTURE_DIR = os.path.join(ROOT_DIR, 'logs')
 FAN_TABLE_TOPIC = 'Fan/Table'
 FAN_CURVE_GET = 'GET_FAN_SPEED_CURVE_SETTING'
 # OperatingMode 的取值只认 OEM 自己枚举里有的：OperatingMode{Office:0, Turbo:2}
-# （tools/oem_constant_dump.ps1 导出）。以前这张表还写了 1→balance、3→turbo，
+# （tools/dotnet_probe.py constants 导出）。以前这张表还写了 1→balance、3→turbo，
 # 那是照抄别家的猜测，和 OEM 枚举直接矛盾；实测 Tray/Status 报的就是 1/2 这类
 # 没定义的值，硬翻译成「均衡」等于在面板上编一个本机不存在的档（用户明确说过
 # Creator Center 里没有办公/均衡/狂暴）。认不出来就写 unknown，并把原始值暴露出去。

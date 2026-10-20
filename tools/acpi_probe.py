@@ -10,9 +10,11 @@ r"""ACPI / EC 通道诊断（纯只读，绝不发送任何 IOCTL）。
 import ctypes
 import ctypes.wintypes as wt
 import os
-import subprocess
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import dotnet_probe  # noqa: E402
 
 k32 = ctypes.WinDLL('kernel32', use_last_error=True)
 k32.CreateFileW.restype = wt.HANDLE
@@ -71,39 +73,13 @@ def probe_handles():
     return lines, admin
 
 
-def ps(command):
-    """PowerShell 在部分环境里 stdout 会丢，统一落盘再读，保证拿得到结果。"""
-    tmp = os.path.join(os.environ.get('TEMP', '.'), 'umi-probe-tmp.txt')
-    full = '%s | Out-File -Encoding utf8 "%s"' % (command, tmp)
-    try:
-        subprocess.run(['powershell', '-NoProfile', '-Command', full],
-                       capture_output=True, timeout=90, creationflags=0x08000000)
-        with open(tmp, encoding='utf-8-sig', errors='replace') as f:
-            return f.read()
-    except Exception as exc:                              # noqa: BLE001
-        return '执行失败：%r' % (exc,)
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-
-
 def probe_wmi():
-    lines = ['', '--- root\\WMI 里与 EC / ACPI / 热区相关的类（只读查询）---']
-    out = ps("Get-CimClass -Namespace root/WMI | Where-Object { "
-             "$_.CimClassName -match 'EC|ACPI|Thermal|Battery|Energy' } "
-             "| Select-Object -ExpandProperty CimClassName")
-    found = [x.strip() for x in out.splitlines() if x.strip()]
-    lines.extend(found or ['（没取到，或该类命名空间不可读）'])
-    lines.append('')
-    lines.append('--- 可能带方法的 WMI 类（EC 读写候选）---')
-    out2 = ps("Get-CimClass -Namespace root/WMI | Where-Object { "
-              "$_.CimClassName -match 'EC|ACPI' } | ForEach-Object { "
-              "$_.CimClassName + ' : ' + (($_.CimClassMethods | "
-              "Select-Object -ExpandProperty Name) -join ',') }")
-    lines.extend([x for x in out2.splitlines() if x.strip()] or ['（无）'])
-    return lines
+    try:
+        out = dotnet_probe.run(['wmi', '-Mode', 'classes'], timeout=120)
+    except Exception as exc:                              # noqa: BLE001
+        return ['', '--- root\\WMI WMI 查询 ---',
+                '（失败：%r）' % (exc,)]
+    return [''] + out.rstrip().splitlines()
 
 
 def main():

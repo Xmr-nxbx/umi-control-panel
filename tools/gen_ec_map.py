@@ -7,23 +7,24 @@
 
 流程（全程只读，不加载执行 OEM 代码、不碰设备）：
   1. 找到 GCUService.exe（.NET 程序集，元数据里有常量与枚举）；
-  2. 调 tools/oem_constant_dump.ps1 用 ReflectionOnly 反射导出常量；
+  2. 调 tools/dotnet_probe.py（C# 反射工具）导出常量；
   3. 整理成 {registers, enums, ioctls} 写进 data/ec_map.local.json。
 """
 import json
 import os
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.paths import ROOT_DIR, data_path  # noqa: E402
+from app.paths import data_path  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import dotnet_probe  # noqa: E402
 
 GCU_CANDIDATES = [
     r'C:\Program Files\OEM\CreatorCenter\UniwillService\MyControlCenter\GCUService.exe',
     r'C:\Program Files (x86)\OEM\CreatorCenter\UniwillService\MyControlCenter\GCUService.exe',
 ]
-DUMP_PS1 = os.path.join(ROOT_DIR, 'tools', 'oem_constant_dump.ps1')
 OUT_NAME = 'ec_map.local.json'
 
 REGISTER_TYPE = 'Define.ECSpec'
@@ -41,12 +42,9 @@ def find_gcu(explicit=None):
 
 
 def run_dump(gcu, tmp_json):
-    cmd = ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', DUMP_PS1,
-           '-Path', gcu, '-OutJson', tmp_json]
-    res = subprocess.run(cmd, capture_output=True, timeout=300, creationflags=0x08000000)
-    text = (res.stdout or b'').decode('utf-8', 'replace') + (res.stderr or b'').decode('utf-8', 'replace')
+    text = dotnet_probe.run(['constants', '-Path', gcu, '-OutJson', tmp_json], timeout=300)
     if not os.path.exists(tmp_json):
-        raise RuntimeError('PowerShell 没有产出 JSON：%s' % text[-800:])
+        raise RuntimeError('反射导出没有产出 JSON：%s' % text[-800:])
     return text
 
 

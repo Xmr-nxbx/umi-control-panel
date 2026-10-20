@@ -214,7 +214,7 @@ def health_rows(cfg, log, state=None):
     from app.paths import RUNTIME_DIR
     exe = os.path.join(RUNTIME_DIR, 'UmiPanel.exe')
     check('便携运行时', os.path.exists(exe),
-          exe if os.path.exists(exe) else '缺 runtime\\UmiPanel.exe，请跑 scripts\\setup_runtime.ps1')
+          exe if os.path.exists(exe) else '缺 runtime\\UmiPanel.exe，请跑 scripts\\准备运行时.bat')
 
     # 3) 面板是否在跑。面板自己请求 /api/health 时 state 已经在外面取好了，
     #    再发一次 HTTP 是自问自答，跳过。
@@ -446,7 +446,7 @@ def ensure_identity_anchor(cfg, log):
     """GCUBridge 会周期性检查「clientId 同名进程」是否存在，不在就踢线。
 
     兜底通道要用 OcTool 这个 clientId，所以必须有一个叫 OcTool.exe 的进程活着。
-    做法：把 python.exe 复制一份改名 OcTool.exe（setup_runtime.ps1 负责生成），
+    做法：把 python.exe 复制一份改名 OcTool.exe（准备运行时.bat 负责生成），
     以 --anchor 空转模式常驻。只在 broker 端口真的活着时才启动，避免白费一个进程。
     """
     if not cfg.get('hardware', 'mqtt', 'enabled', default=True):
@@ -461,7 +461,7 @@ def ensure_identity_anchor(cfg, log):
     anchor = os.path.join(RUNTIME_DIR, 'OcTool.exe')
     if not os.path.exists(anchor):
         log.warn('[兜底通道] 缺少 runtime\\OcTool.exe，GCUBridge 会每 ~26 秒踢线；'
-                 '请重跑 scripts\\setup_runtime.ps1')
+                 '请重跑 scripts\\准备运行时.bat')
         return None
     import subprocess
     proc = subprocess.Popen(
