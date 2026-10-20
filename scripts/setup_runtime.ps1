@@ -11,10 +11,10 @@ function Test-Runtime {
 
 if (-not (Test-Runtime)) {
     $Copied = $false
-    foreach ($src in @(
-        'C:\Users\19062\Desktop\trae空间\AI电脑助手\runtime',
-        'C:\Python312'
-    )) {
+    $sources = @()
+    if ($env:UMI_PYTHON_SRC) { $sources += $env:UMI_PYTHON_SRC }
+    $sources += 'C:\Python312'
+    foreach ($src in $sources) {
         if (Test-Path (Join-Path $src 'python.exe')) {
             Write-Host "从 $src 复制运行时..."
             Copy-Item -Path (Join-Path $src '*') -Destination $Runtime -Recurse -Force
