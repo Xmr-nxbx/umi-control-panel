@@ -34,7 +34,7 @@
 | `OPERATING_GAMING_MODE` | `ProfileIndex`(可选 0-4) | 切档；会写 NVRAM `PowerMode`、重灌表、改 PL | 已接，`mode.write` verified |
 | `OPERATING_OFFICE_MODE` | 同上 | 同上 | 已接 |
 | `OPERATING_TURBO_MODE` | 同上 | 同上 | 已接 |
-| `SET_OPERATING_MODE_DETAIL` | PL1/PL2/PL4/TccOffset/GPU 偏移/TGP/DynamicBoost/FanSwitchSpeed | 改当前档的细节 | 已接 PL1/PL2/PL4（`power_limit.write` verified）；TCC/风扇切换速度未接 |
+| `SET_OPERATING_MODE_DETAIL` | PL1/PL2/PL4/TccOffset/GPU 偏移/TGP/DynamicBoost/FanSwitchSpeed | 改当前档的细节 | 已接 PL1/PL2/PL4（`power_limit.write` verified）；TCC 与风扇切换速度 2026-10-20 已接并做可逆验证 |
 | `RESTORE_OPERATING_MODE_DETAIL` | 无 | 恢复当前档细节 | 写，不接 |
 | `GET_FAN_SPEED_CURVE_SETTING` | 无 | 把**内存里当前表**发到 `Fan/Table` | 只读，准备接 |
 | `SET_FAN_SPEED_CURVE_SETTING` | `Name`+`Type`+`T0..T15` | 改占空、落盘 JSON、直接写 EC 表 | #46 的目标，验证前不点亮 |
@@ -94,9 +94,11 @@ CPU:[{ID,UpT,DownT,Duty} ×16], GPU:[... ×16]}`（`FanTable1p5.cs:3-57`）。
 
 | 能力 | 含义 | 现状 |
 |---|---|---|
-| `fan.curve` | 读曲线（EC 直读已有；再加 MQTT `Fan/Table` 一条旁证） | EC 侧 verified；MQTT 侧未接 |
-| `fan.curve.write` | 通过 OEM 服务写 Duty | `blocked`，验证前不点亮 |
+| `fan.curve` | 读曲线（EC 直读已有；再加 MQTT `Fan/Table` 一条旁证） | EC 侧 verified；MQTT 侧 verified |
+| `fan.curve.write` | 通过 OEM 服务写 Duty | verified（2026-10-20，单点哨兵可逆验证） |
 | `fan.curve.thresholds` | 改 UpT/DownT | **不做**：要停服务改 JSON，且重启才装载 |
+| `cpu.tcc.write` | TCC 偏移值 + 使能位 | verified（2026-10-20，值/开关往返） |
+| `fan.switch_speed.write` | 风扇换挡间隔 | verified（2026-10-20，300↔500 ms 往返） |
 
 ### 3.4 验证结果（2026-10-20，本机）
 
@@ -123,8 +125,16 @@ CPU:[{ID,UpT,DownT,Duty} ×16], GPU:[... ×16]}`（`FanTable1p5.cs:3-57`）。
   （`MyFanManager_RamFan1p5.cs:768-790`）。
 - EC 落点 `0x0786 = value | 0x80`；关闭写 `0x0786 = 0`（`:2054-2066`）。
 - 本机当前 `0x0786` 读到 `0x00`（#36），所以现在那个 5 °C 不生效。
-- 边界由 `Fan/Status` 的 `CPU_TccOffsetMaximum` 报（本机 5？——接之前先读一次确认）。
+- 边界由 `Fan/Status` 的 `CPU_TccOffsetMaximum` 报（本机 5）。
 - 注意：它属于 `SET_OPERATING_MODE_DETAIL`，和功耗墙同一族，切档会被服务重算。
+- **2026-10-20 已验证**（`tools/tcc_fan_speed_test.py --write`）：值 5→0、开关 0→1→0、
+  值回 5；Fan/Status 回读 0/0→0/1→0/0→5/0，最终 EC 0x0786 直读 0x00。
+- ⚠️ **服务端的坑**：收到 `CpuTccOffset` 会**无条件**调用
+  `SetCpuTccOffset(value, bApExist:true)`，也就是写 `value|0x80`，哪怕开关是 0。
+  所以「先关开关、再恢复值」会把 EC 使能位重新点亮（第一轮验证踩过，EC 读到 0x85）。
+  正确顺序永远是**值先发、开关最后发**；关闭时也要再发一次 `CpuTccOffsetSwitch=0`
+  把 EC 清回 0x00。通道方法和验证脚本都已按这个顺序固定，并加了 EC 直读断言。
+  能力 `cpu.tcc.write` = verified。
 
 ### 4.2 风扇切换速度
 
@@ -132,7 +142,11 @@ CPU:[{ID,UpT,DownT,Duty} ×16], GPU:[... ×16]}`（`FanTable1p5.cs:3-57`）。
   关闭发 `{"FanSwitchSpeedEnabled":0}`（`MyFanManager_RamFan1p5.cs:753-761`）。
 - EC `0x0787 = (ms/100) | 0x80`；**< 100 ms 被静默忽略**，关闭写 0（`:2068-2082`）。
 - 它控制的正是 EC 斜坡限速器的 R5（见 6.11 二十四），语义清楚、风险低。
-  但"300 ms"到底让风扇更快还是更慢，要在场听一次再写文案。
+- **2026-10-20 已验证**（同一条脚本）：300→500 ms、开关 0→1→0、间隔回 300，
+  Fan/Status 回读 500/1 与 300/0，最终 EC 0x0787 直读 0x00。通道只接受
+  100~2000 ms 且为 100 的整数倍（EC 按 ms/100 落字节，<100 会被固件忽略）。
+  同样有「收到值就无条件写使能位」的坑，所以也是**值先发、开关最后发**。
+  能力 `fan.switch_speed.write` = verified。
 
 ### 4.3 系统监视（纯读）
 
@@ -171,5 +185,5 @@ CPU:[{ID,UpT,DownT,Duty} ×16], GPU:[... ×16]}`（`FanTable1p5.cs:3-57`）。
 2. ~~首次可逆验证~~（2026-10-20 完成：单点哨兵、字节级可逆，见 3.4）。
 3. ~~`fan.curve.write` 升 verified、面板 UI~~（2026-10-20 完成：OEM 表编辑器，
    支持 CPU/GPU、下发/还原；不改阈值）。
-4. TCC 偏移与风扇切换速度另开小步，各自验证后再点亮。TCC 的开关+值必须**两条消息、先值后开关**；
-   风扇切换速度 <100 ms 会被服务静默忽略。
+4. ~~TCC 偏移与风扇切换速度~~（2026-10-20 完成：两条消息先值后开关；300↔500 ms、
+   TCC 0/5 往返验证，面板 OEM 卡片有输入框与开关按钮）。

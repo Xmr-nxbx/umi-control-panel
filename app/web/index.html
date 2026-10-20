@@ -61,6 +61,18 @@
     <h2>OEM 开关状态 <span class="tag">GCUBridge 读数；只有做过可逆验证的开关才给按钮</span></h2>
     <div class="hw-rows" id="oem"></div>
     <div class="btn-row" id="oem-buttons"></div>
+    <div class="oem-controls" id="oem-controls" hidden>
+      <span class="oem-ctl">TCC 偏移
+        <input id="tcc-value" type="number" min="0" max="5" step="1" inputmode="numeric"> °C
+        <button id="btn-tcc-apply">应用并开启</button>
+        <button id="btn-tcc-off">关闭</button>
+      </span>
+      <span class="oem-ctl">风扇换挡间隔
+        <input id="fanspeed-value" type="number" min="100" max="2000" step="100" inputmode="numeric"> ms
+        <button id="btn-fanspeed-apply">应用并启用</button>
+        <button id="btn-fanspeed-off">关闭</button>
+      </span>
+    </div>
     <p class="hint" id="oem-hint"></p>
   </section>
 

@@ -73,6 +73,8 @@ const PENDING_WORD = '正在生效…';
 // 服务答一次 GETSTATUS）。它只决定「正在生效」挂多久，不影响要不要下发。
 const WINKEY_WAIT_S = 20;
 const KB_WAIT_S = 10;
+const TCC_WAIT_S = 20;
+const FANSPEED_WAIT_S = 15;
 
 function markPending(key, want, secs, label) {
   PENDING[key] = { want: want, secs: secs, until: Date.now() + secs * 1000, label: label };
@@ -389,6 +391,7 @@ function renderOem(s) {
     box.innerHTML = [hwRow('GCUBridge', '未连接', false),
       hwRow('OEM 状态', '拿不到（要 GCUService 在跑，且 clientId 没被别人占用）', false)].join('');
     if ($('oem-buttons')) $('oem-buttons').innerHTML = '';   // 通道掉了，按钮也得跟着收走
+    if ($('oem-controls')) $('oem-controls').hidden = true;
     hint.classList.add('err');
     hint.textContent = '原因：' + ((mqCh.detail || {}).reason || '未探测')
       + '。这一卡片只读，连上后会自动填。';
@@ -400,6 +403,8 @@ function renderOem(s) {
   // 同一轮渲染里算两遍会出现「行上还在等、按钮已经好了」的错位。
   const winPend = pendingFor('winkey', oem.win_key_locked);
   const kbPend = pendingFor('kbpower', oem.kb_power_on);
+  const tccPend = pendingFor('tcc', oem.tcc_offset_enabled);
+  const fanSpeedPend = pendingFor('fanspeed', oem.fan_switch_speed_enabled);
 
   const lim = oem.limits || {};
   const limText = lim.pl1_min != null
@@ -417,6 +422,15 @@ function renderOem(s) {
        + (oem.lightbar_brightness != null ? ` · 亮度 ${oem.lightbar_brightness}` : ''));
   // 2026-09-30 实测：开关字段说「直连已开」，DGpu 字段却是 NV_CTRL_PANEL_AUTOSELECT。
   // 更可能是两层不同的东西（直连开关 vs NVIDIA 控制面板的输出偏好），没验证前两个都报。
+  const tccText = oem.tcc_offset_c == null ? '未报'
+    : `${oem.tcc_offset_enabled == null ? '开关未知'
+        : (oem.tcc_offset_enabled ? '已开启' : '未开启')} · ${oem.tcc_offset_c} °C`
+      + `（上限 ${oem.tcc_offset_max != null ? oem.tcc_offset_max : '?'}）`
+      + (tccPend ? ' · ' + PENDING_WORD : '');
+  const fanSpeedText = oem.fan_switch_speed_ms == null ? '未报'
+    : `${oem.fan_switch_speed_enabled == null ? '开关未知'
+        : (oem.fan_switch_speed_enabled ? '已启用' : '未启用')} · ${oem.fan_switch_speed_ms} ms`
+      + (fanSpeedPend ? ' · ' + PENDING_WORD : '');
   const muxRaw = oem.dgpu_raw ? ` · NVIDIA 侧 ${oem.dgpu_raw}` : '';
   const muxText = oem.mux_support === false ? '本机不支持（OEM 报 NotSupport）'
     : (onOff(oem.mux_on, '已开（独显直连）', '关（混合输出）') + muxRaw);
@@ -433,6 +447,8 @@ function renderOem(s) {
     hwRow('单色背光功能', onOff(oem.kb_single_color_on, '开', '关'), oem.kb_single_color_on != null),
     // 用户/Creator Center 叫它「海岸灯」，面板跟着叫，别让他对不上号
     hwRow('海岸灯（灯条）', barText, oem.lightbar_on != null),
+    hwRow('TCC 偏移（OEM 读数）', tccText, oem.tcc_offset_c != null),
+    hwRow('风扇换挡间隔（OEM 读数）', fanSpeedText, oem.fan_switch_speed_ms != null),
     hwRow('USB 关机充电', onOff(oem.usb_charger_on, '开', '关'), oem.usb_charger_on != null),
     hwRow('OSD 提示', oem.osd_hidden == null ? '未知' : (oem.osd_hidden ? '隐藏' : '显示'),
           oem.osd_hidden != null),
@@ -460,6 +476,39 @@ function renderOem(s) {
   // 键盘背光：2026-09-30 15:31 做完可逆验证（Off→On 约 0.3 秒，关回后亮度/灯效/速度不变），
   // 所以整张卡片现在有两个按钮。亮度/灯效是另外两条命令，没验，照旧不给按钮。
   const canKb = (caps['lighting.rgb.write'] || {}).state === 'verified' && oem.kb_power_on != null;
+  // TCC / 风扇换挡：2026-10-20 都用 tools/tcc_fan_speed_test.py --write 做过可逆验证，
+  // 能力升 verified 后才把下面这组固定控件放出来。输入框不重建，避免 2 秒轮询把
+  // 用户正在输入的值冲掉；只有不在焦点上时才同步成回读值。
+  const canTcc = (caps['cpu.tcc.write'] || {}).state === 'verified'
+    && oem.tcc_offset_c != null && oem.tcc_offset_max != null
+    && oem.tcc_offset_enabled != null;
+  const canFanSpeed = (caps['fan.switch_speed.write'] || {}).state === 'verified'
+    && oem.fan_switch_speed_ms != null && oem.fan_switch_speed_enabled != null;
+  const controls = $('oem-controls');
+  if (controls) {
+    controls.hidden = !(canTcc || canFanSpeed);
+    const tccInput = $('tcc-value');
+    if (tccInput) {
+      tccInput.max = oem.tcc_offset_max != null ? oem.tcc_offset_max : 5;
+      if (document.activeElement !== tccInput && oem.tcc_offset_c != null) tccInput.value = oem.tcc_offset_c;
+      tccInput.disabled = !canTcc || !!tccPend;
+    }
+    const tccApply = $('btn-tcc-apply');
+    if (tccApply) tccApply.disabled = !canTcc || !!tccPend;
+    const tccOff = $('btn-tcc-off');
+    if (tccOff) tccOff.disabled = !canTcc || !!tccPend || !oem.tcc_offset_enabled;
+    const fanInput = $('fanspeed-value');
+    if (fanInput) {
+      if (document.activeElement !== fanInput && oem.fan_switch_speed_ms != null) {
+        fanInput.value = oem.fan_switch_speed_ms;
+      }
+      fanInput.disabled = !canFanSpeed || !!fanSpeedPend;
+    }
+    const fanApply = $('btn-fanspeed-apply');
+    if (fanApply) fanApply.disabled = !canFanSpeed || !!fanSpeedPend;
+    const fanOff = $('btn-fanspeed-off');
+    if (fanOff) fanOff.disabled = !canFanSpeed || !!fanSpeedPend || !oem.fan_switch_speed_enabled;
+  }
   const winNote = (mqCh.detail || {}).winkey_write_reason || '';
   if (btns) {
     btns.innerHTML = (canWin
@@ -498,8 +547,12 @@ function renderOem(s) {
     + '，全是 OEM 自己报的读数。只有做过「下发 → EC 回读 → 还原」可逆验证的开关才给按钮，'
     + '其余一律只读；认不出来的值照实写「未知」，不猜。'
     + '「OEM 允许范围」是 Fan/Status 里 OEM 自己写的上下限，以后任何写入都拿它当护栏。'
+    + (canTcc || canFanSpeed ? ' TCC 偏移越大越保守（更早降频）；风扇换挡间隔只收 100~2000 ms、100 的整数倍。' : '')
     + (canWin && winNote ? ' ' + winNote : '')
-    + (canKb && (mqCh.detail || {}).rgb_write_reason ? ' ' + mqCh.detail.rgb_write_reason : '');
+    + (canKb && (mqCh.detail || {}).rgb_write_reason ? ' ' + mqCh.detail.rgb_write_reason : '')
+    + (canTcc && (mqCh.detail || {}).tcc_write_reason ? ' ' + mqCh.detail.tcc_write_reason : '')
+    + (canFanSpeed && (mqCh.detail || {}).fan_switch_write_reason
+       ? ' ' + mqCh.detail.fan_switch_write_reason : '');
 }
 
 // ---------- 风扇曲线（EC 直读，只读） ----------
@@ -1067,6 +1120,51 @@ $('btn-bench-compare').onclick = () => startBench('compare');
 $('btn-fan-curve').onclick = () => loadFanCurve(true);
 // OEM 表走 GCUBridge，读得快；编辑器里只有做过可逆验证的「写占空」是亮的
 $('btn-fan-curve-oem').onclick = () => loadOemCurve(true);
+// TCC 偏移 / 风扇换挡：控件是固定 DOM，不随 2 秒轮询重建
+$('btn-tcc-apply').onclick = async () => {
+  const oem = ((lastState || {}).hardware || {}).oem || {};
+  const max = oem.tcc_offset_max != null ? oem.tcc_offset_max : 5;
+  const value = Number(($('tcc-value') || {}).value);
+  if (!Number.isInteger(value) || value < 0 || value > max) {
+    toast(`TCC 偏移只支持 0~${max} °C`, true);
+    return;
+  }
+  try {
+    const r = await api('/api/tcc', { value, enabled: true });
+    toast(r.detail || '已下发');
+  } catch (e) { toast('下发失败：' + e.message, true); return; }
+  markPending('tcc', true, TCC_WAIT_S, 'TCC 偏移');
+  poll();
+};
+$('btn-tcc-off').onclick = async () => {
+  try {
+    const r = await api('/api/tcc', { enabled: false });
+    toast(r.detail || '已下发');
+  } catch (e) { toast('下发失败：' + e.message, true); return; }
+  markPending('tcc', false, TCC_WAIT_S, 'TCC 偏移');
+  poll();
+};
+$('btn-fanspeed-apply').onclick = async () => {
+  const ms = Number(($('fanspeed-value') || {}).value);
+  if (!Number.isInteger(ms) || ms < 100 || ms > 2000 || ms % 100) {
+    toast('风扇换挡间隔只支持 100~2000 ms，且为 100 的整数倍', true);
+    return;
+  }
+  try {
+    const r = await api('/api/fan-switch-speed', { ms, enabled: true });
+    toast(r.detail || '已下发');
+  } catch (e) { toast('下发失败：' + e.message, true); return; }
+  markPending('fanspeed', true, FANSPEED_WAIT_S, '风扇换挡间隔');
+  poll();
+};
+$('btn-fanspeed-off').onclick = async () => {
+  try {
+    const r = await api('/api/fan-switch-speed', { enabled: false });
+    toast(r.detail || '已下发');
+  } catch (e) { toast('下发失败：' + e.message, true); return; }
+  markPending('fanspeed', false, FANSPEED_WAIT_S, '风扇换挡间隔');
+  poll();
+};
 $('btn-stop').onclick = async () => {
   if (!confirm('确定停止面板服务？停止后自适应调度与掉档守护都会失效。')) return;
   try { await api('/api/shutdown', {}); toast('服务已停止'); }

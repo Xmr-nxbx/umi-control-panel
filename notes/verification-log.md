@@ -389,3 +389,28 @@
       ⚠️ 另外固件里 `OemGlobalNvsDxe`/`OemHooks` 有 4 处把 `0x07D8` 当**函数实参**，
       但那个 `0x7D8` 已经查明是 `sizeof(SETUP_DATA)`，与 EC 无关（见第十一节 ③-补）。
 
+### 2026-10-20 晚：TCC 偏移与风扇换挡间隔接进面板（可逆验证）
+
+- **抓包基线**：`Fan/Status` 报 `CPU_TccOffset=5`、`CPU_TccOffsetSwitch=0`、
+  `CPU_TccOffsetMaximum=5`、`FAN_FanSwitchSpeed=300`、`FAN_FanSwitchSpeedEnabled=0`。
+- **TCC**：`{"Action":"SET_OPERATING_MODE_DETAIL","CpuTccOffset":"0"}` 先发值；
+  关闭状态下回读仍是 5（服务先记住、不写 EC）。发
+  `{"CpuTccOffsetSwitch":"1"}` 后回读 **0/1**；再发 `0` 关回、发 `5` 恢复，
+  最终回读 **5/0**。全程 0 °C 偏移，不改变散热。
+- **风扇换挡**：`{"FanSwitchSpeed":"500"}` + `{"FanSwitchSpeedEnabled":"1"}`，
+  回读 **500/1**；关回并写 `300`，最终回读 **300/0**。
+- **踩到的坑**：服务收到 `CpuTccOffset` / `FanSwitchSpeed` 会**无条件**写
+  `value|0x80`，哪怕开关是 0。第一轮按「先关开关、再恢复值」执行，Fan/Status 显示
+  5/0、300/0，但 EC 直读 **0x0786=0x85、0x0787=0x85**——使能位其实又被点亮了。
+  先发原始报文把两个开关=0 清回 `0x00/0x00`，再改脚本与通道的顺序。
+- **正确顺序**：值先发、开关最后发；关闭时也**总是**再发一次开关 0（不能因为
+  Fan/Status 里已经是 0 就跳过）。`MqttChannel.set_tcc_offset` /
+  `set_fan_switch_speed` 已按此固定，并补了「已经关着也要发开关 0」的测试。
+- **复验**：`tools/tcc_fan_speed_test.py --write` 重跑，最终 Fan/Status 5/0、300/0，
+  **EC 0x0786=0x00、0x0787=0x00**。脚本现在把 EC 直读作为通过条件。
+- **判定**：`cpu.tcc.write` 与 `fan.switch_speed.write` 升 verified。
+  面板新增固定控件（TCC 值输入 + 应用并开启/关闭；换挡间隔 + 应用并启用/关闭），
+  POST `/api/tcc` 与 `/api/fan-switch-speed`，值域检查在 `MqttChannel` 里。
+- **工具**：`tools/tcc_fan_speed_test.py`（默认只读，`--write` 才下发；finally 还原）。
+  因为面板占用同一个 MQTT 身份，验证期间面板会被短暂顶掉，幂等重连后恢复。
+

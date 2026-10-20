@@ -92,14 +92,15 @@ def _():
 @case('Fan/Status 的允许范围要转成整数，字符串数字也算')
 def _():
     fan = {'CPU_PL1Minimum': 10, 'CPU_PL1Maximum': '120', 'CPU_PL4Maximum': 165,
+           'CPU_TccOffsetMaximum': '5',
            'GPU_ConfigurableTGPMinimum': 80, 'GPU_ConfigurableTGPMaximum': 115,
            'GPU_DynamicBoostMinimum': 5, 'GPU_DynamicBoostMaximum': 15,
            'GPU_TargetTemperatureMinimum': 75, 'GPU_TargetTemperatureMaximum': 87,
            'PowerMode': 1, 'ProfileName': 'Mode3_Profile1', 'FAN_TableName': 'M3T1'}
     oem = MqttChannel._oem_switches(_payloads(setting=SETTING_ALL_OFF, fan=fan))
     lim = oem['limits']
-    assert lim == {'pl1_min': 10, 'pl1_max': 120, 'pl4_max': 165, 'tgp_min': 80,
-                   'tgp_max': 115, 'boost_min': 5, 'boost_max': 15,
+    assert lim == {'pl1_min': 10, 'pl1_max': 120, 'pl4_max': 165, 'tcc_max': 5,
+                   'tgp_min': 80, 'tgp_max': 115, 'boost_min': 5, 'boost_max': 15,
                    'gpu_temp_min': 75, 'gpu_temp_max': 87}, lim
     assert oem['power_mode_raw'] == 1
     assert oem['profile_name'] == 'Mode3_Profile1'

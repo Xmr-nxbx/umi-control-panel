@@ -19,7 +19,8 @@ import time
 from app.act.channels.base import (Channel, CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ,
                                    CAP_PL_WRITE, CAP_RGB, CAP_RGB_WRITE, CAP_DGPU,
                                    CAP_WINKEY_WRITE, CAP_BATTERY_MODE_WRITE, CAP_FAN_CURVE,
-                                   CAP_FAN_CURVE_WRITE, MODE_LABELS, MODE_VERIFIED)
+                                   CAP_FAN_CURVE_WRITE, CAP_TCC_WRITE, CAP_FAN_SWITCH_WRITE,
+                                   MODE_LABELS, MODE_VERIFIED)
 from app.paths import ROOT_DIR
 
 ACTIONS_PATH = os.path.join(os.path.dirname(__file__), 'gcu_actions.json')
@@ -195,7 +196,7 @@ class MqttChannel(Channel):
         self._cap_count = 0
         for cap in (CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ, CAP_PL_WRITE, CAP_RGB,
                     CAP_DGPU, CAP_WINKEY_WRITE, CAP_BATTERY_MODE_WRITE, CAP_FAN_CURVE,
-                    CAP_FAN_CURVE_WRITE):
+                    CAP_FAN_CURVE_WRITE, CAP_TCC_WRITE, CAP_FAN_SWITCH_WRITE):
             self.caps[cap] = 'unsupported'
         self.detail = {'enabled': self.enabled, 'broker': '%s:%s' % (self.host, self.port)}
 
@@ -240,7 +241,8 @@ class MqttChannel(Channel):
                 # 掉线就把**所有**已验证的写能力收回：否则面板还亮着按钮，点了只会失败。
                 # 上一版只收了 Win 锁，功耗墙升 verified 之后这个口子会更明显。
                 for cap in (CAP_MODE_WRITE, CAP_PL_WRITE, CAP_RGB_WRITE, CAP_WINKEY_WRITE,
-                            CAP_BATTERY_MODE_WRITE, CAP_FAN_CURVE, CAP_FAN_CURVE_WRITE):
+                            CAP_BATTERY_MODE_WRITE, CAP_FAN_CURVE, CAP_FAN_CURVE_WRITE,
+                            CAP_TCC_WRITE, CAP_FAN_SWITCH_WRITE):
                     self.caps[cap] = 'unsupported'
                 self.detail['reason'] = '未连接：%s' % self._kick_reason
                 for _ in range(int(backoff * 10)):
@@ -311,6 +313,23 @@ class MqttChannel(Channel):
         self.detail['rgb_write_reason'] = (
             '背光开关已做过可逆验证（Off→On 约 0.3 秒生效，关回后亮度/灯效/速度不变）。'
             '亮度、灯效是另外两条命令，面板暂时不碰。')
+        # TCC 偏移：2026-10-20 用 tools/tcc_fan_speed_test.py --write 做了可逆验证：
+        # 值 5→0、使能位 0→1→0、值恢复 5；Fan/Status 回读依次为 0/0→0/1→0/0→5/0。
+        # 关闭状态下只发值，服务先记住、不写 EC；使能后才应用（所以通道先发值再发开关）。
+        self.caps[CAP_TCC_WRITE] = 'verified'
+        self.detail['tcc_write_reason'] = (
+            '已做可逆验证（2026-10-20）：值 5→0、开关 0→1→0、值回 5，'
+            'Fan/Status 与 EC 0x0786 最终都回到 0x00。上限用 OEM 自己报的 '
+            'CPU_TccOffsetMaximum（本机 5）。注意服务收到值会无条件写 value|0x80，'
+            '所以通道固定「值先发、开关最后发」，关的时候也一定再发一次开关 0。')
+        # 风扇换挡间隔：同一次验证里 300→500 ms、开关 0→1→0、间隔回 300，
+        # Fan/Status 回读 500/1 与 300/0；EC 落点是 0x0787=(ms/100)|0x80。
+        self.caps[CAP_FAN_SWITCH_WRITE] = 'verified'
+        self.detail['fan_switch_write_reason'] = (
+            '已做可逆验证（2026-10-20）：间隔 300→500 ms、开关 0→1→0、间隔回 300，'
+            'EC 0x0787 最终回到 0x00。只接受 100~2000 ms 且为 100 的整数倍'
+            '（EC 按 ms/100 落字节，<100 会被固件忽略）。服务收到间隔值同样会无条件写使能位，'
+            '所以通道固定「值先发、开关最后发」。')
         # 电池充电三档：动作名和 EC 落点都对上了（notes/hardware-channels.md 6.8），但没做过可逆验证，
         # 而且上游 Linux 驱动因为 2020 年前后的机型出过「开充电限制把电池搞坏」的事故，
         # 直接封死了强开路径（CVE-2026-64143）。本机正是那一代，所以保持 unknown。
@@ -709,6 +728,123 @@ class MqttChannel(Channel):
         return self.send_action('SET_PL_DETAIL', extra=extra,
                                 note='功耗墙 %s' % ' '.join('%s=%s' % kv for kv in sorted(extra.items())))
 
+    # ---------- TCC 偏移 / 风扇换挡间隔 ----------
+    def _fan_status(self):
+        return (self.payloads().get('Fan/Status') or {}).get('data') or {}
+
+    @staticmethod
+    def _fan_num(fan, key):
+        try:
+            return int(str(fan[key]))
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def tcc_state(self):
+        """OEM 自己报的 TCC 偏移值 + 使能位 + 上限；读不到返回 None。"""
+        fan = self._fan_status()
+        value = self._fan_num(fan, 'CPU_TccOffset')
+        switch = self._fan_num(fan, 'CPU_TccOffsetSwitch')
+        maximum = self._fan_num(fan, 'CPU_TccOffsetMaximum')
+        if value is None and switch is None and maximum is None:
+            return None
+        return {'value': value, 'enabled': None if switch is None else switch == 1,
+                'max': maximum}
+
+    def set_tcc_offset(self, value=None, enabled=None):
+        """写 TCC 偏移。协议按 OEM 自己的两条独立字段来：
+
+        {"CpuTccOffset": "N"} 改值，{"CpuTccOffsetSwitch": "1"|"0"} 改使能位。
+        先发值再发使能，服务才会把新值真正应用；只关开关不需要再发值。
+        上限用 Fan/Status 里 OEM 报的 CPU_TccOffsetMaximum（本机 5）。
+        """
+        cur = self.tcc_state()
+        if not cur:
+            return False, '拿不到 Fan/Status 里的 TCC 字段，拒绝下发'
+        if value is None and enabled is None:
+            return True, 'TCC 偏移没有变化'
+        if enabled is None:
+            if cur['enabled'] is None:
+                return False, 'TCC 开关状态未知，请明确要开还是关'
+            want_enabled = cur['enabled']
+        else:
+            want_enabled = bool(enabled)
+        sends = []
+        if value is not None:
+            try:
+                want_value = int(value)
+            except (TypeError, ValueError):
+                return False, 'TCC 偏移必须是整数'
+            if want_value < 0 or cur['max'] is None or want_value > cur['max']:
+                return False, ('TCC 偏移 %s 超出 OEM 报的范围 0~%s，拒发'
+                               % (want_value, cur['max']))
+            if cur['value'] != want_value:
+                ok, detail = self.send_action('SET_TCC_OFFSET',
+                                              extra={'CpuTccOffset': str(want_value)},
+                                              note='TCC 偏移值 %d °C' % want_value)
+                if not ok:
+                    return False, detail
+                sends.append('值→%d' % want_value)
+        # 关键：服务收到 CpuTccOffset 会**无条件**写 value|0x80，哪怕开关是 0。
+        # 所以开关必须永远最后发，而且即使 RAM 里已经是目标值也要再发一次——
+        # 否则「先关开关、再恢复值」会把 EC 0x0786 bit7 重新点亮（2026-10-20 踩过）。
+        ok, detail = self.send_action(
+            'SET_TCC_SWITCH',
+            extra={'CpuTccOffsetSwitch': '1' if want_enabled else '0'},
+            note='TCC 偏移%s' % ('开启' if want_enabled else '关闭'))
+        if not ok:
+            return False, detail
+        sends.append('开关→%s' % ('开' if want_enabled else '关'))
+        return True, '已下发：%s；回读 Fan/Status 确认' % '，'.join(sends)
+
+    def fan_switch_state(self):
+        fan = self._fan_status()
+        value = self._fan_num(fan, 'FAN_FanSwitchSpeed')
+        switch = self._fan_num(fan, 'FAN_FanSwitchSpeedEnabled')
+        if value is None and switch is None:
+            return None
+        return {'value': value, 'enabled': None if switch is None else switch == 1}
+
+    def set_fan_switch_speed(self, ms=None, enabled=None):
+        """写风扇换挡间隔。OEM 报文是字符串毫秒值；EC 落点是 (ms/100)|0x80，
+        所以只接受 100~2000 且为 100 的整数倍（<100 会被固件忽略）。
+        """
+        cur = self.fan_switch_state()
+        if not cur:
+            return False, '拿不到 Fan/Status 里的风扇换挡字段，拒绝下发'
+        if ms is None and enabled is None:
+            return True, '风扇换挡间隔没有变化'
+        if enabled is None:
+            if cur['enabled'] is None:
+                return False, '风扇换挡开关状态未知，请明确要开还是关'
+            want_enabled = cur['enabled']
+        else:
+            want_enabled = bool(enabled)
+        sends = []
+        if ms is not None:
+            try:
+                want_ms = int(ms)
+            except (TypeError, ValueError):
+                return False, '风扇换挡间隔必须是整数毫秒'
+            if want_ms < 100 or want_ms > 2000 or want_ms % 100:
+                return False, '风扇换挡间隔只支持 100~2000 ms、且为 100 的整数倍，拒发'
+            if cur['value'] != want_ms:
+                ok, detail = self.send_action('SET_FAN_SWITCH_SPEED',
+                                              extra={'FanSwitchSpeed': str(want_ms)},
+                                              note='风扇换挡间隔 %d ms' % want_ms)
+                if not ok:
+                    return False, detail
+                sends.append('间隔→%dms' % want_ms)
+        # 和 TCC 同一个坑：服务收到 FanSwitchSpeed 会无条件写 (ms/100)|0x80，
+        # 所以开关永远最后发、且总是发（RAM 里相同也要发）。
+        ok, detail = self.send_action(
+            'SET_FAN_SWITCH_SPEED_ENABLED',
+            extra={'FanSwitchSpeedEnabled': '1' if want_enabled else '0'},
+            note='风扇换挡%s' % ('启用' if want_enabled else '关闭'))
+        if not ok:
+            return False, detail
+        sends.append('开关→%s' % ('开' if want_enabled else '关'))
+        return True, '已下发：%s；回读 Fan/Status 确认' % '，'.join(sends)
+
     def read(self):
         payloads = self.payloads()
         out = {'source': 'mqtt'}
@@ -766,6 +902,8 @@ class MqttChannel(Channel):
             except (TypeError, ValueError):
                 return None
 
+        tcc_switch = num(fan.get('CPU_TccOffsetSwitch')) if fan else None
+        speed_switch = num(fan.get('FAN_FanSwitchSpeedEnabled')) if fan else None
         out = {
             # Win 键锁定：OEM 原文 WINKEY_STATUS_LOCK / _UNLOCK，命令是
             # Setting/Control {"Action":"WINKEY_LOCK"|"WINKEY_UNLOCK"}。
@@ -807,10 +945,18 @@ class MqttChannel(Channel):
             'kb_brightness_ac': kb.get('ACBrightness') if kb else None,
             'kb_brightness_dc': kb.get('DCBrightness') if kb else None,
             'kb_controller': kb.get('solution') if kb else None,
+            # TCC 偏移与风扇换挡：读数和写入都走 Fan/Status + Fan/Control，
+            # 值域也由 OEM 自己报（TCC 上限本机 5；换挡间隔 OEM 只报当前值，没有上下限）。
+            'tcc_offset_c': num(fan.get('CPU_TccOffset')) if fan else None,
+            'tcc_offset_enabled': None if tcc_switch is None else tcc_switch == 1,
+            'tcc_offset_max': num(fan.get('CPU_TccOffsetMaximum')) if fan else None,
+            'fan_switch_speed_ms': num(fan.get('FAN_FanSwitchSpeed')) if fan else None,
+            'fan_switch_speed_enabled': None if speed_switch is None else speed_switch == 1,
             # Fan/Status 里 OEM 自己写的允许范围：以后任何写入都拿这组数当护栏。
             'limits': {k: num(fan.get(v)) for k, v in (
                 ('pl1_min', 'CPU_PL1Minimum'), ('pl1_max', 'CPU_PL1Maximum'),
-                ('pl4_max', 'CPU_PL4Maximum'), ('tgp_min', 'GPU_ConfigurableTGPMinimum'),
+                ('pl4_max', 'CPU_PL4Maximum'), ('tcc_max', 'CPU_TccOffsetMaximum'),
+                ('tgp_min', 'GPU_ConfigurableTGPMinimum'),
                 ('tgp_max', 'GPU_ConfigurableTGPMaximum'),
                 ('boost_min', 'GPU_DynamicBoostMinimum'), ('boost_max', 'GPU_DynamicBoostMaximum'),
                 ('gpu_temp_min', 'GPU_TargetTemperatureMinimum'),

@@ -212,6 +212,18 @@ class Hardware:
                 return ch.set_fan_curve(duties, type_)
         return False, 'GCUBridge 未连接，风扇曲线写不了'
 
+    def set_tcc_offset(self, value=None, enabled=None):
+        for ch in self.channels:
+            if hasattr(ch, 'set_tcc_offset') and ch.alive:
+                return ch.set_tcc_offset(value, enabled)
+        return False, 'GCUBridge 未连接，TCC 偏移写不了'
+
+    def set_fan_switch_speed(self, ms=None, enabled=None):
+        for ch in self.channels:
+            if hasattr(ch, 'set_fan_switch_speed') and ch.alive:
+                return ch.set_fan_switch_speed(ms, enabled)
+        return False, 'GCUBridge 未连接，风扇换挡间隔写不了'
+
     def start_mqtt_capture(self, minutes=10):
         return self.mqtt.start_capture(minutes)
 

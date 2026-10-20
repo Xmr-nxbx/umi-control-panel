@@ -89,6 +89,10 @@ main {
 .hw-row .v.na { color: var(--dim); font-weight: 400; }
 
 .btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.oem-controls { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; }
+.oem-ctl { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); font-size: 13px; }
+.oem-ctl input { width: 76px; padding: 5px 7px; background: var(--panel-2); color: var(--txt);
+  border: 1px solid var(--line); border-radius: 6px; }
 button {
   background: var(--panel-2); color: var(--txt); border: 1px solid var(--line);
   border-radius: 8px; padding: 7px 14px; cursor: pointer; font-size: 13px;

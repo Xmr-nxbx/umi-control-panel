@@ -202,6 +202,14 @@ def make_handler(daemon, cfg, on_shutdown):
                     self._send(200, daemon.hw.stop_mqtt_capture())
                 else:
                     self._send(200, daemon.hw.start_mqtt_capture(body.get('minutes', 10)))
+            elif path == '/api/tcc':
+                # 值域与「先发值再发使能」的顺序都在 MqttChannel.set_tcc_offset 里，
+                # 这里只转发；能力没验过时通道会拒绝。
+                ok, detail = daemon.hw.set_tcc_offset(body.get('value'), body.get('enabled'))
+                self._send(200 if ok else 409, {'ok': ok, 'detail': detail})
+            elif path == '/api/fan-switch-speed':
+                ok, detail = daemon.hw.set_fan_switch_speed(body.get('ms'), body.get('enabled'))
+                self._send(200 if ok else 409, {'ok': ok, 'detail': detail})
             elif path == '/api/fan-mode':
                 ok, detail = daemon.set_fan_mode(str(body.get('flag', '')))
                 self._send(200 if ok else 409, {'ok': ok, 'detail': detail})
