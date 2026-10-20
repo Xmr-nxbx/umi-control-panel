@@ -8,6 +8,11 @@
 这份文件回答两件事：原厂服务到底认哪些命令；其中哪些我们**可以安全地**接进面板。
 风扇状态机与 EC 侧时序在 `notes/hardware-channels.md` 6.11 第二十四节，这里不重复。
 
+**怎么补未知参数**：面板本身订阅了 Creator Center 用到的控制主题（`SUBSCRIBE_TOPICS`）。
+跑 `scripts\抓CreatorCenter配置.bat`，在 Creator Center 里点你要研究的功能，面板会把
+每一条 MQTT 报文写进 `logs\mqtt-capture-*.jsonl`（不发命令、不新建连接、不停面板）。
+结束时自动去重并打印每个主题的 Action/参数，摘要写在抓包文件旁边。
+
 ## 1. 本机走哪一套实现
 
 - `MyFanTableCtrl` 构造时按 `EcCtrl.IsSuportRamFan1p5()` 与 ProjectId 选管理器

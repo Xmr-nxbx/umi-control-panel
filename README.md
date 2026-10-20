@@ -59,6 +59,8 @@ scripts\安装开机自启.bat
 
 :: 其它入口
 scripts\一键体检.bat        &rem 逐项检查自启/运行时/面板/传感器/通道
+scripts\重启并自检.bat      &rem 优雅重启面板 + 核对三通道与写能力
+scripts\抓CreatorCenter配置.bat &rem 你在 Creator Center 点，面板把原始 MQTT 报文记到 logs\
 scripts\EC只读自检.bat      &rem 只读验证 EC 通道并打印寄存器读数
 scripts\跑分对比.bat        &rem 四档对比跑分
 scripts\面板状态.bat / 停止面板.bat / 卸载开机自启.bat

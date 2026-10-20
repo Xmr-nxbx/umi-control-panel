@@ -35,14 +35,13 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.act.channels.mqtt_gcu import STATUS_TOPICS, MqttClient  # noqa: E402
+from app.act.channels.mqtt_gcu import SUBSCRIBE_TOPICS, MqttClient  # noqa: E402
 from app.config import Config                                    # noqa: E402
 
 # 控制主题也要听：Creator Center 点一下，命令就是从这些主题发出去的，
 # 报文体里的 Action 名和参数就是我们要的语义（gcu_actions.json 里那份白名单的来源）。
-CONTROL_TOPICS = ('Fan/Control', 'Setting/Control', 'Display/Control', 'Keyboard/Ctrl',
-                  'MyRgbLightbar/Control', 'BatteryProtection/Control')
-ALL_TOPICS = tuple(dict.fromkeys(CONTROL_TOPICS + STATUS_TOPICS))
+# 主题清单统一由 mqtt_gcu.SUBSCRIBE_TOPICS 维护，面板内抓包与这个外置观察器共用一份。
+ALL_TOPICS = SUBSCRIBE_TOPICS
 RETRY_S = 3.0
 # OEM 的 GETSTATUS 是**按控制主题分工**的：Setting/Control 问回来的只有 Setting/Keyboard 那几份，
 # 功耗墙边界在 Fan/Status，得往 Fan/Control 问（2026-09-30 19:41 实测只问 Setting 拿不到墙）。

@@ -212,6 +212,15 @@ class Hardware:
                 return ch.set_fan_curve(duties, type_)
         return False, 'GCUBridge 未连接，风扇曲线写不了'
 
+    def start_mqtt_capture(self, minutes=10):
+        return self.mqtt.start_capture(minutes)
+
+    def stop_mqtt_capture(self):
+        return self.mqtt.stop_capture()
+
+    def mqtt_capture_status(self):
+        return self.mqtt.capture_status()
+
     # ---------- 息屏/锁屏掉档守护 ----------
     def _on_mode_event(self, mode, payload):
         with self.lock:

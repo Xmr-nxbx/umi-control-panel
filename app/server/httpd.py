@@ -150,6 +150,9 @@ def make_handler(daemon, cfg, on_shutdown):
                     self._send(200, daemon.hw.mqtt.fan_curve())
                 else:
                     self._send(200, daemon.hw.ec.fan_curve())
+            elif path == '/api/mqtt-capture':
+                # 抓 Creator Center 点出来的原始报文：只落盘，不发命令、不新建连接
+                self._send(200, daemon.hw.mqtt_capture_status())
             elif path == '/api/bench':
                 self._send(200, daemon.bench_view())
             elif path == '/api/ping':
@@ -194,6 +197,11 @@ def make_handler(daemon, cfg, on_shutdown):
                 else:
                     ok, detail = daemon.hw.set_fan_curve(duties, str(body.get('type', 'CPU')))
                     self._send(200 if ok else 409, {'ok': ok, 'detail': detail})
+            elif path == '/api/mqtt-capture':
+                if str(body.get('action', 'start')) == 'stop':
+                    self._send(200, daemon.hw.stop_mqtt_capture())
+                else:
+                    self._send(200, daemon.hw.start_mqtt_capture(body.get('minutes', 10)))
             elif path == '/api/fan-mode':
                 ok, detail = daemon.set_fan_mode(str(body.get('flag', '')))
                 self._send(200 if ok else 409, {'ok': ok, 'detail': detail})

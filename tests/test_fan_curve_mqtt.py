@@ -12,11 +12,14 @@
 """
 import json
 import os
+import shutil
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.act.channels.base import CAP_FAN_CURVE, CAP_FAN_CURVE_WRITE   # noqa: E402
+from app.act.channels import mqtt_gcu                                  # noqa: E402
 from app.act.channels.mqtt_gcu import MqttChannel, STATUS_TOPICS       # noqa: E402
 
 CASES = []
@@ -225,6 +228,55 @@ def t_write_needs_name():
     assert ok is False and '名字' in detail, detail
     _topic, data = _sent_set(ch)
     assert data is None, data
+
+
+@case('订阅清单包含 Creator Center 的控制主题：抓包才听得到命令')
+def t_subscribe_control_topics():
+    for topic in ('Fan/Control', 'Setting/Control', 'Keyboard/Ctrl',
+                  'MyRgbLightbar/Control', 'BatteryProtection/Control', 'Display/Control'):
+        assert topic in mqtt_gcu.SUBSCRIBE_TOPICS, topic
+    assert 'Fan/Table' in mqtt_gcu.SUBSCRIBE_TOPICS
+
+
+@case('抓包：只记录、能停、文件里是 topic+payload，且不需要 allow_write')
+def t_capture():
+    tmp = tempfile.mkdtemp(prefix='umi-cap-')
+    old_dir = mqtt_gcu.CAPTURE_DIR
+    mqtt_gcu.CAPTURE_DIR = tmp
+    try:
+        ch = _channel(allow_write=False)
+        st = ch.start_capture(1)
+        assert st['active'] is True, st
+        assert st['path'].startswith(tmp), st
+        ch._ingest('Fan/Control', json.dumps({'Action': 'SET_SOMETHING', 'X': 1}).encode())
+        st2 = ch.stop_capture()
+        assert st2['active'] is False, st2
+        assert st2['count'] == 1, st2
+        with open(st2['path'], encoding='utf-8') as f:
+            lines = [json.loads(x) for x in f if x.strip()]
+        assert len(lines) == 1, lines
+        assert lines[0]['topic'] == 'Fan/Control', lines
+        assert lines[0]['payload']['Action'] == 'SET_SOMETHING', lines
+    finally:
+        mqtt_gcu.CAPTURE_DIR = old_dir
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@case('抓包到点自动停：不会一直往盘里写')
+def t_capture_expires():
+    tmp = tempfile.mkdtemp(prefix='umi-cap-')
+    old_dir = mqtt_gcu.CAPTURE_DIR
+    mqtt_gcu.CAPTURE_DIR = tmp
+    try:
+        ch = _channel()
+        ch.start_capture(1)
+        ch._cap_until = 0            # 模拟时间已过
+        st = ch.capture_status()
+        assert st['active'] is False, st
+        assert ch._cap_fh is None, '到期必须关文件'
+    finally:
+        mqtt_gcu.CAPTURE_DIR = old_dir
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def main():

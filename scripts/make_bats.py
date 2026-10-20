@@ -31,6 +31,32 @@ echo        否则两边抢同一个 broker 身份，MQTT 那份报告会半路�
 :stop_panel_done
 """
 
+BATS['重启并自检.bat'] = r"""@echo off
+setlocal
+rem 优雅停止 → 守护模式拉起 → 等端口 → 核对三通道与写能力。
+rem 面板一停 OEM 服务会把功耗墙压低，所以停完必须立刻拉起；这个脚本把这一步自动化。
+cd /d "%~dp0.."
+if exist "runtime\UmiPanel.exe" (
+  "runtime\UmiPanel.exe" "tools\restart_panel.py"
+) else (
+  "runtime\python.exe" "tools\restart_panel.py"
+)
+pause
+"""
+
+BATS['抓CreatorCenter配置.bat'] = r"""@echo off
+setlocal
+rem 让 Creator Center 当一次示范：你在它里面点，面板把原始 MQTT 报文抄到 logs\。
+rem 不停面板、不新建 broker 连接、不发任何命令。
+cd /d "%~dp0.."
+if exist "runtime\UmiPanel.exe" (
+  "runtime\UmiPanel.exe" "tools\creator_capture.py"
+) else (
+  "runtime\python.exe" "tools\creator_capture.py"
+)
+pause
+"""
+
 BATS['启动面板.bat'] = r"""@echo off
 rem 启动 Umi Control Panel（守护模式：进程崩了会自动拉起，面板里点停止才真的退出）。
 rem 用最小化窗口跑，不用 pythonw——它会被安全软件静默查杀。

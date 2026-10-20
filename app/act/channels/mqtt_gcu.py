@@ -20,11 +20,22 @@ from app.act.channels.base import (Channel, CAP_MODE_READ, CAP_MODE_WRITE, CAP_P
                                    CAP_PL_WRITE, CAP_RGB, CAP_RGB_WRITE, CAP_DGPU,
                                    CAP_WINKEY_WRITE, CAP_BATTERY_MODE_WRITE, CAP_FAN_CURVE,
                                    CAP_FAN_CURVE_WRITE, MODE_LABELS, MODE_VERIFIED)
+from app.paths import ROOT_DIR
 
 ACTIONS_PATH = os.path.join(os.path.dirname(__file__), 'gcu_actions.json')
 STATUS_TOPICS = ('Tray/Status', 'Fan/Status', 'Fan/Table', 'Setting/Status', 'Keyboard/Status',
                  'HidLightbar/Status', 'Display/Status', 'Monitor/Status',
                  'WhisperMode/Status', 'ProcessControl/Status', 'Customize/Status')
+# Creator Center 点一下就往这些主题发命令。面板本来就握着 broker 身份，
+# 多订几个控制主题就能把它的原始报文抄下来，不必再起第二个客户端去抢身份。
+CONTROL_TOPICS = ('Fan/Control', 'Setting/Control', 'Display/Control', 'Keyboard/Ctrl',
+                  'HidLightbar/Ctrl', 'MyRgbLightbar/Control', 'BatteryProtection/Control',
+                  'System/Control', 'ProcessControl/Control', 'Customize/Control',
+                  'Customize/SupportControl', 'Settings/DeviceSwitchItemStatus',
+                  'EC/Control', 'Languages/Control', 'Openvino/Control', 'Service/Ctrl',
+                  'TouchPadWorkArea/Control')
+SUBSCRIBE_TOPICS = tuple(dict.fromkeys(STATUS_TOPICS + CONTROL_TOPICS))
+CAPTURE_DIR = os.path.join(ROOT_DIR, 'logs')
 FAN_TABLE_TOPIC = 'Fan/Table'
 FAN_CURVE_GET = 'GET_FAN_SPEED_CURVE_SETTING'
 # OperatingMode 的取值只认 OEM 自己枚举里有的：OperatingMode{Office:0, Turbo:2}
@@ -177,6 +188,11 @@ class MqttChannel(Channel):
         self._last_ask_ts = 0.0
         self._ask_until = 0.0
         self._kick_reason = None
+        self._cap_lock = threading.Lock()
+        self._cap_fh = None
+        self._cap_path = None
+        self._cap_until = 0.0
+        self._cap_count = 0
         for cap in (CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ, CAP_PL_WRITE, CAP_RGB,
                     CAP_DGPU, CAP_WINKEY_WRITE, CAP_BATTERY_MODE_WRITE, CAP_FAN_CURVE,
                     CAP_FAN_CURVE_WRITE):
@@ -236,7 +252,7 @@ class MqttChannel(Channel):
     def _session(self):
         cli = MqttClient(self.host, self.port, self.client_id, self.username, self.password)
         cli.connect(timeout=2.5)
-        cli.subscribe(STATUS_TOPICS)
+        cli.subscribe(SUBSCRIBE_TOPICS)
         self.alive = True
         self.caps[CAP_MODE_READ] = 'verified'
         self.caps[CAP_PL_READ] = 'verified'
@@ -338,6 +354,7 @@ class MqttChannel(Channel):
             return
         with self._lock:
             self._payloads[topic] = {'ts': time.time(), 'data': data}
+        self._capture_write(topic, data)
         if topic == FAN_TABLE_TOPIC:
             # 服务发的是它内存里的表（GetFanTable 只做 TableTransform，不读 EC）。
             # 形状对不上就不点亮能力——宁可显示「未知」，也不拿半张表充数。
@@ -480,6 +497,79 @@ class MqttChannel(Channel):
                         'duty_raw': None if duty is None else duty * 2,
                         'sentinel': up == 255, 'mailbox': False})
         return out
+
+    # ---------- 原始报文抓取（只读，给 Creator Center 点按时用） ----------
+    def start_capture(self, minutes=10.0):
+        """把收到的每一条 MQTT 报文落盘，便于「你在 Creator Center 点一下、我抄报文」。
+
+        不新建 broker 连接（同一 clientId 会互踢），不发送任何命令；
+        输出在 logs\\mqtt-capture-*.jsonl（logs/ 已 gitignore）。
+        """
+        try:
+            minutes = float(minutes)
+        except (TypeError, ValueError):
+            return {'active': False, 'error': 'minutes 必须是数字'}
+        if not 0 < minutes <= 60:
+            return {'active': False, 'error': 'minutes 必须在 0~60 之间'}
+        with self._cap_lock:
+            self._capture_close_locked()
+            try:
+                os.makedirs(CAPTURE_DIR, exist_ok=True)
+                path = os.path.join(CAPTURE_DIR, 'mqtt-capture-%s.jsonl'
+                                    % time.strftime('%Y%m%d-%H%M%S'))
+                self._cap_fh = open(path, 'w', encoding='utf-8', buffering=1)
+            except OSError as exc:
+                self._cap_fh = None
+                return {'active': False, 'error': '打不开抓包文件：%r' % (exc,)}
+            self._cap_path = path
+            self._cap_until = time.time() + minutes * 60
+            self._cap_count = 0
+            status = self._capture_status_locked()
+            self.detail['capture'] = status
+            return status
+
+    def stop_capture(self):
+        with self._cap_lock:
+            self._capture_close_locked()
+            return self._capture_status_locked()
+
+    def capture_status(self):
+        with self._cap_lock:
+            if self._cap_fh and time.time() >= self._cap_until:
+                self._capture_close_locked()
+            return self._capture_status_locked()
+
+    def _capture_write(self, topic, data):
+        with self._cap_lock:
+            if not self._cap_fh:
+                return
+            if time.time() >= self._cap_until:
+                self._capture_close_locked()
+                return
+            try:
+                self._cap_fh.write(json.dumps(
+                    {'ts': round(time.time(), 3), 'topic': topic, 'payload': data},
+                    ensure_ascii=False) + '\n')
+                self._cap_count += 1
+            except OSError:
+                self._capture_close_locked()
+
+    def _capture_close_locked(self):
+        if self._cap_fh:
+            try:
+                self._cap_fh.close()
+            except OSError:
+                pass
+        self._cap_fh = None
+        self._cap_until = 0.0
+        if 'capture' in self.detail:
+            self.detail['capture'] = self._capture_status_locked()
+
+    def _capture_status_locked(self):
+        return {'active': bool(self._cap_fh), 'path': self._cap_path,
+                'count': self._cap_count,
+                'left_s': (max(0.0, round(self._cap_until - time.time(), 1))
+                           if self._cap_fh else 0.0)}
 
     def _status_fresh(self, wait_s=2.0):
         """要一份这次请求之后的 `Fan/Status`（高温保护位在里面）。"""
@@ -781,3 +871,4 @@ class MqttChannel(Channel):
 
     def close(self):
         self._stop.set()
+        self.stop_capture()

@@ -53,17 +53,19 @@ def _():
     assert 'pl_bounds' not in body, body
 
 
-@case('do_POST 路由 9 条：新增的那条只能是已验证的风扇曲线写入')
+@case('do_POST 路由 10 条：新增的只能是已验证的风扇曲线写入和只读抓包开关')
 def _():
     src = read_src('app', 'server', 'httpd.py')
     seg = src.split('def do_POST', 1)[1]
     seg = re.split(r'\n    def ', seg, 1)[0]          # 截到下一个方法定义
     n = len(re.findall(r'elif path ==', seg))
-    # 这条计数是为了防止「只读展示」的批次偷偷加写入口。风扇曲线写入是例外：
-    # 它挂在 POST /api/fan-curve 上，但已经做过 2026-10-20 的可逆验证
-    # （tools/fan_curve_mqtt_write_test.py），并且五条闸在 MqttChannel.set_fan_curve 里。
-    assert n == 9, 'POST 路由数变了（%d 条）' % n
-    assert "elif path == '/api/fan-curve':" in seg, '新增的 POST 路由必须是已验证过的风扇曲线写入'
+    # 这条计数是为了防止「只读展示」的批次偷偷加写入口。两个例外都点名：
+    # 风扇曲线写入挂在 POST /api/fan-curve（2026-10-20 已做可逆验证，
+    # 五条闸在 MqttChannel.set_fan_curve 里）；/api/mqtt-capture 只开/关一个
+    # 本地 JSONL 记录器，不向 broker 发任何命令。
+    assert n == 10, 'POST 路由数变了（%d 条）' % n
+    assert "elif path == '/api/fan-curve':" in seg, '风扇曲线写入路由不见了'
+    assert "elif path == '/api/mqtt-capture':" in seg, '抓包开关路由不见了'
 
 
 @case('httpd.py 源码里没有 pl_bounds（展示字段不进 HTTP 层，走 hardware 快照）')
