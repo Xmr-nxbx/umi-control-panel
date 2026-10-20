@@ -53,7 +53,7 @@ def _():
     assert 'pl_bounds' not in body, body
 
 
-@case('do_POST 路由 13 条：新增的只能是已验证的灯效/风扇曲线/TCC/换挡写入和只读抓包开关')
+@case('do_POST 路由 14 条：新增的只能是已验证的灯效/风扇曲线/功耗墙/TCC/换挡写入和只读抓包开关')
 def _():
     src = read_src('app', 'server', 'httpd.py')
     seg = src.split('def do_POST', 1)[1]
@@ -64,8 +64,9 @@ def _():
     # 风扇曲线写入挂在 POST /api/fan-curve（2026-10-20 已做可逆验证）；
     # /api/tcc 与 /api/fan-switch-speed（2026-10-20 已做可逆验证，值域在通道里）；
     # /api/mqtt-capture 只开/关一个本地 JSONL 记录器，不向 broker 发任何命令。
-    assert n == 13, 'POST 路由数变了（%d 条）' % n
+    assert n == 14, 'POST 路由数变了（%d 条）' % n
     assert "elif path == '/api/keyboard-effect':" in seg, '键盘灯效写入路由不见了'
+    assert "elif path == '/api/power-limits':" in seg, '临时功耗墙路由不见了'
     assert "elif path == '/api/fan-curve':" in seg, '风扇曲线写入路由不见了'
     assert "elif path == '/api/tcc':" in seg, 'TCC 写入路由不见了'
     assert "elif path == '/api/fan-switch-speed':" in seg, '风扇换挡写入路由不见了'

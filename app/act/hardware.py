@@ -232,6 +232,13 @@ class Hardware:
                                               direction=direction, welcome=welcome)
         return False, 'GCUBridge 未连接，键盘灯效写不了'
 
+    def set_power_limits(self, pl1=None, pl2=None, pl4=None):
+        """临时改当前档位的功耗墙。边界与拒发逻辑在 MqttChannel.set_power_limits。"""
+        for ch in self.channels:
+            if hasattr(ch, 'set_power_limits') and ch.alive:
+                return ch.set_power_limits(pl1=pl1, pl2=pl2, pl4=pl4)
+        return False, 'GCUBridge 未连接，功耗墙写不了'
+
     def start_mqtt_capture(self, minutes=10):
         return self.mqtt.start_capture(minutes)
 

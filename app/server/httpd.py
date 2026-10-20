@@ -221,6 +221,12 @@ def make_handler(daemon, cfg, on_shutdown):
                         colors, direction=body.get('direction'),
                         welcome=bool(body.get('welcome')))
                     self._send(200 if ok else 409, {'ok': ok, 'detail': detail})
+            elif path == '/api/power-limits':
+                # 这是「临时墙」：边界取自 Fan/Status，越界拒发；OEM 服务可能在几十秒内重算。
+                # 三条独立 if，缺哪条就不发哪条，逻辑在 MqttChannel.set_power_limits。
+                ok, detail = daemon.hw.set_power_limits(
+                    body.get('pl1'), body.get('pl2'), body.get('pl4'))
+                self._send(200 if ok else 409, {'ok': ok, 'detail': detail})
             elif path == '/api/fan-mode':
                 ok, detail = daemon.set_fan_mode(str(body.get('flag', '')))
                 self._send(200 if ok else 409, {'ok': ok, 'detail': detail})

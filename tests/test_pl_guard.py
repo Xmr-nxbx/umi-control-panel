@@ -185,6 +185,15 @@ def t_uses_own_per_channel_bounds():
     assert ok is False and '15~165' in detail, detail
 
 
+@case('Fan/Status 应答一到就刷新 detail 里的边界（连上时那次一定是 None）')
+def t_bounds_refreshed_on_ingest():
+    ch = _channel(fan_status=None)
+    ch.detail['pl_bounds'] = None       # 模拟 _session 刚连上、GETSTATUS 还没回来
+    ch._ingest('Fan/Status', json.dumps(LIMITS).encode('utf-8'))
+    b = ch.detail.get('pl_bounds')
+    assert b and b.get('pl1_min') == 10 and b.get('pl1_max') == 120, b
+
+
 @case('功耗墙已升 verified，但原因里必须说清验的是哪几个值；掉线要把它收回')
 def t_cap_reported_and_reset():
     src = inspect.getsource(MqttChannel._session)

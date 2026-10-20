@@ -7,161 +7,390 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<header>
-  <div class="brand">
-    <span class="dot" id="live-dot"></span>
-    <h1>UMI CONTROL PANEL</h1>
-    <span class="sub">GM5MG0Y · i7-10875H + RTX 3060</span>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark">UM</span>
+      <span class="brand-text"><strong>UMI PANEL</strong><small>GM5MG0Y</small></span>
+    </div>
+    <nav class="nav" id="nav">
+      <button class="nav-item active" data-view="overview">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+        总览</button>
+      <button class="nav-item" data-view="performance">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 14l4-4"/><circle cx="12" cy="18" r="1.4"/></svg>
+        性能</button>
+      <button class="nav-item" data-view="cooling">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="2"/><path d="M12 10c0-4 2-6 4-6s3 2 3 4-2 4-6 4M14 12c4 0 6 2 6 4s-2 3-4 3-4-2-4-6M12 14c0 4-2 6-4 6s-3-2-3-4 2-4 6-4M10 12c-4 0-6-2-6-4s2-3 4-3 4 2 4 6"/></svg>
+        风扇</button>
+      <button class="nav-item" data-view="lighting">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 18h6M10 21h4"/><path d="M8.5 14a6 6 0 1 1 7 0c-.8.7-1.5 1.6-1.5 2.5h-4c0-.9-.7-1.8-1.5-2.5z"/></svg>
+        灯光</button>
+      <button class="nav-item" data-view="system">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/></svg>
+        硬件</button>
+      <button class="nav-item" data-view="monitor">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+        监控</button>
+      <button class="nav-item" data-view="custom">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="17" r="2"/></svg>
+        自定义</button>
+    </nav>
+    <div class="side-foot">
+      <div class="side-line"><span class="dot" id="live-dot"></span><span id="side-status">正在连接…</span></div>
+      <div class="side-line dim">本地 · 127.0.0.1</div>
+    </div>
+  </aside>
+
+  <div class="workspace">
+    <header class="topbar">
+      <div class="page-head">
+        <h1 id="page-title">总览</h1>
+        <p id="page-sub">性能、风扇、灯光一眼看清</p>
+        <div class="tier-line"><span id="tier-intent">--</span><span class="sep">·</span><span id="tier-clock">-- MHz</span></div>
+      </div>
+      <div class="top-stats">
+        <div class="top-stat"><span>CPU</span><b id="top-cpu">--</b></div>
+        <div class="top-stat"><span>GPU</span><b id="top-gpu">--</b></div>
+        <div class="top-stat"><span>风扇</span><b id="top-fan">--</b></div>
+        <div class="top-stat mode"><span>软件档</span><b id="tier-now">--</b></div>
+      </div>
+    </header>
+    <div class="pill-bar">
+      <span class="tier-reason" id="tier-reason">等待数据…</span>
+      <div class="pills" id="pills"></div>
+    </div>
+
+    <main class="views">
+      <section class="view active" id="view-overview">
+        <div class="stat-grid">
+          <article class="stat-card cyan">
+            <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M9 3v4M15 3v4M9 17v4M15 17v4M3 9h4M3 15h4M17 9h4M17 15h4"/></svg></div>
+            <div class="stat-label">CPU 处理器</div>
+            <div class="stat-value"><b id="ov-cpu-temp">--</b><span>°C</span></div>
+            <div class="stat-sub"><span id="ov-cpu-mhz">-- MHz</span><span id="ov-cpu-load">占用 --</span></div>
+            <div class="mini-bar"><i id="ov-cpu-bar"></i></div>
+          </article>
+          <article class="stat-card purple">
+            <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="6" width="18" height="12" rx="2"/><circle cx="8" cy="12" r="2.5"/><path d="M13 10h5M13 14h5"/></svg></div>
+            <div class="stat-label">GPU 独立显卡</div>
+            <div class="stat-value"><b id="ov-gpu-temp">--</b><span>°C</span></div>
+            <div class="stat-sub"><span id="ov-gpu-w">-- W</span><span id="ov-gpu-load">占用 --</span></div>
+            <div class="mini-bar"><i id="ov-gpu-bar"></i></div>
+          </article>
+          <article class="stat-card green">
+            <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="2"/><path d="M12 10c0-4 2-6 4-6s3 2 3 4-2 4-6 4M14 12c4 0 6 2 6 4s-2 3-4 3-4-2-4-6M12 14c0 4-2 6-4 6s-3-2-3-4 2-4 6-4M10 12c-4 0-6-2-6-4s2-3 4-3 4 2 4 6"/></svg></div>
+            <div class="stat-label">散热系统</div>
+            <div class="stat-value"><b id="ov-fan-rpm">--</b><span>RPM</span></div>
+            <div class="stat-sub"><span id="ov-fan2-rpm">副风扇 --</span><span id="ov-fan-duty">占空 --</span></div>
+            <div class="mini-bar"><i id="ov-fan-bar"></i></div>
+          </article>
+          <article class="stat-card amber">
+            <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg></div>
+            <div class="stat-label">功耗墙</div>
+            <div class="stat-value"><b id="ov-pl1">--</b><span>W PL1</span></div>
+            <div class="stat-sub"><span id="ov-pl2">PL2 --</span><span id="ov-pl4">PL4 --</span></div>
+            <div class="stat-sub"><span id="ov-hw-mode">硬件模式 --</span></div>
+          </article>
+        </div>
+
+        <div class="grid-2">
+          <section class="card">
+            <div class="card-head"><h2>性能释放</h2><span class="tag">OEM 硬件档 · 约 24 秒生效</span></div>
+            <div class="mode-grid" id="ov-modes"></div>
+            <p class="hint" id="ov-mode-hint"></p>
+          </section>
+          <section class="card">
+            <div class="card-head"><h2>快捷控制</h2><span class="tag">只放做过可逆验证的写入</span></div>
+            <div class="quick-grid" id="ov-quick"></div>
+            <p class="hint" id="ov-quick-hint"></p>
+          </section>
+        </div>
+
+        <div class="grid-2">
+          <section class="card">
+            <div class="card-head"><h2>温度趋势</h2><span class="tag">最近 30 分钟</span></div>
+            <div class="chart"><canvas id="chart-ov-temp" width="560" height="120"></canvas>
+              <div class="legend" id="legend-ov-temp"></div></div>
+          </section>
+          <section class="card">
+            <div class="card-head"><h2>负载与风扇</h2><span class="tag">最近 30 分钟</span></div>
+            <div class="chart"><canvas id="chart-ov-load" width="560" height="120"></canvas>
+              <div class="legend" id="legend-ov-load"></div></div>
+          </section>
+        </div>
+        <p class="hint">图表只存在本机 data/history.json；切到「监控」页可以看完整的三张曲线。</p>
+      </section>
+
+      <section class="view" id="view-performance">
+        <section class="card">
+          <div class="card-head"><h2>控制意图</h2><span class="tag">软件调度那一层</span></div>
+          <div class="intents" id="intents"></div>
+          <p class="hint" id="intent-hint"></p>
+          <h3 class="sub-h">调度性格 <span class="tag" id="profile-desc"></span></h3>
+          <div class="btn-row" id="profile-buttons"></div>
+        </section>
+        <section class="card">
+          <div class="card-head"><h2>跑分对比</h2><span class="tag">开源负载：zstd + CoreMark</span></div>
+          <div class="btn-row">
+            <button id="btn-bench-current">测当前档位（约 40 秒）</button>
+            <button id="btn-bench-compare" class="primary">四档逐一对比（约 3 分钟）</button>
+          </div>
+          <div class="bench-run" id="bench-run" hidden>
+            <div class="bar"><div class="fill" id="bench-fill"></div></div>
+            <span id="bench-step">准备中…</span>
+            <span class="tag" id="bench-eta"></span>
+          </div>
+          <div id="bench-table"></div>
+          <div class="verdict" id="bench-verdict" hidden></div>
+          <p class="hint" id="bench-hint"></p>
+        </section>
+      </section>
+
+      <section class="view" id="view-cooling">
+        <div class="stat-grid compact">
+          <article class="stat-card green small">
+            <div class="stat-label">主风扇</div>
+            <div class="stat-value"><b id="cool-fan-rpm">--</b><span>RPM</span></div>
+            <div class="stat-sub"><span id="cool-fan-duty">占空 --</span></div>
+          </article>
+          <article class="stat-card cyan small">
+            <div class="stat-label">副风扇</div>
+            <div class="stat-value"><b id="cool-fan2-rpm">--</b><span>RPM</span></div>
+            <div class="stat-sub"><span id="cool-fan2-duty">占空 --</span></div>
+          </article>
+          <article class="stat-card amber small">
+            <div class="stat-label">CPU 温度</div>
+            <div class="stat-value"><b id="cool-cpu-temp">--</b><span>°C</span></div>
+            <div class="stat-sub"><span id="cool-hw-mode">硬件模式 --</span></div>
+          </article>
+        </div>
+
+        <section class="card">
+          <div class="card-head"><h2>风扇曲线</h2><span class="tag" id="fan-curve-tag">EC 直读 · OEM 表可写占空</span></div>
+          <div class="btn-row">
+            <button id="btn-fan-curve" class="primary">EC 直读（约 3 秒）</button>
+            <button id="btn-fan-curve-oem">OEM 表（可编辑）</button>
+          </div>
+          <div class="chart fan-chart" id="fan-curve-chart-wrap" hidden>
+            <canvas id="fan-curve-chart" width="900" height="190"></canvas>
+          </div>
+          <div class="curve-placeholder" id="fan-curve-empty">
+            <svg viewBox="0 0 180 52" fill="none" aria-hidden="true">
+              <defs><linearGradient id="curve-grad" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0" stop-color="#2dd4bf"/><stop offset="1" stop-color="#8b5cf6"/>
+              </linearGradient></defs>
+              <path d="M2 46 H178" stroke="#28374c"/>
+              <path d="M2 42 C 28 40, 40 32, 58 28 S 96 24, 112 16 S 146 8, 178 5"
+                    stroke="url(#curve-grad)" stroke-width="2" stroke-linecap="round"/>
+              <circle cx="58" cy="28" r="2.6" fill="#2dd4bf"/>
+              <circle cx="112" cy="16" r="2.6" fill="#8b5cf6"/>
+            </svg>
+            <span>曲线要手动读一次才会出来：EC 直读约 3 秒，OEM 表更快。读完后这里会画成温度-占空图。</span>
+          </div>
+          <div id="fan-curve"></div>
+          <div id="fan-curve-editor"></div>
+          <p class="hint" id="fan-curve-hint">点一下才读：EC 一轮要读近百个寄存器，所以不放进 2 秒轮询里。
+            OEM 表走 GCUBridge，只改占空比，16 个点一次下发；不改升温/降温阈值。</p>
+        </section>
+
+        <section class="card">
+          <div class="card-head"><h2>温度控制</h2><span class="tag">TCC 偏移与换挡间隔</span></div>
+          <div class="oem-controls" id="oem-controls" hidden>
+            <span class="oem-ctl">TCC 偏移
+              <input id="tcc-value" type="number" min="0" max="5" step="1" inputmode="numeric"> °C
+              <button id="btn-tcc-apply">应用并开启</button>
+              <button id="btn-tcc-off">关闭</button>
+            </span>
+            <span class="oem-ctl">风扇换挡间隔
+              <input id="fanspeed-value" type="number" min="100" max="2000" step="100" inputmode="numeric"> ms
+              <button id="btn-fanspeed-apply">应用并启用</button>
+              <button id="btn-fanspeed-off">关闭</button>
+            </span>
+          </div>
+          <p class="hint">TCC 偏移越大越保守（更早降频）；风扇换挡间隔只收 100~2000 ms、100 的整数倍。
+            两条都是「值先发、开关最后发」，关闭时也会再发一次开关 0。读数在「硬件」页。</p>
+        </section>
+
+        <section class="card">
+          <div class="card-head"><h2>风扇固件行为</h2><span class="tag">EC 实测 · 只读</span></div>
+          <div class="mini-grid">
+            <div class="mini"><b>0.5 % / 3 tick</b><span>占空比斜坡：改表或切档后是慢慢爬上去的，不会瞬间变。</span></div>
+            <div class="mini"><b>30 % 地板</b><span>非零占空最低会被夹到 30 %；只有 0 % 才是真停转。</span></div>
+            <div class="mini"><b>约 180 秒</b><span>温度掉到停转阈值以下后，要等这段退避才真正停。</span></div>
+            <div class="mini"><b>双阈值滞回</b><span>升温和降温各用一条阈值，避免在边界上来回抖。</span></div>
+          </div>
+        </section>
+      </section>
+
+      <section class="view" id="view-lighting">
+        <section class="card">
+          <div class="card-head"><h2>键盘灯效</h2><span class="tag" id="light-tag">OEM SetEffectALL · 可逆验证已通过</span></div>
+          <div class="light-power">
+            <span>背光开关</span>
+            <b id="light-power-state">--</b>
+            <button id="btn-light-power">--</button>
+          </div>
+          <div id="light-editor" class="light-editor" hidden>
+            <div class="light-row">
+              <span class="light-label">灯效</span>
+              <span class="light-effects" id="light-effects"></span>
+            </div>
+            <div class="light-row slider-row">
+              <span class="light-label">亮度</span>
+              <input id="light-brightness" type="range" min="0" max="4" step="1">
+              <span class="light-val" id="light-brightness-val">--</span>
+              <span class="light-label">速度</span>
+              <input id="light-speed" type="range" min="0" max="4" step="1">
+              <span class="light-val" id="light-speed-val">--</span>
+              <span class="light-dir" id="light-direction-box" hidden>
+                <span class="light-label">方向</span>
+                <select id="light-direction">
+                  <option value="LeftRight">左 → 右</option>
+                  <option value="RightLeft">右 → 左</option>
+                </select>
+              </span>
+            </div>
+            <div class="light-row">
+              <span class="light-label">7 色块</span>
+              <span class="light-colors" id="light-colors"></span>
+              <button id="btn-light-read">按 OEM 读数重填</button>
+            </div>
+            <div class="light-preview-wrap">
+              <span class="light-label">预览</span>
+              <div class="light-preview" id="light-preview" aria-hidden="true"></div>
+            </div>
+            <div class="light-row">
+              <label class="light-welcome"><input id="light-welcome" type="checkbox">
+                同时写入欢迎模式（保存后立刻播放一次）</label>
+              <button id="btn-light-apply" class="primary">应用灯效</button>
+            </div>
+          </div>
+          <p class="hint" id="light-hint">灯效只改键盘的颜色/亮度/速度，不动背光开关；
+            亮度/速度各 5 档，7 个色块对应键盘的 7 个分区。</p>
+        </section>
+
+        <section class="card">
+          <div class="card-head"><h2>海岸灯（灯条）</h2><span class="tag">只读 · 没有状态回声</span></div>
+          <div class="hw-rows" id="lightbar-status"></div>
+          <p class="hint">灯条的 effect/light/speed 在本机全报 null，做不了「下发→回读→还原」的判据，
+            所以面板只显示状态，不提供写入。要改灯条请继续用 Creator Center。</p>
+        </section>
+      </section>
+
+      <section class="view" id="view-system">
+        <section class="card">
+          <div class="card-head"><h2>硬件（EC 直连）</h2><span class="tag">只读 + 已验过的风扇模式写入</span></div>
+          <div class="hw-rows" id="hw"></div>
+          <div class="btn-row" id="hw-buttons"></div>
+          <p class="hint" id="hw-hint"></p>
+        </section>
+
+        <section class="card">
+          <div class="card-head"><h2>OEM 开关状态</h2><span class="tag">GCUBridge 读数</span></div>
+          <div class="hw-rows" id="oem"></div>
+          <div class="btn-row" id="oem-buttons"></div>
+          <p class="hint" id="oem-hint"></p>
+        </section>
+
+        <section class="card">
+          <div class="card-head"><h2>能力矩阵</h2><span class="tag">每一项都如实标状态</span></div>
+          <div class="caps" id="caps"></div>
+        </section>
+
+        <section class="card">
+          <div class="card-head"><h2>运行日志</h2><span class="tag">最近 120 行</span></div>
+          <pre class="logs" id="logs">加载中…</pre>
+          <div class="btn-row">
+            <button class="ghost" id="btn-refresh-logs">刷新日志</button>
+            <button class="ghost" id="btn-diag">复制诊断信息</button>
+            <button class="danger" id="btn-stop">停止面板服务</button>
+          </div>
+        </section>
+      </section>
+
+      <section class="view" id="view-monitor">
+        <section class="card">
+          <div class="card-head"><h2>实时遥测</h2><span class="tag">每 2 秒刷新</span></div>
+          <div class="meters" id="meters"></div>
+        </section>
+        <section class="card">
+          <div class="card-head"><h2>历史曲线</h2><span class="tag" id="hist-range">最近 30 分钟</span></div>
+          <div class="chart"><canvas id="chart-temp" width="980" height="152"></canvas>
+            <div class="legend" id="legend-temp"></div></div>
+          <div class="chart"><canvas id="chart-load" width="980" height="152"></canvas>
+            <div class="legend" id="legend-load"></div></div>
+          <div class="chart"><canvas id="chart-wall" width="980" height="152"></canvas>
+            <div class="legend" id="legend-wall"></div>
+            <p class="hint">功耗墙（EC 直读）：这三个值是 EC 直读的当前墙，由 OEM 服务按档位下发；
+              面板改过之后，服务可能在几十秒内改回去。</p></div>
+          <p class="hint" id="hist-hint">曲线只存在本机 data/history.json，重启面板会接着画。</p>
+        </section>
+      </section>
+
+      <section class="view" id="view-custom">
+        <section class="card">
+          <div class="card-head"><h2>我的方案</h2><span class="tag">本机浏览器保存 · 一键回放已验证的写入</span></div>
+          <div class="btn-row">
+            <button id="btn-preset-new" class="primary">保存当前设置为方案</button>
+            <button id="btn-preset-refresh" class="ghost">刷新读数</button>
+          </div>
+          <div class="preset-form" id="preset-form" hidden>
+            <label>方案名称 <input id="preset-name" maxlength="24" placeholder="例如：游戏 / 安静 / 夜间"></label>
+            <div class="preset-includes">
+              <label><input type="checkbox" id="preset-inc-mode" checked> OEM 硬件档</label>
+              <label><input type="checkbox" id="preset-inc-tcc" checked> TCC 偏移</label>
+              <label><input type="checkbox" id="preset-inc-fanspeed" checked> 风扇换挡间隔</label>
+              <label><input type="checkbox" id="preset-inc-light" checked> 键盘灯效</label>
+            </div>
+            <div class="btn-row">
+              <button id="btn-preset-save" class="primary">保存方案</button>
+              <button id="btn-preset-cancel" class="ghost">取消</button>
+            </div>
+          </div>
+          <div class="preset-grid" id="preset-list"></div>
+          <p class="hint" id="preset-hint">方案只保存「OEM 硬件档 / TCC / 风扇换挡间隔 / 键盘灯效」这四类已经做过可逆验证的设置；
+            应用时按顺序下发，任何一步被闸门拒绝都会停下来并告诉你是哪一步。</p>
+        </section>
+
+        <section class="card">
+          <div class="card-head"><h2>高级：功耗墙（临时）</h2><span class="tag">改当前档位 · OEM 可能几十秒内重算</span></div>
+          <div class="pl-grid">
+            <label class="pl-row"><span>PL1</span>
+              <input id="pl1-range" type="range" min="10" max="120" step="1">
+              <b id="pl1-val">-- W</b></label>
+            <label class="pl-row"><span>PL2</span>
+              <input id="pl2-range" type="range" min="10" max="120" step="1">
+              <b id="pl2-val">-- W</b></label>
+            <label class="pl-row"><span>PL4</span>
+              <input id="pl4-range" type="range" min="10" max="165" step="1">
+              <b id="pl4-val">-- W</b></label>
+          </div>
+          <div class="btn-row">
+            <button id="btn-pl-apply" class="primary">下发临时功耗墙</button>
+            <button id="btn-pl-refresh" class="ghost">按当前读数重填</button>
+          </div>
+          <p class="hint" id="pl-hint">边界来自 OEM 在 Fan/Status 里自己报的上下限；越界会拒发，不会悄悄夹到边上。</p>
+        </section>
+
+        <section class="card">
+          <div class="card-head"><h2>快捷入口</h2><span class="tag">跳到对应页面继续调</span></div>
+          <div class="btn-row">
+            <button data-goto="performance">性能与跑分</button>
+            <button data-goto="cooling">风扇曲线</button>
+            <button data-goto="lighting">键盘灯效</button>
+            <button data-goto="system">硬件与日志</button>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <footer>
+      <span id="foot-status">每 2 秒自动刷新 · 仅监听 127.0.0.1</span>
+      <span class="foot-right">Umi Control Panel · 本地运行</span>
+    </footer>
   </div>
-  <div class="head-right">
-    <div class="tier-box">
-      <div class="tier-intent" id="tier-intent">--</div>
-      <div class="tier-now" id="tier-now">--</div>
-      <div class="tier-clock" id="tier-clock">-- MHz</div>
-      <div class="tier-reason" id="tier-reason">等待数据…</div>
-    </div>
-    <div class="pills" id="pills"></div>
-  </div>
-</header>
-
-<main>
-  <section class="card span-2">
-    <h2>控制意图</h2>
-    <div class="intents" id="intents"></div>
-    <p class="hint" id="intent-hint"></p>
-    <h3 class="sub-h">调度性格 <span class="tag" id="profile-desc"></span></h3>
-    <div class="btn-row" id="profile-buttons"></div>
-  </section>
-
-  <section class="card">
-    <h2>实时遥测</h2>
-    <div class="meters" id="meters"></div>
-  </section>
-
-  <section class="card">
-    <h2>硬件（EC 直连）</h2>
-    <div class="hw-rows" id="hw"></div>
-    <div class="btn-row" id="hw-buttons"></div>
-    <p class="hint" id="hw-hint"></p>
-  </section>
-
-  <section class="card span-2">
-    <h2>风扇曲线 <span class="tag" id="fan-curve-tag">EC 直读 · OEM 表可写占空</span></h2>
-    <div class="btn-row">
-      <button id="btn-fan-curve" class="primary">EC 直读（约 3 秒）</button>
-      <button id="btn-fan-curve-oem">OEM 表（可编辑）</button>
-    </div>
-    <div id="fan-curve"></div>
-    <div id="fan-curve-editor"></div>
-    <p class="hint" id="fan-curve-hint">点一下才读：EC 一轮要读近百个寄存器，所以不放进 2 秒轮询里。
-      OEM 表走 GCUBridge，只改占空比，16 个点一次下发；不改升温/降温阈值。</p>
-  </section>
-
-  <section class="card span-2">
-    <h2>OEM 开关状态 <span class="tag">GCUBridge 读数；只有做过可逆验证的开关才给按钮</span></h2>
-    <div class="hw-rows" id="oem"></div>
-    <div class="btn-row" id="oem-buttons"></div>
-    <div class="oem-controls" id="oem-controls" hidden>
-      <span class="oem-ctl">TCC 偏移
-        <input id="tcc-value" type="number" min="0" max="5" step="1" inputmode="numeric"> °C
-        <button id="btn-tcc-apply">应用并开启</button>
-        <button id="btn-tcc-off">关闭</button>
-      </span>
-      <span class="oem-ctl">风扇换挡间隔
-        <input id="fanspeed-value" type="number" min="100" max="2000" step="100" inputmode="numeric"> ms
-        <button id="btn-fanspeed-apply">应用并启用</button>
-        <button id="btn-fanspeed-off">关闭</button>
-      </span>
-    </div>
-    <p class="hint" id="oem-hint"></p>
-  </section>
-
-  <section class="card span-2">
-    <h2>键盘灯效 <span class="tag" id="light-tag">OEM SetEffectALL · 可逆验证已通过</span></h2>
-    <div id="light-editor" class="light-editor" hidden>
-      <div class="light-row">
-        <span class="light-label">灯效</span>
-        <span class="light-effects" id="light-effects"></span>
-      </div>
-      <div class="light-row">
-        <span class="light-label">亮度</span>
-        <input id="light-brightness" type="range" min="0" max="4" step="1">
-        <span class="light-val" id="light-brightness-val">--</span>
-        <span class="light-label">速度</span>
-        <input id="light-speed" type="range" min="0" max="4" step="1">
-        <span class="light-val" id="light-speed-val">--</span>
-        <span class="light-dir" id="light-direction-box" hidden>
-          <span class="light-label">方向</span>
-          <select id="light-direction">
-            <option value="LeftRight">左 → 右</option>
-            <option value="RightLeft">右 → 左</option>
-          </select>
-        </span>
-      </div>
-      <div class="light-row">
-        <span class="light-label">7 色块</span>
-        <span class="light-colors" id="light-colors"></span>
-        <button id="btn-light-read">按 OEM 读数重填</button>
-      </div>
-      <div class="light-row">
-        <label class="light-welcome"><input id="light-welcome" type="checkbox">
-          同时写入欢迎模式（保存后立刻播放一次）</label>
-        <button id="btn-light-apply" class="primary">应用灯效</button>
-      </div>
-    </div>
-    <p class="hint" id="light-hint">灯效只改键盘的颜色/亮度/速度，不动背光开关；
-      亮度/速度各 5 档，7 个色块对应键盘的 7 个分区。</p>
-  </section>
-
-  <section class="card span-2">
-    <h2>历史曲线 <span class="tag" id="hist-range">最近 30 分钟</span></h2>
-    <div class="chart"><canvas id="chart-temp" width="980" height="152"></canvas>
-      <div class="legend" id="legend-temp"></div></div>
-    <div class="chart"><canvas id="chart-load" width="980" height="152"></canvas>
-      <div class="legend" id="legend-load"></div></div>
-    <div class="chart"><canvas id="chart-wall" width="980" height="152"></canvas>
-      <div class="legend" id="legend-wall"></div>
-      <p class="hint">功耗墙（EC 直读）：这三个值是 EC 直读的当前墙，由 OEM 服务按档位下发；
-        面板改过之后，服务可能在几十秒内改回去。</p></div>
-    <p class="hint" id="hist-hint">曲线只存在本机 data/history.json，重启面板会接着画。</p>
-  </section>
-
-  <section class="card span-2">
-    <h2>能力矩阵</h2>
-    <div class="caps" id="caps"></div>
-  </section>
-
-  <section class="card span-2">
-    <h2>跑分对比 <span class="tag">开源负载：zstd 压缩 + CoreMark</span></h2>
-    <div class="btn-row">
-      <button id="btn-bench-current">测当前档位（约 40 秒）</button>
-      <button id="btn-bench-compare" class="primary">四档逐一对比（约 3 分钟）</button>
-    </div>
-    <div class="bench-run" id="bench-run" hidden>
-      <div class="bar"><div class="fill" id="bench-fill"></div></div>
-      <span id="bench-step">准备中…</span>
-      <span class="tag" id="bench-eta"></span>
-    </div>
-    <div id="bench-table"></div>
-    <div class="verdict" id="bench-verdict" hidden></div>
-    <p class="hint" id="bench-hint"></p>
-  </section>
-
-  <section class="card span-2">
-    <h2>运行日志</h2>
-    <pre class="logs" id="logs">加载中…</pre>
-    <div class="btn-row">
-      <button class="ghost" id="btn-refresh-logs">刷新日志</button>
-      <button class="ghost" id="btn-diag">复制诊断信息</button>
-      <button class="danger" id="btn-stop">停止面板服务</button>
-    </div>
-  </section>
-</main>
-
-<footer>
-  <span id="foot-status">--</span>
-  <span class="foot-right">每 2 秒自动刷新 · 仅监听 127.0.0.1</span>
-</footer>
+</div>
 
 <script src="/app.js"></script>
 </body>

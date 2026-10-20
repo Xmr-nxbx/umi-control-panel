@@ -417,6 +417,10 @@ class MqttChannel(Channel):
             rows = data.get('CPU')
             if isinstance(rows, list) and len(rows) == 16:
                 self.caps[CAP_FAN_CURVE] = 'verified'
+        if topic == 'Fan/Status':
+            # 连上时先问了 GETSTATUS 才算得出边界，但应答是异步回来的：
+            # 之前只在 _session 开头算一次，面板就永远拿着 None（自定义页的滑块全灰）。
+            self.detail['pl_bounds'] = self.pl_limits()
         if topic == 'Tray/Status' and 'OperatingMode' in data:
             raw = str(data['OperatingMode'])
             mode = MODE_FIELD.get(raw)
