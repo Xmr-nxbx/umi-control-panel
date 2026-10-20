@@ -224,6 +224,14 @@ class Hardware:
                 return ch.set_fan_switch_speed(ms, enabled)
         return False, 'GCUBridge 未连接，风扇换挡间隔写不了'
 
+    def set_keyboard_effect(self, effect, light, speed, colors,
+                            direction=None, welcome=False):
+        for ch in self.channels:
+            if hasattr(ch, 'set_keyboard_effect') and ch.alive:
+                return ch.set_keyboard_effect(effect, light, speed, colors,
+                                              direction=direction, welcome=welcome)
+        return False, 'GCUBridge 未连接，键盘灯效写不了'
+
     def start_mqtt_capture(self, minutes=10):
         return self.mqtt.start_capture(minutes)
 

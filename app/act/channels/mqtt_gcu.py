@@ -17,7 +17,8 @@ import threading
 import time
 
 from app.act.channels.base import (Channel, CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ,
-                                   CAP_PL_WRITE, CAP_RGB, CAP_RGB_WRITE, CAP_DGPU,
+                                   CAP_PL_WRITE, CAP_RGB, CAP_RGB_WRITE,
+                                   CAP_LIGHTING_EFFECT_WRITE, CAP_DGPU,
                                    CAP_WINKEY_WRITE, CAP_BATTERY_MODE_WRITE, CAP_FAN_CURVE,
                                    CAP_FAN_CURVE_WRITE, CAP_TCC_WRITE, CAP_FAN_SWITCH_WRITE,
                                    MODE_LABELS, MODE_VERIFIED)
@@ -46,6 +47,29 @@ FAN_CURVE_GET = 'GET_FAN_SPEED_CURVE_SETTING'
 # Creator Center 里没有办公/均衡/狂暴）。认不出来就写 unknown，并把原始值暴露出去。
 MODE_FIELD = {'0': 'office', '2': 'turbo'}
 MODE_ACTION = {'office': 'OPERATING_OFFICE_MODE', 'turbo': 'OPERATING_TURBO_MODE'}
+
+# Creator Center 键盘页的七个灯效按钮。报文契约来自 2026-10-20 的抓包
+# （logs/mqtt-capture-20261020-205150.jsonl），值就是 OEM 的 RGBKB_Effect 名字。
+LIGHTING_EFFECTS = ('Single', 'Breathing', 'Wave', 'Rainbow', 'Mix', 'Flash', 'Music')
+
+
+def _kb_colors(kb):
+    """Keyboard/Status 把颜色塞在 rkgcolor 这个 JSON 字符串里；解析失败就照实报 None。"""
+    raw = (kb or {}).get('rkgcolor')
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return None
+    if not isinstance(raw, dict):
+        return None
+    buf = raw.get('ColorBuffer')
+    if not isinstance(buf, list) or len(buf) != 7:
+        return None
+    try:
+        return [[int(c['R']), int(c['G']), int(c['B'])] for c in buf]
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _varint(n):
@@ -312,7 +336,20 @@ class MqttChannel(Channel):
         self.caps[CAP_RGB_WRITE] = 'verified'
         self.detail['rgb_write_reason'] = (
             '背光开关已做过可逆验证（Off→On 约 0.3 秒生效，关回后亮度/灯效/速度不变）。'
-            '亮度、灯效是另外两条命令，面板暂时不碰。')
+            '灯效/亮度/速度走独立的 SetEffectALL，见 lighting.effect.write。')
+        # 键盘灯效：2026-10-20 用 tools/lighting_effect_test.py --write 做了可逆验证。
+        # 报文不是猜的：先在 Creator Center 里点「波浪」，从面板的 MQTT 抓包里抄下
+        # SetEffectALL 的完整形状；再用用户自己的「呼吸」两条（Lighting + Welcome）当基线，
+        # 下发 Wave → 原样还原。每次读状态都靠 SetPower（幂等）让服务现读键盘，
+        # Keyboard/Status 的 effect/亮度/速度/方向/颜色逐字段对上（状态报的是 ITE 值，
+        # 界面速度 2 = 状态 5，映射抄自逆向仓库 HIDKeyboard.Translate_ITE_SpeedValue）。
+        self.caps[CAP_LIGHTING_EFFECT_WRITE] = 'verified'
+        self.detail['lighting_effect_write_reason'] = (
+            '已做可逆验证（2026-10-20）：用 Creator Center 点出来的 SetEffectALL 报文当契约，'
+            '呼吸(2)/亮度3/速度2/方向None/7 色块 → 波浪(3)/LeftRight → 原样还原；'
+            '每次都用 SetPower 触发的 Keyboard/Status 现读键盘，五个字段逐项一致。'
+            '只改灯效，不动背光开关；状态里的速度是 ITE 固件值（界面 2 = 状态 5），'
+            '面板已按 OEM 映射换算显示。')
         # TCC 偏移：2026-10-20 用 tools/tcc_fan_speed_test.py --write 做了可逆验证：
         # 值 5→0、使能位 0→1→0、值恢复 5；Fan/Status 回读依次为 0/0→0/1→0/0→5/0。
         # 关闭状态下只发值，服务先记住、不写 EC；使能后才应用（所以通道先发值再发开关）。
@@ -665,6 +702,79 @@ class MqttChannel(Channel):
         return True, ('已下发，但回读还没确认（服务可能正忙）。'
                       '风扇转速的爬升另算：EC 每 tick 走 0.5%%，且 30%% 以下会被夹住')
 
+    # ---------- 键盘灯效 ----------
+    @staticmethod
+    def _lighting_payload(effect, light, speed, direction, blocks, mode):
+        """照 Creator Center 2026-10-20 抓到的 SetEffectALL 形状拼，字段一个不少。"""
+        return {
+            'MqttID': None,
+            'mode': mode,
+            'effect': effect,
+            'light': str(light),
+            'speed': str(speed),
+            'direction': direction,
+            'nv_save': '0',
+            'color': {'isCircular': True, 'ColorBlocks': 7,
+                      'ColorBuffer': [{'ID': i, 'R': r, 'G': g, 'B': b}
+                                      for i, (r, g, b) in enumerate(blocks)]},
+            'backgroundcolor': 0, 'alphabet': '', 'solution': 0, 'level': 0,
+            'powerstatus': 0, 'AuroraSwitch': False, 'type': 0,
+            'MonochromeIndex': None, 'ManualIndex1': None, 'ManualIndex2': None,
+            'ManualIndex3': None, 'ManualIndex4': None, 'ManualIndex5': None,
+            'ManualIndex6': None, 'ManualInterval': None, 'BreathingIndex': None,
+            'DefaultData': None,
+        }
+
+    def set_keyboard_effect(self, effect, light, speed, colors,
+                            direction=None, welcome=False):
+        """经 OEM 服务写键盘灯效（SetEffectALL，2026-10-20 已做可逆验证）。
+
+        只改灯效，不碰背光开关；`nv_save=0` 表示只当前生效、不写键盘 NVRAM。
+        波浪才有左/右方向，其它灯效固定发 None（Creator Center 抓包就是这样）。
+        """
+        if not self.allow_write:
+            return False, '写操作未在配置中允许（config.hardware.ec.allow_write=false）'
+        if self.caps.get(CAP_LIGHTING_EFFECT_WRITE) != 'verified':
+            return False, ('写键盘灯效还没验证（%s 当前 %s），拒绝下发'
+                           % (CAP_LIGHTING_EFFECT_WRITE,
+                              self.caps.get(CAP_LIGHTING_EFFECT_WRITE) or '未上报'))
+        if effect not in LIGHTING_EFFECTS:
+            return False, '灯效只认 %s，收到 %r' % ('/'.join(LIGHTING_EFFECTS), effect)
+        try:
+            light_i, speed_i = int(light), int(speed)
+        except (TypeError, ValueError):
+            return False, '亮度和速度必须是 0~4 的整数'
+        if not 0 <= light_i <= 4 or not 0 <= speed_i <= 4:
+            return False, '亮度/速度必须在 0~4 之间：%r/%r' % (light, speed)
+        if effect == 'Wave':
+            if direction not in ('LeftRight', 'RightLeft'):
+                return False, '波浪的方向只认 LeftRight/RightLeft，收到 %r' % (direction,)
+        else:
+            direction = 'None'
+        try:
+            blocks = [[int(c[0]), int(c[1]), int(c[2])] for c in colors]
+        except (TypeError, ValueError, IndexError):
+            return False, '颜色必须是 7 组 [R,G,B]'
+        if len(blocks) != 7:
+            return False, '键盘有 7 个色块，必须一次给齐 7 组，收到 %d 组' % len(blocks)
+        if any(v < 0 or v > 255 for b in blocks for v in b):
+            return False, '颜色分量必须在 0~255 之间'
+
+        extra = self._lighting_payload(effect, light_i, speed_i, direction, blocks, 'Lighting')
+        ok, detail = self.send_action(
+            'SET_KEYBOARD_EFFECT', extra=extra,
+            note='灯效 %s · 亮度 %d · 速度 %d' % (effect, light_i, speed_i))
+        if not ok:
+            return False, detail
+        if not welcome:
+            return True, detail + '（已下发，键盘会立即切换）'
+        w_extra = self._lighting_payload(effect, light_i, speed_i, direction, blocks, 'Welcome')
+        w_ok, w_detail = self.send_action('SET_KEYBOARD_EFFECT', extra=w_extra,
+                                          note='欢迎模式 %s' % effect)
+        if not w_ok:
+            return True, detail + '；但欢迎模式同步失败：%s' % w_detail
+        return True, detail + '（已下发；欢迎模式已同步，会立刻播放一次）'
+
     # ---------- 精细功耗墙 ----------
     def pl_limits(self):
         """OEM 自己在 `Fan/Status` 里写的边界。拿不到就返回 None——没护栏就不发。
@@ -941,6 +1051,10 @@ class MqttChannel(Channel):
             'kb_effect': kb.get('effect') if kb else None,
             'kb_speed': kb.get('speed') if kb else None,
             'kb_light': kb.get('light') if kb else None,
+            'kb_direction': kb.get('direction') if kb else None,
+            # Keyboard/Status 只在 SetPower 处理里现读键盘，所以这组颜色可能是
+            # 「上次开关背光时」的值；面板把它当初始值，不当作实时回读。
+            'kb_colors': _kb_colors(kb) if kb else None,
             'lightbar_brightness': bar.get('brightNess') if bar else None,
             'kb_brightness_ac': kb.get('ACBrightness') if kb else None,
             'kb_brightness_dc': kb.get('DCBrightness') if kb else None,

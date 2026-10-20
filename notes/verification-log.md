@@ -414,3 +414,25 @@
 - **工具**：`tools/tcc_fan_speed_test.py`（默认只读，`--write` 才下发；finally 还原）。
   因为面板占用同一个 MQTT 身份，验证期间面板会被短暂顶掉，幂等重连后恢复。
 
+
+### 2026-10-20 晚：键盘灯效 SetEffectALL 接进面板（可逆验证）
+
+- **契约来源**：用 Computer Use 在 Creator Center 里点「波浪」，面板 MQTT 抓包
+  （`logs/mqtt-capture-20261020-205150.jsonl`）拿到完整 `Keyboard/Ctrl` 报文；
+  `direction` 只有波浪给 `LeftRight`，其它灯效是 `None`。
+- **复原基线**：用户 20:12 的最后一条设置——呼吸、亮度 3、速度 2、方向 None、
+  色块 0 黄 + 1~6 青，Lighting 与 Welcome 各一条，原样重放。
+- **判据**：`Keyboard/Status` 的 effect/speed/light/direction/rkgcolor 只在
+  `SetPower` 处理里现读键盘，所以每次读状态前发一条幂等的
+  `{"function":"SetPower","powerstatus":1}`；状态报的是 ITE 固件值
+  （界面 speed 2 = 状态 5），映射抄自逆向仓库 `HIDKeyboard.cs`。
+- **结果**：呼吸（effect=2/light=3/speed=5/dir=0/7 色块）→ 下发 Wave
+  （effect=3/dir=1）→ 原样还原，三次 `Keyboard/Status` 逐字段对上；
+  用户键盘最后停在原来的呼吸灯，灯条全程没碰。
+- **第一次误判**：拿报文的 speed=2 去比状态的 5，报了一次假失败；查完
+  `Translate_ITE_SpeedValue` 才把映射写进判据。
+- **接入**：能力 `lighting.effect.write` 升 verified；`POST /api/keyboard-effect`；
+  面板「键盘灯效」卡（7 灯效 / 亮度 / 速度 / 波浪方向 / 7 色块 / 欢迎模式同步）。
+  值域、7 色块、波浪方向都在 `MqttChannel.set_keyboard_effect` 里，HTTP 只转发。
+- **工具**：`tools/lighting_effect_test.py`（默认只读，`--write` 才下发；finally 还原）。
+  灯条没做：`HidLightbar/Status` 的 effect 等字段本机全报 null，没有状态回声。

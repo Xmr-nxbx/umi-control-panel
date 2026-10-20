@@ -77,6 +77,43 @@
   </section>
 
   <section class="card span-2">
+    <h2>键盘灯效 <span class="tag" id="light-tag">OEM SetEffectALL · 可逆验证已通过</span></h2>
+    <div id="light-editor" class="light-editor" hidden>
+      <div class="light-row">
+        <span class="light-label">灯效</span>
+        <span class="light-effects" id="light-effects"></span>
+      </div>
+      <div class="light-row">
+        <span class="light-label">亮度</span>
+        <input id="light-brightness" type="range" min="0" max="4" step="1">
+        <span class="light-val" id="light-brightness-val">--</span>
+        <span class="light-label">速度</span>
+        <input id="light-speed" type="range" min="0" max="4" step="1">
+        <span class="light-val" id="light-speed-val">--</span>
+        <span class="light-dir" id="light-direction-box" hidden>
+          <span class="light-label">方向</span>
+          <select id="light-direction">
+            <option value="LeftRight">左 → 右</option>
+            <option value="RightLeft">右 → 左</option>
+          </select>
+        </span>
+      </div>
+      <div class="light-row">
+        <span class="light-label">7 色块</span>
+        <span class="light-colors" id="light-colors"></span>
+        <button id="btn-light-read">按 OEM 读数重填</button>
+      </div>
+      <div class="light-row">
+        <label class="light-welcome"><input id="light-welcome" type="checkbox">
+          同时写入欢迎模式（保存后立刻播放一次）</label>
+        <button id="btn-light-apply" class="primary">应用灯效</button>
+      </div>
+    </div>
+    <p class="hint" id="light-hint">灯效只改键盘的颜色/亮度/速度，不动背光开关；
+      亮度/速度各 5 档，7 个色块对应键盘的 7 个分区。</p>
+  </section>
+
+  <section class="card span-2">
     <h2>历史曲线 <span class="tag" id="hist-range">最近 30 分钟</span></h2>
     <div class="chart"><canvas id="chart-temp" width="980" height="152"></canvas>
       <div class="legend" id="legend-temp"></div></div>

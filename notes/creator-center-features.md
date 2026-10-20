@@ -159,8 +159,17 @@ CPU:[{ID,UpT,DownT,Duty} ×16], GPU:[... ×16]}`（`FanTable1p5.cs:3-57`）。
 - `Keyboard/Ctrl`：`SetAurora`、`Init`、`DeInit`、`SetPower`、`SetEffectALL`、`SetColor`、
   `SetLightingLevel`、`SaveLightingLevel`、`SetPowerSaving`、`GetEffect`、
   `GetLightingLevel`、`GetFirmwareVersion`（`MyRGBKeyboard/RGBKeyboard.cs:451-607`）。
-- 已接的只有 `SetPower`（背光开关）。灯效要逐条定义报文形状并做在场可逆验证；
-  用户没点名要，先不动。
+- 已接两条写通道：
+  - `SetPower`（背光开关，2026-09-30 可逆验证）；
+  - `SetEffectALL`（键盘灯效，2026-10-20 可逆验证）。报文契约是 Creator Center 点
+    「波浪」时从面板抓包抄的：`mode`（Lighting/Welcome）、`effect`、`light` 0~4、
+    `speed` 0~4、`direction`（只有波浪给 LeftRight/RightLeft，其它 None）、`nv_save=0`、
+    7 块 `ColorBuffer`。面板「键盘灯效」卡已接，写入是 `POST /api/keyboard-effect`；
+    完整字段与验证过程见 `notes/hardware-channels.md` 6.11 二十六。只改灯效，
+    不动背光开关。
+- 灯条：`HidLightbar/Status` 的 effect/light/speed/direction/rkgcolor 在本机全报 null，
+  没有状态回声，做不了「下发→回读→还原」的自动判据，所以灯条灯效仍未做写入。
+  `SetAurora`/`SetColor`/`SetLightingLevel` 等仍是只读研究结论。
 
 ## 5. 红线：看到也不要接
 
@@ -187,3 +196,6 @@ CPU:[{ID,UpT,DownT,Duty} ×16], GPU:[... ×16]}`（`FanTable1p5.cs:3-57`）。
    支持 CPU/GPU、下发/还原；不改阈值）。
 4. ~~TCC 偏移与风扇切换速度~~（2026-10-20 完成：两条消息先值后开关；300↔500 ms、
    TCC 0/5 往返验证，面板 OEM 卡片有输入框与开关按钮）。
+5. ~~键盘灯效 `SetEffectALL`~~（2026-10-20 完成：Creator Center 抓包定契约，
+   呼吸→波浪→呼吸可逆验证，面板新增「键盘灯效」卡）。
+6. 灯条灯效：等可靠的 `HidLightbar/Status` 状态回声（或机主肉眼确认）再做。

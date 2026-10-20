@@ -210,6 +210,17 @@ def make_handler(daemon, cfg, on_shutdown):
             elif path == '/api/fan-switch-speed':
                 ok, detail = daemon.hw.set_fan_switch_speed(body.get('ms'), body.get('enabled'))
                 self._send(200 if ok else 409, {'ok': ok, 'detail': detail})
+            elif path == '/api/keyboard-effect':
+                # 值域、7 色块、波浪方向与「背光开关不动」都在 MqttChannel.set_keyboard_effect
+                colors = body.get('colors')
+                if not isinstance(colors, list):
+                    self._send(400, {'ok': False, 'detail': 'colors 必须是 7 组 [R,G,B]'})
+                else:
+                    ok, detail = daemon.hw.set_keyboard_effect(
+                        str(body.get('effect') or ''), body.get('light'), body.get('speed'),
+                        colors, direction=body.get('direction'),
+                        welcome=bool(body.get('welcome')))
+                    self._send(200 if ok else 409, {'ok': ok, 'detail': detail})
             elif path == '/api/fan-mode':
                 ok, detail = daemon.set_fan_mode(str(body.get('flag', '')))
                 self._send(200 if ok else 409, {'ok': ok, 'detail': detail})

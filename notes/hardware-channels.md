@@ -2346,3 +2346,72 @@ CPU/GPU 切换、16 个 0-100 输入框、下发/还原；只读接口是
 #31 证明的是「EC 会用我们写进 `0x0F00` 的表」；这条路证明的是「OEM 服务愿意替我们写，
 并且会落盘」。好处是重启、AC 插拔、模式切换、唤醒之后服务重灌的就是我们改过的那份，
 不需要任何看门狗去对抗。限制仍是那三条：只能改 Duty、30 % 地板、高温保护。
+
+## 6.11 第二十六节：键盘灯效 `SetEffectALL` 的可逆验证与面板接入（2026-10-20）
+
+### 一、契约不是猜的，是 Creator Center 自己点出来的
+
+用户把 Creator Center 放到了桌面，授权用 Computer Use 操作它。流程是：
+面板先开 `POST /api/mqtt-capture`（只落盘、不向 broker 发命令），
+自动点击键盘页的「波浪」图标，再从 `logs/mqtt-capture-20261020-205150.jsonl`
+抄下完整报文。关键字段：
+
+```json
+{"function":"SetEffectALL","mode":"Lighting","effect":"Wave",
+ "light":"3","speed":"2","direction":"LeftRight","nv_save":"0",
+ "color":{"isCircular":true,"ColorBlocks":7,
+          "ColorBuffer":[{"ID":0,"R":255,"G":255,"B":0}, ... 7 块]},
+ "backgroundcolor":0,"alphabet":"","solution":0,"level":0,
+ "powerstatus":0,"AuroraSwitch":false,"type":0,
+ "MonochromeIndex":null, ..., "BreathingIndex":null,"DefaultData":null}
+```
+
+- 只有波浪在界面上出现左/右方向箭头，其它灯效抓包里方向是 `"None"`。
+- `nv_save=0`：只当前生效，不写键盘 NVRAM（和用户原来的设置一致）。
+- 灯效/亮度/速度是**独立于背光开关**的另一条命令；`SetPower` 只管开关，不会顺带改它们。
+
+### 二、状态回读有个坑：`Keyboard/Status` 只在 `SetPower` 里现读键盘
+
+反编译的 `RGBKeyboard.cs` 里：
+- `SetEffectALL` 只调 `SetEffect` + `RunEffct`，**不刷新** `_RgbKeyboardStatus`；
+- `GETSTATUS`（`{"Action":"GETSTATUS"}` → `Keyboard/Ctrl`）只补
+  solution/type/亮度/电源/欢迎状态，也**不刷新** effect/speed/direction/rkgcolor；
+- 只有 `case "SetPower"` 会调 `GetAllKeyboardStatus()`，把
+  `save_effect/save_speed/save_direction/rkgcolor` 重新读一遍并 Publish `Keyboard/Status`。
+
+所以验证工具 `tools/lighting_effect_test.py` 每次读状态前先发一条
+`{"function":"SetPower","powerstatus":1}`。当前背光本来就是开着的，这条是幂等的，
+而且 2026-09-30 已经做过可逆验证（`lighting.rgb.write`）。
+
+### 三、状态里报的是 ITE 固件值，不是界面值
+
+映射抄自逆向仓库 `HIDKeyboard.cs`：
+
+- effect：Single=1、Breathing=2、Wave=3、Rainbow=5、Mix=19、Flash=18、Music=34；
+- speed：界面 0/1/2/3/4 → 固件 10/7/5/3/1；
+- direction：None=0、LeftRight=1、RightLeft=2；
+- light：状态里的 `light` 就是界面亮度档（0~4）。
+
+第一次跑验证时我拿报文的 speed=2 去比状态的 5，误判了一次；查完映射才确认
+「界面 2 = 固件 5」是对的。映射现在写死在工具和测试里。
+
+### 四、可逆验证结果（`tools/lighting_effect_test.py --write`）
+
+基线用用户自己最后一条设置（2026-10-20 20:12 抓包）：
+呼吸、亮度 3、速度 2、方向 None、色块 0 黄 + 1~6 青，Lighting 与 Welcome 各一条。
+
+1. 原样还原 → `Keyboard/Status`：effect=2、light=3、speed=5、direction=0、7 色块一致；
+2. 下发 Wave（只发 Lighting，和 Creator Center 一样）→ effect=3、direction=1，其余不变；
+3. 原样还原（Lighting + Welcome）→ 与第 1 步逐字段相同。
+
+能力 `lighting.effect.write` 升 verified。面板新增「键盘灯效」卡：
+7 个灯效按钮、亮度/速度滑杆、波浪方向、7 个颜色选择器、欢迎模式同步；
+写入是 `POST /api/keyboard-effect`，通道里 `MqttChannel.set_keyboard_effect` 负责：
+allow_write / verified / 灯效名 / 亮度速度 0~4 / 波浪方向 / 7 组 0~255 颜色。
+页面上的「按 OEM 读数重填」用的是服务上次 SetPower 时的状态，不冒充实时回读。
+
+### 五、灯条没做写入
+
+`HidLightbar/Status` 在本机把 effect/light/speed/direction/rkgcolor 全报 null，
+没有可用的状态回声，做不了「下发→回读→还原」的自动判据。灯条灯效停在只读，
+等有可靠判据（或机主肉眼确认）再说。

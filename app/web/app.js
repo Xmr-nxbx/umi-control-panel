@@ -25,6 +25,37 @@ const BOOST_TEXT = { 0: '禁用', 1: '启用', 2: '激进', 3: '高效', 4: '高
 // 用户报过「网页一套词、弹窗一套词，对不上号」。
 const FAN_KEY_FLAGS = ['Normal_Mode', 'User_Fan_HiMode', 'Turbo_Mode'];
 
+// 键盘灯效：值就是 OEM 的 RGBKB_Effect 名字；显示名跟着 Creator Center 的图标走。
+// Keyboard/Status 报的是 ITE 固件码，不是这些名字，所以两边各留一张表。
+const KB_EFFECTS = [
+  { id: 'Single', name: '常亮' },
+  { id: 'Breathing', name: '呼吸' },
+  { id: 'Wave', name: '波浪' },
+  { id: 'Rainbow', name: '彩虹' },
+  { id: 'Mix', name: '混色' },
+  { id: 'Flash', name: '闪烁' },
+  { id: 'Music', name: '音乐' },
+];
+const KB_EFFECT_NAME_BY_CODE = {
+  1: 'Single', 2: 'Breathing', 3: 'Wave', 5: 'Rainbow', 18: 'Flash', 19: 'Mix', 34: 'Music',
+};
+// 逆向仓库 HIDKeyboard.Translate_ITE_SpeedValue：界面 0..4 → 固件 10/7/5/3/1
+const KB_SPEED_TO_UI = { 10: 0, 7: 1, 5: 2, 3: 3, 1: 4 };
+const KB_DIRECTION_BY_CODE = { 0: 'None', 1: 'LeftRight', 2: 'RightLeft' };
+let lightEffect = 'Breathing';
+let lightEditorInit = false;
+
+const rgbToHex = (c) => '#' + (c || []).map((v) => {
+  const n = Math.max(0, Math.min(255, Number(v) || 0));
+  return n.toString(16).padStart(2, '0');
+}).join('');
+const hexToRgb = (hex) => {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return [0, 0, 0];
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+
 let META = { cap_labels: {}, mode_labels: {}, tier_labels: {}, fan_mode_words: {} };
 const fanModeWord = (flag) => {
   const w = META.fan_mode_words || {};
@@ -414,8 +445,11 @@ function renderOem(s) {
   // Setting/Status.SingleColorKBBL 是另一件事（单色背光这个功能支不支持/开没开），
   // 两个都摆出来，不合并成一个会骗人的值。
   const kbPower = oem.kb_power_on == null ? '未知' : (oem.kb_power_on ? '开' : '关');
+  const kbEffectName = KB_EFFECT_NAME_BY_CODE[String(oem.kb_effect)];
+  const kbSpeedUi = KB_SPEED_TO_UI[String(oem.kb_speed)];
   const kbText = `${kbPower} · 亮度 ${oem.kb_brightness_ac != null ? oem.kb_brightness_ac : '?'} 档（电池 ${oem.kb_brightness_dc != null ? oem.kb_brightness_dc : '?'} 档）`
-    + (oem.kb_effect != null ? ` · 灯效 ${oem.kb_effect} 速度 ${oem.kb_speed != null ? oem.kb_speed : '?'}` : '')
+    + (kbEffectName ? ` · 灯效 ${kbEffectName}` : '')
+    + (kbSpeedUi != null ? ` 速度 ${kbSpeedUi} 档` : '')
     + (oem.kb_controller ? ` · ${oem.kb_controller}` : '');
   const barText = oem.lightbar_on == null ? '未知'
     : ((oem.lightbar_on ? '开' : '关')
@@ -553,6 +587,128 @@ function renderOem(s) {
     + (canTcc && (mqCh.detail || {}).tcc_write_reason ? ' ' + mqCh.detail.tcc_write_reason : '')
     + (canFanSpeed && (mqCh.detail || {}).fan_switch_write_reason
        ? ' ' + mqCh.detail.fan_switch_write_reason : '');
+}
+
+// ---------- 键盘灯效（OEM SetEffectALL，2026-10-20 已做可逆验证） ----------
+function selectLightEffect(name) {
+  lightEffect = KB_EFFECTS.some((e) => e.id === name) ? name : 'Breathing';
+  document.querySelectorAll('#light-effects button').forEach((b) => {
+    b.classList.toggle('active', b.dataset.effect === lightEffect);
+  });
+  const box = $('light-direction-box');
+  if (box) box.hidden = lightEffect !== 'Wave';
+}
+
+function updateLightVals() {
+  const b = $('light-brightness');
+  const s = $('light-speed');
+  if ($('light-brightness-val')) $('light-brightness-val').textContent = b ? b.value : '--';
+  if ($('light-speed-val')) $('light-speed-val').textContent = s ? s.value : '--';
+}
+
+function fillLightControls(oem) {
+  const name = KB_EFFECT_NAME_BY_CODE[String(oem.kb_effect)] || 'Breathing';
+  selectLightEffect(name);
+  const light = Number(oem.kb_light);
+  const lightEl = $('light-brightness');
+  if (lightEl) lightEl.value = Number.isFinite(light) ? Math.max(0, Math.min(4, light)) : 3;
+  const speed = KB_SPEED_TO_UI[String(oem.kb_speed)];
+  const speedEl = $('light-speed');
+  if (speedEl) speedEl.value = speed == null ? 2 : speed;
+  const dir = KB_DIRECTION_BY_CODE[String(oem.kb_direction)];
+  const dirEl = $('light-direction');
+  if (dirEl) dirEl.value = dir === 'RightLeft' ? 'RightLeft' : 'LeftRight';
+  const colors = Array.isArray(oem.kb_colors) && oem.kb_colors.length === 7 ? oem.kb_colors : null;
+  for (let i = 0; i < 7; i++) {
+    const inp = $('light-color-' + i);
+    if (inp) inp.value = rgbToHex(colors ? colors[i] : [0, 255, 255]);
+  }
+  updateLightVals();
+  lightEditorInit = true;
+}
+
+function buildLightEditor() {
+  const fx = $('light-effects');
+  if (fx && !fx.children.length) {
+    KB_EFFECTS.forEach((e) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.dataset.effect = e.id;
+      b.textContent = e.name;
+      b.onclick = () => selectLightEffect(e.id);
+      fx.appendChild(b);
+    });
+  }
+  const cols = $('light-colors');
+  if (cols && !cols.children.length) {
+    for (let i = 0; i < 7; i++) {
+      const inp = document.createElement('input');
+      inp.type = 'color';
+      inp.id = 'light-color-' + i;
+      inp.title = '色块 ' + (i + 1);
+      inp.value = '#00ffff';
+      cols.appendChild(inp);
+    }
+  }
+  ['light-brightness', 'light-speed'].forEach((id) => {
+    const el = $(id);
+    if (el) el.oninput = updateLightVals;
+  });
+  const apply = $('btn-light-apply');
+  if (apply) apply.onclick = applyLighting;
+  const read = $('btn-light-read');
+  if (read) {
+    read.onclick = () => {
+      const oem = ((lastState || {}).hardware || {}).oem || {};
+      fillLightControls(oem);
+      toast('已按 OEM 上次回读填入（不一定是此刻的灯效）');
+    };
+  }
+  selectLightEffect(lightEffect);
+  updateLightVals();
+}
+
+async function applyLighting() {
+  const colors = [];
+  for (let i = 0; i < 7; i++) colors.push(hexToRgb(($('light-color-' + i) || {}).value));
+  const body = {
+    effect: lightEffect,
+    light: Number(($('light-brightness') || {}).value),
+    speed: Number(($('light-speed') || {}).value),
+    direction: lightEffect === 'Wave' ? ($('light-direction') || {}).value : 'None',
+    colors,
+    welcome: !!($('light-welcome') || {}).checked,
+  };
+  try {
+    const r = await api('/api/keyboard-effect', body);
+    toast(r.detail || '已下发');
+  } catch (e) {
+    toast('下发失败：' + e.message, true);
+  }
+}
+
+function renderLighting(s) {
+  const editor = $('light-editor');
+  const hint = $('light-hint');
+  if (!editor) return;
+  const caps = s.capabilities || {};
+  const oem = (s.hardware || {}).oem || {};
+  const mqCh = (s.channels || []).find((c) => c.name === 'mqtt') || {};
+  const cap = caps['lighting.effect.write'] || {};
+  const can = mqCh.alive && cap.state === 'verified';
+  editor.hidden = !can;
+  if (!can) {
+    hint.classList.add('err');
+    hint.textContent = '灯效写入需要 GCUBridge 通道和 lighting.effect.write 能力（当前 '
+      + (cap.state || '未上报') + '）。';
+    return;
+  }
+  hint.classList.remove('err');
+  if (!lightEditorInit) fillLightControls(oem);
+  hint.textContent = '灯效只改键盘的颜色/亮度/速度，不动背光开关；7 个色块对应键盘的 7 个分区。'
+    + '「按 OEM 读数重填」用的是服务上次 SetPower 时读到的键盘状态，可能不是此刻的值。'
+    + ((mqCh.detail || {}).lighting_effect_write_reason
+       ? ' ' + mqCh.detail.lighting_effect_write_reason : '');
 }
 
 // ---------- 风扇曲线（EC 直读，只读） ----------
@@ -834,7 +990,7 @@ async function poll() {
     lastState = s;
     META = Object.assign(META, s.meta || {});
     renderTier(s); renderPills(s); renderIntents(); renderProfiles(s); renderMeters(s);
-    renderHardware(s); renderOem(s); renderCaps(s);
+    renderHardware(s); renderOem(s); renderLighting(s); renderCaps(s);
     if ((s.bench || {}).running || benchWasRunning) loadBench();
     benchWasRunning = !!(s.bench || {}).running;
   } catch (e) {
@@ -1172,6 +1328,7 @@ $('btn-stop').onclick = async () => {
 };
 
 renderIntents();
+buildLightEditor();
 poll();
 loadLogs();
 loadBench();

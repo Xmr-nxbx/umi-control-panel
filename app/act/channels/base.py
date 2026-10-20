@@ -22,7 +22,8 @@ CAP_BATTERY_MODE_WRITE = 'battery.mode.write'   # 电池充电三档（平衡/�
 CAP_WINKEY_WRITE = 'winkey.write'               # Win 键锁定开关
 CAP_DGPU = 'gpu.mux'
 CAP_RGB = 'lighting.rgb'
-CAP_RGB_WRITE = 'lighting.rgb.write'   # 写灯效：协议已逆出，但可逆验证要用户在场
+CAP_RGB_WRITE = 'lighting.rgb.write'   # 键盘背光开关（SetPower）
+CAP_LIGHTING_EFFECT_WRITE = 'lighting.effect.write'  # 键盘灯效 SetEffectALL
 CAP_TCC_WRITE = 'cpu.tcc.write'        # CPU TCC 偏移值 + 使能位
 CAP_FAN_SWITCH_WRITE = 'fan.switch_speed.write'  # 风扇换挡间隔（毫秒）
 
@@ -30,7 +31,7 @@ ALL_CAPS = (CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ, CAP_PL_WRITE,
             CAP_FAN_RPM, CAP_FAN_MODE, CAP_FAN_CURVE, CAP_FAN_CURVE_WRITE,
             CAP_TEMP_EC, CAP_BATTERY_LIMIT,
             CAP_BATTERY_MODE_WRITE, CAP_WINKEY_WRITE, CAP_DGPU, CAP_RGB, CAP_RGB_WRITE,
-            CAP_TCC_WRITE, CAP_FAN_SWITCH_WRITE)
+            CAP_LIGHTING_EFFECT_WRITE, CAP_TCC_WRITE, CAP_FAN_SWITCH_WRITE)
 
 CAP_LABELS = {
     # 措辞跟着实测走（2026-09-30 全表观察，notes/hardware-channels.md 6.2）：本机的硬件模式总开关是
@@ -52,7 +53,8 @@ CAP_LABELS = {
     # 措辞必须说清「找到了设备」不等于「能控制」：灯效的真实通路是 USB HID，
     # 设备枚举是只读的、随时可验，而写下去要发 Feature Report，还没做过可逆验证。
     CAP_RGB: '键盘/灯带设备已就位（USB HID 枚举）',
-    CAP_RGB_WRITE: '写灯效（协议已逆出，未做可逆验证）',
+    CAP_RGB_WRITE: '键盘背光开关（SetPower）',
+    CAP_LIGHTING_EFFECT_WRITE: '键盘灯效（效果/亮度/速度/方向/7 色块）',
     CAP_TCC_WRITE: 'CPU TCC 偏移（值 + 使能位）',
     CAP_FAN_SWITCH_WRITE: '风扇换挡间隔（毫秒）',
 }

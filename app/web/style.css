@@ -93,6 +93,25 @@ main {
 .oem-ctl { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); font-size: 13px; }
 .oem-ctl input { width: 76px; padding: 5px 7px; background: var(--panel-2); color: var(--txt);
   border: 1px solid var(--line); border-radius: 6px; }
+.light-editor { display: grid; gap: 10px; margin: 4px 0 6px; }
+.light-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.light-label { color: var(--dim); font-size: 12px; min-width: 48px; }
+.light-effects { display: flex; flex-wrap: wrap; gap: 6px; }
+.light-effects button { padding: 6px 12px; border-radius: 999px; font-size: 12px; }
+.light-effects button.active { border-color: var(--cyan); color: var(--cyan);
+  background: #123038; box-shadow: 0 0 0 1px var(--cyan) inset; }
+.light-row input[type=range] { width: 150px; accent-color: var(--cyan); }
+.light-val { font-variant-numeric: tabular-nums; color: var(--amber); min-width: 14px; }
+.light-dir { display: inline-flex; align-items: center; gap: 6px; }
+.light-dir[hidden] { display: none; }
+.light-dir select { background: var(--panel-2); color: var(--txt);
+  border: 1px solid var(--line); border-radius: 6px; padding: 5px 7px; }
+.light-colors { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.light-colors input[type=color] { width: 34px; height: 28px; padding: 1px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); }
+.light-welcome { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); font-size: 12px; }
+.light-welcome input { accent-color: var(--cyan); }
+.light-row #btn-light-apply { margin-left: auto; }
 button {
   background: var(--panel-2); color: var(--txt); border: 1px solid var(--line);
   border-radius: 8px; padding: 7px 14px; cursor: pointer; font-size: 13px;
