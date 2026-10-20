@@ -2,6 +2,7 @@
 import threading
 import time
 
+from app import __version__
 from app.act.channels.base import BATTERY_MODE_LABELS, CAP_LABELS, MODE_LABELS
 from app.act.hardware import Hardware
 from app.act.power import PowerExecutor, active_scheme
@@ -307,7 +308,8 @@ class Daemon:
             'admin': self.is_admin(),
             'bench': {k: self.bench.get(k) for k in
                       ('running', 'mode', 'tier', 'label', 'step', 'pct', 'error')},
-            'meta': {'cap_labels': CAP_LABELS, 'mode_labels': MODE_LABELS,
+            'meta': {'version': __version__,
+                     'cap_labels': CAP_LABELS, 'mode_labels': MODE_LABELS,
                      'tier_labels': TIER_LABELS,
                      'battery_mode_labels': BATTERY_MODE_LABELS,
                      'fan_mode_words': fankey.mode_words(),

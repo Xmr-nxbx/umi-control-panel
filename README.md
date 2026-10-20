@@ -4,6 +4,9 @@
 用来替代官方 Creator Center 的能耗档位控制。浏览器面板 + 托盘 + 开机自启，
 绿色运行、无云端、无安装器，面板只监听 `127.0.0.1:8747`。
 
+> 当前版本 **v0.1.0**。版本号只有 `app/__init__.py` 里的 `__version__` 一处来源，
+> HTTP `Server` 头、`/api/state` 的 `meta.version`、面板页脚与 git tag 都对齐它。
+
 它解决的是官方工具留下的两个日常问题：
 
 - **要么一直拉满、要么卡得没法用**—— Creator Center 只有两档，中间没有过渡；
@@ -106,7 +109,7 @@ OEM 兜底通道的身份（clientId / 用户名 / 口令）不进仓库：
 | 键 | 默认 | 说明 |
 | :--- | :--- | :--- |
 | `intent` | `auto` | 面板上选的控制意图：`auto` 自适应，或 `office` / `balance` / `turbo` 锁定某档 |
-| `scheduler.profile` | `standard` | 调度性格：`quiet` / `standard` / `perf` |
+| `scheduler.profile` | `standard` | 调度性格：`quiet` / `standard` / `performance` |
 | `scheduler.*` | 见 `app/config.py` | 负载阈值、驻留期、防抖、温度保护等 |
 | `tray.enabled` / `tray.osd` | `true` | 托盘；按实体键时的屏幕提示 |
 | `hardware.ec.enabled` | `true` | EC 只读通道 |
@@ -167,7 +170,8 @@ for %f in (tests\test_*.py) do runtime\python.exe %f
 27 个测试文件覆盖调度决策、跑分算分、屏幕提示文案、历史缓冲、守护卡死判定、
 会话事件、配置读写、单实例与端口、OEM 状态解析、寄存器解码、写入闸门、
 功耗墙护栏、风扇表解码与 MQTT 曲线写入、键盘灯效报文、灯效编码、档位通道；
-另有 1 个前端静态自检，确认 JS 取的 DOM id、导航分区和 CSS 变量都对得上。
+另有 1 个前端静态自检（JS 取的 DOM id、导航分区、CSS 变量对不对得上）
+和 1 个版本一致性自检（版本号只准有 `app/__init__.py` 一处来源）。
 改文案或改阈值时留意有几条用例专门盯着「网页 / 托盘 / 弹窗用同一套模式词」，漏改一处就会红。
 
 ## 8. 路线图

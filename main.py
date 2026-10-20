@@ -3,7 +3,8 @@
 用法：
     runtime\\python.exe main.py                常驻（面板 + 托盘 + 自启由脚本安装）
     runtime\\python.exe main.py --one-shot     打印一次状态快照，自检用
-    runtime\\python.exe main.py --probe-acpi   只读枚举 ACPI 命名空间（需管理员）
+    runtime\\python.exe main.py --health       一键体检（13 项，纯只读）
+    runtime\\python.exe main.py --bench compare 四档逐一对比跑分
     runtime\\python.exe main.py --stop         让正在运行的实例优雅退出
 """
 import os

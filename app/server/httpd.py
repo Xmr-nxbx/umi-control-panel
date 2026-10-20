@@ -3,6 +3,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from app import __version__
 from app.paths import WEB_DIR
 
 MAX_BODY = 64 * 1024
@@ -56,7 +57,7 @@ def make_handler(daemon, cfg, on_shutdown):
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
-        server_version = 'UmiControlPanel/0.1.0'
+        server_version = 'UmiControlPanel/' + __version__
 
         def log_message(self, fmt, *args):
             text = fmt % args

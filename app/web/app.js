@@ -1522,6 +1522,8 @@ async function poll() {
     const s = await api('/api/state');
     lastState = s;
     META = Object.assign(META, s.meta || {});
+    const ver = (s.meta || {}).version;
+    if (ver) $('foot-version').textContent = 'Umi Control Panel v' + ver + ' · 本地运行';
     // 硬件档要 24 秒左右才回读得到；等到值对上时补一句「已生效」
     const wantMode = PENDING.mode ? PENDING.mode.want : null;
     const modePend = pendingFor('mode', currentOemMode(s));
