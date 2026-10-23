@@ -5,10 +5,10 @@ import re
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SKIP_DIRS = {'.git', 'runtime', 'out', 'bin', 'src', 'toolchain', 'logs',
+SKIP_DIRS = {'.git', '_local', 'runtime', 'out', 'bin', 'src', 'toolchain', 'logs',
              'data', '__pycache__'}
 SCAN_DIRS = ('app', 'scripts', 'tests', 'tools', 'notes')
-SCAN_FILES = ('main.py', 'run_tests.py', 'README.md', 'TASKS-workbuddy.md')
+SCAN_FILES = ('main.py', 'run_tests.py', 'README.md')
 TEXT_EXT = ('.py', '.bat', '.cmd', '.md')
 INVOKE = re.compile(r'powershell(?:\.exe)?\s+-|Start' + '-Process', re.IGNORECASE)
 

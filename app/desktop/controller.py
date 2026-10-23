@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -13,6 +14,19 @@ from app.paths import ROOT_DIR
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 RUN_NAME = 'UmiControlPanel'
 NO_WINDOW = 0x08000000
+NEW_CONSOLE = 0x00000010
+
+DEBUG_SCRIPTS = (
+    ('panel-state', '面板状态', '面板状态.bat', ''),
+    ('health', '一键体检', '一键体检.bat', ''),
+    ('ec-test', 'EC 只读自检', 'EC只读自检.bat', ''),
+    ('gen-map', '生成 EC 映射', '生成EC寄存器表.bat', ''),
+    ('watch-ec', '观察 EC 全表', '观察EC全表.bat', 'stop'),
+    ('watch-change', '观察 EC 变化', '观察EC变化.bat', 'stop'),
+    ('watch-oem', '观察 OEM 通道', '观察OEM通道.bat', 'stop'),
+    ('capture-cc', '抓取 CC 配置', '抓CreatorCenter配置.bat', ''),
+    ('fan-three', '造物者三态实测', '造物者三态实测.bat', 'write'),
+)
 
 
 def autostart_command(root=ROOT_DIR):
@@ -82,7 +96,7 @@ class DesktopController:
     def snapshot(self):
         result = {'online': False, 'tier': None, 'label': '尚未连接', 'osd': None,
                   'osd_available': False, 'version': '', 'starting': False,
-                  'error': '', 'autostart_error': ''}
+                  'error': '', 'autostart_error': '', 'runtime': self.runtime_info()}
         try:
             result['autostart'] = autostart_status(str(self.root))
         except OSError:
@@ -168,21 +182,53 @@ class DesktopController:
         os.startfile(str(folder))
         return '已打开本机目录；配置和日志可能含隐私，请勿整包公开。'
 
-    def console(self):
+    def runtime_info(self):
+        runtime = self.root / 'runtime'
+        python = (runtime / 'python.exe').is_file()
+        panel = (runtime / 'UmiPanel.exe').is_file()
+        anchor = (runtime / 'OcTool.exe').is_file()
+        return {'ready': python and panel and anchor,
+                'python': python, 'panel_alias': panel, 'anchor_alias': anchor}
+
+    def install_runtime(self):
+        info = self.runtime_info()
+        if info['ready']:
+            return '项目 runtime 目录已就绪，无需安装。'
+        candidates = [self.root / 'runtime' / 'python.exe', Path(sys.executable)]
+        interpreter = next((path for path in candidates if path.is_file()), None)
+        if interpreter is None:
+            raise RuntimeError('找不到可用的 Python；请先在项目 runtime 目录准备运行环境')
+        try:
+            process = subprocess.run(
+                [str(interpreter), str(self.root / 'tools' / 'setup_runtime.py')],
+                cwd=str(self.root), creationflags=NO_WINDOW,
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding='utf-8', errors='replace', timeout=900)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError('运行环境安装超时；请检查网络后重试') from None
+        if process.returncode:
+            output = ((process.stdout or '') + (process.stderr or '')).strip()
+            raise RuntimeError('运行环境安装失败：%s' % (output[-600:] or '没有输出'))
+        if not self.runtime_info()['ready']:
+            raise RuntimeError('安装命令已结束，但 runtime 目录仍不完整；请查看日志')
+        return '运行环境已安装到项目 runtime 目录，没有请求管理员权限。'
+
+    def stop_service(self):
+        if not self.snapshot()['online']:
+            raise RuntimeError('面板尚未连接，无需停止。')
+        result = self.request('/api/shutdown', {})
+        if result.get('ok') is not True:
+            raise RuntimeError(result.get('detail') or '服务未确认停止请求')
+        return '已请求停止面板；电源设置会按配置还原，稍后可用启动按钮重新运行。'
+
+    def run_debug_script(self, key):
+        script = next((item for item in DEBUG_SCRIPTS if item[0] == key), None)
+        if script is None:
+            raise ValueError('不支持的调试脚本')
+        path = self.root / 'scripts' / script[2]
+        if not path.is_file():
+            raise RuntimeError('缺少脚本：scripts\\%s' % script[2])
         cmd = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'cmd.exe'
-        subprocess.Popen([str(cmd), '/d', '/k'], cwd=str(self.root), creationflags=0x00000010)
-        return '已打开开发者终端，没有自动运行调试或硬件指令。'
-
-    def prepare_map(self):
-        script = self.root / 'scripts' / '生成EC寄存器表.bat'
-        os.startfile(str(script))
-        return '已打开初始化窗口；完成后请查看窗口结果。'
-
-    def shortcut(self):
-        host = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'cscript.exe'
-        result = subprocess.run([str(host), '//nologo', str(self.root / 'scripts' / 'desktop_shortcut.vbs')],
-                                cwd=str(self.root), creationflags=NO_WINDOW,
-                                stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
-        if result.returncode:
-            raise RuntimeError('创建快捷方式失败，请检查系统是否允许 Windows Script Host。')
-        return '快捷方式已生成在项目根目录，可复制到桌面。'
+        subprocess.Popen([str(cmd), '/d', '/c', 'call', str(path)], cwd=str(self.root),
+                         creationflags=NEW_CONSOLE)
+        return '已打开“%s”的可见窗口；请按窗口提示操作。' % script[1]

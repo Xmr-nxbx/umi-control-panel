@@ -125,8 +125,7 @@ def prepare(explicit_source=None):
     ok, reason = validate()
     if not ok:
         raise SystemExit('运行时自检失败：%s' % reason)
-    print('完成。日常启动：双击根目录 Umi Control Panel.vbs；'
-          '可选：手动运行 scripts\\desktop_shortcut.vbs，仅在根目录创建快捷方式。')
+    print('完成。日常启动：双击根目录 Umi Control Panel.vbs。')
 
 
 def main(argv=None):

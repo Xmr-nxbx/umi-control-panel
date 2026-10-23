@@ -11,16 +11,12 @@ def main(argv=None):
     from app.desktop.controller import DesktopController, set_autostart
     parser = argparse.ArgumentParser(description='Umi 桌面启动中心')
     parser.add_argument('--autostart', choices=('on', 'off'))
-    parser.add_argument('--shortcut', action='store_true')
     args = parser.parse_args(argv)
     if args.autostart:
         set_autostart(args.autostart == 'on')
         print('登录自启已%s。' % ('开启（静默）' if args.autostart == 'on' else '关闭'))
         return 0
     controller = DesktopController()
-    if args.shortcut:
-        print(controller.shortcut())
-        return 0
     from app.singleton import SingleInstance
     from app.desktop.window import DesktopWindow
     from app.desktop import native as n

@@ -172,13 +172,94 @@ class DesktopControllerTests(unittest.TestCase):
         finally:
             log.close()
 
-    def test_developer_console_has_no_automatic_command(self):
-        with patch('app.desktop.controller.subprocess.Popen') as popen:
-            self.controller.console()
-        args, kw = popen.call_args
-        self.assertEqual(args[0][1:], ['/d', '/k'])
-        self.assertEqual(kw['creationflags'], 0x10)
+    def test_runtime_info_checks_project_runtime_files(self):
+        self.assertFalse(self.controller.runtime_info()['ready'])
+        (self.root / 'runtime').mkdir()
+        for name in ('python.exe', 'UmiPanel.exe', 'OcTool.exe'):
+            (self.root / 'runtime' / name).touch()
+        self.assertTrue(self.controller.runtime_info()['ready'])
+
+    def test_install_runtime_is_idempotent_when_ready(self):
+        with patch.object(self.controller, 'runtime_info',
+                          return_value={'ready': True}), \
+                patch('app.desktop.controller.subprocess.run') as run:
+            message = self.controller.install_runtime()
+        run.assert_not_called()
+        self.assertIn('无需安装', message)
+
+    def test_install_runtime_runs_hidden_setup_and_rechecks(self):
+        (self.root / 'runtime').mkdir()
+        (self.root / 'runtime' / 'python.exe').touch()
+        with patch.object(self.controller, 'runtime_info',
+                          side_effect=[{'ready': False}, {'ready': True}]), \
+                patch('app.desktop.controller.subprocess.run') as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = run.return_value.stderr = ''
+            message = self.controller.install_runtime()
+        args, kw = run.call_args
+        self.assertEqual(args[0], [str(self.root / 'runtime' / 'python.exe'),
+                                  str(self.root / 'tools' / 'setup_runtime.py')])
+        self.assertEqual(kw['creationflags'], 0x08000000)
+        self.assertEqual(kw['timeout'], 900)
         self.assertNotIn('shell', kw)
+        self.assertIn('runtime 目录', message)
+
+    def test_install_runtime_surfaces_failure(self):
+        (self.root / 'runtime').mkdir()
+        (self.root / 'runtime' / 'python.exe').touch()
+        with patch.object(self.controller, 'runtime_info',
+                          return_value={'ready': False}), \
+                patch('app.desktop.controller.subprocess.run') as run:
+            run.return_value.returncode = 1
+            run.return_value.stdout = '下载失败'
+            run.return_value.stderr = ''
+            with self.assertRaisesRegex(RuntimeError, '下载失败'):
+                self.controller.install_runtime()
+
+    def test_stop_service_uses_local_shutdown_api(self):
+        with patch.object(self.controller, 'snapshot', return_value={'online': True}), \
+                patch.object(self.controller, 'request', return_value={'ok': True}) as request:
+            message = self.controller.stop_service()
+        request.assert_called_once_with('/api/shutdown', {})
+        self.assertIn('电源设置', message)
+
+    def test_stop_service_refuses_when_offline(self):
+        with patch.object(self.controller, 'snapshot', return_value={'online': False}), \
+                patch.object(self.controller, 'request') as request:
+            with self.assertRaises(RuntimeError):
+                self.controller.stop_service()
+            request.assert_not_called()
+
+    def test_debug_script_uses_fixed_allowlisted_batch_in_visible_console(self):
+        (self.root / 'scripts').mkdir()
+        target = self.root / 'scripts' / '面板状态.bat'
+        target.touch()
+        with patch('app.desktop.controller.subprocess.Popen') as popen:
+            message = self.controller.run_debug_script('panel-state')
+        args, kw = popen.call_args
+        self.assertEqual(args[0][1:3], ['/d', '/c'])
+        self.assertEqual(args[0][3], 'call')
+        self.assertEqual(args[0][4], str(target))
+        self.assertEqual(kw['creationflags'], 0x10)
+        self.assertEqual(kw['cwd'], str(self.root))
+        self.assertNotIn('shell', kw)
+        self.assertIn('面板状态', message)
+
+    def test_debug_script_rejects_unknown_or_missing_script(self):
+        with patch('app.desktop.controller.subprocess.Popen') as popen:
+            with self.assertRaises(ValueError):
+                self.controller.run_debug_script('& calc')
+            with self.assertRaisesRegex(RuntimeError, '缺少脚本'):
+                self.controller.run_debug_script('panel-state')
+            popen.assert_not_called()
+
+    def test_debug_script_allowlist_matches_generated_batches(self):
+        from app.desktop.controller import DEBUG_SCRIPTS
+        self.assertEqual(len(DEBUG_SCRIPTS), len({item[0] for item in DEBUG_SCRIPTS}))
+        self.assertEqual({item[3] for item in DEBUG_SCRIPTS}, {'', 'stop', 'write'})
+        repo = Path(__file__).resolve().parents[1]
+        for _, _, filename, _ in DEBUG_SCRIPTS:
+            self.assertTrue((repo / 'scripts' / filename).is_file(), filename)
 
 
 class NativeLayoutTests(unittest.TestCase):

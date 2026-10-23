@@ -205,7 +205,7 @@ def main(argv=None):
         return 2
     except (urllib.error.URLError, OSError, ValueError):
         print('面板没在跑（127.0.0.1:%d 连不上）。'
-              '先用 scripts\\启动面板.bat 把面板拉起来，再跑本脚本。' % args.port)
+              '先用根目录 Umi Control Panel.vbs 把面板拉起来，再跑本脚本。' % args.port)
         return 2
 
     # 面板活着才继续；后面每个接口单独容错，缺什么就在结论里说缺什么

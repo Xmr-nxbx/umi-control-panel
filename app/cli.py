@@ -264,7 +264,7 @@ def health_rows(cfg, log, state=None):
         time.sleep(1.2)
         daemon.tick()
         snap = daemon.snap
-        check('面板服务', False, '没有在跑（双击 scripts\\启动面板.bat）；以下为一次性自检结果')
+        check('面板服务', False, '没有在跑（双击根目录 Umi Control Panel.vbs）；以下为一次性自检结果')
         check('CPU 温度', snap.get('cpu_temp') is not None, '%s°C' % snap.get('cpu_temp'))
         check('CPU 实际频率', snap.get('cpu_mhz') is not None, '%s MHz' % snap.get('cpu_mhz'))
         check('EC 通道', daemon.hw.ec.alive, daemon.hw.ec.detail.get('reason', ''))
