@@ -3,7 +3,6 @@
 /dist/
 __pycache__/
 *.pyc
-/Umi Control Panel.lnk
 
 # 状态与日志（用户机器上的可变数据，不入库）
 /data/
@@ -20,11 +19,8 @@ __pycache__/
 /tools/src/
 /tools/toolchain/
 
-# 本地设计输入、内部交接与截图工具
-/个人看法
-/cc截图和页面描述/
-/tools/cc_capture/
-/TASKS-workbuddy.md
+# 本机私有资料：主观笔记、界面截图、交接与抓图脚本统一放这里，不入库
+/_local/
 
 # 编辑器 / 系统
 .vscode/
