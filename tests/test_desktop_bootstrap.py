@@ -6,7 +6,6 @@ object/dialog replaced by in-memory fakes. Temporary files contain only this tes
 harness, never a runtime or application configuration.
 """
 import importlib.util
-import ntpath
 import os
 from pathlib import Path
 import subprocess
@@ -21,14 +20,13 @@ SPEC = importlib.util.spec_from_file_location('desktop_make_bats', ROOT / 'scrip
 GEN = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(GEN)
 ENTRY = 'Umi Control Panel.vbs'
-SHORTCUT = 'scripts/desktop_shortcut.vbs'
 FAKE_ROOT = r'C:\space 中文 & folder\Umi Control Panel'
 CSCRIPT = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'cscript.exe'
 
 # No COM objects are created here. In particular, Run/Save only report their inputs.
 VBS_FAKES = r'''
 Dim Host, runtimeKind, postSetupRuntime, setupExit, dialogAnswer, argValues
-Dim factoryFailure, launchFailure, entryPresent, setupPresent, saveFailure
+Dim factoryFailure, launchFailure, entryPresent, setupPresent
 Dim currentFolder
 Set Host = New FakeHost
 Set Host.Arguments = New FakeArguments
@@ -95,19 +93,6 @@ Class FakeShell
             Run = setupExit
         End If
     End Function
-    Public Function CreateShortcut(path)
-        WScript.StdOut.WriteLine "LINK" & vbTab & path
-        Set CreateShortcut = New FakeShortcut
-    End Function
-End Class
-
-Class FakeShortcut
-    Public TargetPath, Arguments, WorkingDirectory, IconLocation, Description, WindowStyle
-    Public Sub Save()
-        If saveFailure Then Err.Raise 70, "fake", "Save denied by test"
-        WScript.StdOut.WriteLine "SAVE" & vbTab & TargetPath & vbTab & Arguments & vbTab & _
-            WorkingDirectory & vbTab & IconLocation & vbTab & WindowStyle
-    End Sub
 End Class
 
 Function TestMsgBox(message, buttons, title)
@@ -179,12 +164,6 @@ class GeneratedFilesTest(unittest.TestCase):
                 for forbidden in ('netstat', 'taskkill', 'terminate', 'main.py" --stop'):
                     self.assertNotIn(forbidden, body.lower())
 
-    def test_legacy_start_only_delegates_without_arguments(self):
-        body = GEN.BATS['启动面板.bat']
-        self.assertIn('"%SystemRoot%\\System32\\wscript.exe" "%CD%\\Umi Control Panel.vbs"', body)
-        for forbidden in ('start ', '/min', 'main.py', '%*', '%1'):
-            self.assertNotIn(forbidden, body)
-
     def test_autostart_only_calls_fixed_desktop_cli(self):
         for name, action in (('安装开机自启.bat', 'on'), ('卸载开机自启.bat', 'off')):
             body = GEN.BATS[name]
@@ -196,8 +175,8 @@ class GeneratedFilesTest(unittest.TestCase):
             for forbidden in ('reg add', 'reg delete', 'main.py', '%*', '%1'):
                 self.assertNotIn(forbidden, body)
 
-    def test_developer_console_is_inert_and_legacy_paths_remain(self):
-        body = GEN.BATS['开发者命令行.bat']
+    def test_debug_console_and_scripts_remain_explicit(self):
+        body = GEN.BATS['调试命令行.bat']
         self.assertIn('cd /d "%~dp0.." || exit /b 1', body)
         self.assertIn('"%SystemRoot%\\System32\\cmd.exe" /d /v:off /k', body)
         for forbidden in ('main.py', 'tools\\', 'runtime\\', 'sc ', 'net ', '%*'):
@@ -222,21 +201,19 @@ class GeneratedFilesTest(unittest.TestCase):
         self.assertLess(entry.index('If answer <> vbYes Then WScript.Quit 1'), entry.index('result = shell.Run('))
         self.assertIn('vbDefaultButton2', entry)
         self.assertNotIn('desktop_shortcut.vbs', entry)
-        self.assertNotIn('shell.Run', GEN.VBS[SHORTCUT])
-        self.assertNotIn('SpecialFolders("Desktop")', GEN.VBS[SHORTCUT])
 
-    def test_runtime_success_points_to_daily_entry_without_running_shortcut(self):
+    def test_runtime_guidance_uses_daily_entry_only(self):
         source = (ROOT / 'tools' / 'setup_runtime.py').read_text(encoding='utf-8')
         self.assertIn('双击根目录 Umi Control Panel.vbs', source)
-        self.assertIn('仅在根目录创建快捷方式', source)
-        self.assertEqual(source.count('desktop_shortcut.vbs'), 1)
+        self.assertNotIn('desktop_shortcut', source)
+        self.assertEqual(GEN.VBS.keys(), {ENTRY})
 
 
 @unittest.skipUnless(os.name == 'nt' and CSCRIPT.is_file(), 'Windows cscript required for mocked VBScript')
 class BootstrapBehaviorTest(unittest.TestCase):
     def run_vbs(self, name=ENTRY, args=(), runtime=1, after_setup=0, setup_exit=0,
                 answer=7, factory_failure=False, launch_failure=False,
-                entry_present=True, setup_present=True, save_failure=False):
+                entry_present=True, setup_present=True):
         source = (ROOT / name).read_text(encoding='utf-16')
         # The only real WSH calls in the harness are console output and exit.
         source = source.replace('Option Explicit\n', '', 1)
@@ -253,7 +230,7 @@ class BootstrapBehaviorTest(unittest.TestCase):
             'postSetupRuntime': after_setup, 'setupExit': setup_exit,
             'dialogAnswer': answer, 'factoryFailure': factory_failure,
             'launchFailure': launch_failure, 'entryPresent': entry_present,
-            'setupPresent': setup_present, 'saveFailure': save_failure,
+            'setupPresent': setup_present,
         }
         assignments = '\n'.join(key + ' = ' + (vbs_string(value) if isinstance(value, str)
                                                 else str(value)) for key, value in values.items())
@@ -359,26 +336,6 @@ class BootstrapBehaviorTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(self.events(rows, 'RUN'), [])
         self.assertIn('缺少初始化脚本', self.events(rows, 'DIALOG')[0][2])
-
-    def test_shortcut_is_root_only_quotes_entry_and_uses_icon(self):
-        code, rows = self.run_vbs(name=SHORTCUT)
-        self.assertEqual(code, 0, rows)
-        self.assertEqual(self.events(rows, 'LINK'), [[FAKE_ROOT + '\\Umi Control Panel.lnk']])
-        self.assertEqual(self.events(rows, 'SAVE'), [[r'C:\Windows\System32\wscript.exe',
-                         quote(FAKE_ROOT + '\\Umi Control Panel.vbs'), FAKE_ROOT,
-                         quote(FAKE_ROOT + '\\app\\web\\umi.ico') + ',0', '1']])
-        self.assertEqual(self.events(rows, 'RUN'), [])
-        self.assertEqual(self.events(rows, 'DIALOG'), [])
-        self.assertEqual(ntpath.dirname(self.events(rows, 'LINK')[0][0]), FAKE_ROOT)
-
-    def test_shortcut_rejects_other_targets_and_reports_save_errors(self):
-        code, rows = self.run_vbs(name=SHORTCUT, args=('/desktop',))
-        self.assertEqual((code, rows), (2, []))
-        code, rows = self.run_vbs(name=SHORTCUT, save_failure=True)
-        self.assertEqual(code, 1, rows)
-        self.assertIn('无法保存快捷方式', self.events(rows, 'DIALOG')[0][2])
-        self.assertEqual(self.events(rows, 'DIALOG')[0][1], 'Umi Control Panel - 快捷方式创建失败')
-
 
 class WriteGateRegressionTest(unittest.TestCase):
     def test_service_write_gates_remain_required(self):

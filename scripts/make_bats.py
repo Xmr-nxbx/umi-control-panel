@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-r"""生成兼容/开发者 bat（GBK + CRLF）及桌面入口 vbs（UTF-16 LE BOM + CRLF）。
+r"""生成兼容/调试 bat（GBK + CRLF）及桌面入口 vbs（UTF-16 LE BOM + CRLF）。
 
 日常启动只用根目录 Umi Control Panel.vbs；scripts 下保留旧路径供高级操作兼容，
-不搬动、不自动执行诊断/硬件工具。开发者命令行只打开根目录的 cmd。
+不搬动、不自动执行诊断/硬件工具。调试命令行只打开根目录的 cmd。
 中文 Windows 的 cmd 按代码页 936 解析批处理：UTF-8 的中文注释会被截断成乱码命令，
 表现为「双击就闪退」。IDE 的写文件工具默认 UTF-8，所以入口一律由本脚本产出，
-以后改入口也是改这个脚本再重新生成。生成快捷方式脚本并不执行它。
+以后改入口也是改这个脚本再重新生成。
 
 用法：runtime\python.exe scripts\make_bats.py
 """
@@ -110,20 +110,11 @@ if exist "runtime\UmiPanel.exe" (
 pause
 """
 
-BATS['启动面板.bat'] = r"""@echo off
+BATS['调试命令行.bat'] = r"""@echo off
 setlocal DisableDelayedExpansion
-rem 旧路径兼容入口：bat 自身仍可能闪过 CMD；日常请双击根目录 Umi Control Panel.vbs。
-rem 不转发参数；桌面入口由 WScript 隐藏启动，不使用 pythonw。
+rem 仅在项目根目录打开命令行，不自动运行任何诊断/硬件操作。
 cd /d "%~dp0.." || exit /b 1
-"%SystemRoot%\System32\wscript.exe" "%CD%\Umi Control Panel.vbs"
-exit /b %ERRORLEVEL%
-"""
-
-BATS['开发者命令行.bat'] = r"""@echo off
-setlocal DisableDelayedExpansion
-rem 仅供开发者：在项目根目录打开命令行，不自动运行任何诊断/硬件操作。
-cd /d "%~dp0.." || exit /b 1
-echo 开发者命令行。日常启动请双击根目录 Umi Control Panel.vbs。
+echo 调试命令行。日常启动请双击根目录 Umi Control Panel.vbs。
 echo 此入口不自动执行诊断、服务或硬件操作。
 "%SystemRoot%\System32\cmd.exe" /d /v:off /k
 exit /b %ERRORLEVEL%
@@ -492,7 +483,7 @@ If Len(exe) = 0 Then
     If Not fso.FileExists(setupPath) Then Fail "缺少初始化脚本，请完整解压软件后重试：" & vbCrLf & setupPath
     CheckError "无法找到初始化脚本，请检查文件夹权限。"
     answer = MsgBox("首次使用需要准备 Python 运行环境。" & vbCrLf & vbCrLf & _
-        "是否现在打开可见的命令窗口进行初始化？" & vbCrLf & setupPath & _
+        "是否现在打开可见的命令窗口，把运行时安装到项目 runtime 文件夹？" & vbCrLf & setupPath & _
         vbCrLf & vbCrLf & "将优先使用本机 Python；没有可用版本时可能从 python.org 下载，不请求管理员权限。" & _
         vbCrLf & "请等待窗口提示完成，按任意键关闭后会自动打开面板。" & _
         vbCrLf & "选择“否”则不作任何更改，稍后可再次双击此入口。", _
@@ -564,58 +555,6 @@ Sub Fail(message)
     WScript.Quit 1
 End Sub
 ''',
-    'scripts/desktop_shortcut.vbs': r'''Option Explicit
-' 由 make_bats.py 生成；手动运行时仅在软件根目录创建快捷方式。
-' 不启动面板、不改登录设置、不写入用户桌面。
-Dim shell, fso, root, entry, link, linkPath, windowsDir
-If WScript.Arguments.Count <> 0 Then WScript.Quit 2
-On Error Resume Next
-Set shell = CreateObject("WScript.Shell")
-CheckError "无法使用 Windows 脚本服务，请检查系统是否允许运行 VBS 脚本。"
-Set fso = CreateObject("Scripting.FileSystemObject")
-CheckError "无法访问文件，请检查文件夹权限。"
-root = fso.GetParentFolderName(fso.GetParentFolderName(WScript.ScriptFullName))
-CheckError "无法找到面板文件夹，请将软件完整解压后重试。"
-shell.CurrentDirectory = root
-CheckError "无法进入面板文件夹，请检查路径和访问权限。"
-entry = fso.BuildPath(root, "Umi Control Panel.vbs")
-If Not fso.FileExists(entry) Then Fail "缺少面板入口，请完整解压软件后重试：" & vbCrLf & entry
-CheckError "无法检查面板入口，请检查文件夹权限。"
-windowsDir = fso.GetSpecialFolder(0)
-CheckError "无法找到 Windows 文件夹，请检查系统文件。"
-linkPath = fso.BuildPath(root, "Umi Control Panel.lnk")
-Set link = shell.CreateShortcut(linkPath)
-CheckError "无法在软件文件夹中创建快捷方式，请检查写入权限。"
-link.TargetPath = fso.BuildPath(windowsDir, "System32\wscript.exe")
-link.Arguments = Quote(entry)
-link.WorkingDirectory = root
-link.IconLocation = Quote(fso.BuildPath(root, "app\web\umi.ico")) & ",0"
-link.Description = "Umi Control Panel - 打开面板"
-link.WindowStyle = 1
-CheckError "无法设置快捷方式，请检查软件文件是否完整。"
-link.Save
-CheckError "无法保存快捷方式，请检查软件文件夹的写入权限。"
-WScript.Quit 0
-
-Function Quote(value)
-    Quote = Chr(34) & value & Chr(34)
-End Function
-
-Sub CheckError(context)
-    Dim detail
-    If Err.Number <> 0 Then
-        detail = Err.Description & " (0x" & Hex(Err.Number) & ")"
-        Err.Clear
-        Fail context & vbCrLf & detail
-    End If
-End Sub
-
-Sub Fail(message)
-    On Error Resume Next
-    MsgBox message, vbOKOnly + vbCritical, "Umi Control Panel - 快捷方式创建失败"
-    WScript.Quit 1
-End Sub
-''',
 }
 
 
@@ -636,7 +575,7 @@ def main():
         path = os.path.join(OUT, name)
         with open(path, 'wb') as f:
             f.write(render_bat(body))
-        print('已生成兼容/开发者脚本 %s (%d 字节)' % (name, os.path.getsize(path)))
+        print('已生成兼容/调试脚本 %s (%d 字节)' % (name, os.path.getsize(path)))
     for name, body in VBS.items():
         with open(os.path.join(ROOT, name), 'wb') as f:
             f.write(render_vbs(body))

@@ -7,6 +7,7 @@ import threading
 from app import __version__
 from app.desktop import native as n
 from app.desktop.appearance import PALETTE as P, load_icon
+from app.desktop.controller import DEBUG_SCRIPTS
 
 WM_RESULT = 0x8008
 STYLE = 0x00CA0000
@@ -24,7 +25,7 @@ class DesktopWindow:
         self.snapshot = {}
         self.busy = False
         self.refreshing = False
-        self.developer = False
+        self.view = 'home'
         self.message = ''
         self.scale = 1.0
         self.icons = {}
@@ -47,7 +48,7 @@ class DesktopWindow:
             pass
         work = w.RECT()
         n.u.SystemParametersInfoW(48, 0, c.byref(work), 0)
-        self.scale = min(self.scale, max(.75, (work.bottom - work.top - 60) / 746))
+        self.scale = min(self.scale, max(.75, (work.bottom - work.top - 60) / 648))
         self.face = n.font(self.px(14))
         self.heading = n.font(self.px(25), True)
         self.small = n.font(self.px(12))
@@ -84,19 +85,39 @@ class DesktopWindow:
         self._button('osd', 'Umi 屏幕提示 · 读取中', 28, 354, 266, 42)
         self._button('preview', '预览提示', 306, 354, 266, 42)
         self._button('autostart', '登录后静默启动 · 读取中', 28, 408, 266, 42)
-        self._button('shortcut', '创建快捷方式', 306, 408, 266, 42)
-        self._label('scope', '只控制 Umi 提示，不改变官方软件的 OSD 开关。', 28, 464, 542, 22, self.small)
-        self._label('feedback', '', 28, 499, 542, 54, self.small)
-        self._button('developer', '开发者模式 · 展开', 28, 568, 266, 38)
-        self._button('logs', '查看日志与本机配置', 306, 568, 266, 38)
+        self._button('stop', '停止面板', 306, 408, 266, 42)
+        self._button('maintenance', '调试与维护', 28, 462, 266, 38)
+        self._button('logs', '打开日志与配置', 306, 462, 266, 38)
+        self._label('scope', '只控制 Umi 提示；关闭窗口不会停止服务。', 28, 508, 542, 20, self.small)
+        self._label('feedback', '', 28, 534, 542, 58, self.small)
         self._label('footer', 'v%s  ·  本地运行  ·  无云端账户' % __version__, 28, 618, 542, 20, self.small)
-        self._button('console', '打开 CMD 终端', 28, 624, 170, 40)
-        self._button('map', '初始化本机映射', 214, 624, 170, 40)
-        self._button('scripts', '高级脚本目录', 400, 624, 172, 40)
-        self._label('devnote', '终端以普通权限打开，不自动执行调试指令。\n配置可能含口令；硬件测试和重启请先阅读 README。', 28, 678, 542, 44, self.small)
-        for name in ('console', 'map', 'scripts', 'devnote'):
+        self._button('back', '返回', 470, 28, 100, 30)
+        self._label('maint-title', '调试与维护', 40, 116, 420, 34, self.heading)
+        self._label('maint-sub', '调试脚本会打开可见窗口；标“停面板”的脚本会先停止服务。', 28, 154, 542, 20, self.small)
+        self._label('maint-runtime', '运行环境：读取中…', 28, 184, 338, 22, self.small)
+        self._button('runtime-install', '安装运行环境', 372, 178, 198, 34)
+        self._label('scripts-label', '调试脚本', 28, 224, 300, 20)
+        self._script_button('script-panel-state', 'panel-state', 28, 250)
+        self._script_button('script-health', 'health', 306, 250)
+        self._script_button('script-ec-test', 'ec-test', 28, 292)
+        self._script_button('script-gen-map', 'gen-map', 306, 292)
+        self._script_button('script-watch-ec', 'watch-ec', 28, 334)
+        self._script_button('script-watch-change', 'watch-change', 306, 334)
+        self._script_button('script-watch-oem', 'watch-oem', 28, 376)
+        self._script_button('script-capture-cc', 'capture-cc', 306, 376)
+        self._script_button('script-fan-three', 'fan-three', 28, 418)
+        self._label('script-note', '标“停面板”的脚本不会自动重启；写硬件的脚本会尝试还原。请先阅读窗口提示。',
+                   28, 458, 542, 34, self.small)
+        self._button('maint-data', '打开日志与配置', 28, 500, 256, 34)
+        self._button('maint-scripts', '打开脚本目录', 306, 500, 256, 34)
+        self._label('maint-feedback', '', 28, 542, 542, 58, self.small)
+        self._label('maint-footer', '运行环境安装位置：项目 runtime\\ 目录', 28, 614, 542, 20, self.small)
+        for name in ('back', 'maint-title', 'maint-sub', 'maint-runtime', 'runtime-install',
+                     'scripts-label', 'script-note', 'maint-data', 'maint-scripts',
+                     'maint-feedback', 'maint-footer') + tuple(
+                         'script-' + item[0] for item in DEBUG_SCRIPTS):
             n.u.ShowWindow(self.controls[name], 0)
-        for name in ('primary', 'osd', 'preview', 'autostart'):
+        for name in ('primary', 'osd', 'preview', 'autostart', 'stop'):
             n.u.EnableWindow(self.controls[name], False)
         self._worker = threading.Thread(target=self._work, name='desktop-io', daemon=True)
         self._worker.start()
@@ -111,6 +132,11 @@ class DesktopWindow:
     def _button(self, name, text, x, y, width, height, primary=False):
         self._control(name, 'BUTTON', text, x, y, width, height, 0x0001000B)
         self.buttons[self.controls[name]] = (name, primary)
+
+    def _script_button(self, name, key, x, y):
+        script = next(item for item in DEBUG_SCRIPTS if item[0] == key)
+        suffix = {'stop': ' · 停面板', 'write': ' · 写硬件'}.get(script[3], '')
+        self._button(name, script[1] + suffix, x, y, 256, 34)
 
     def _control(self, name, kind, text, x, y, width, height, style, face=None):
         ident = 100 + len(self.controls)
@@ -181,10 +207,14 @@ class DesktopWindow:
         message = self.message or st.get('error') or st.get('autostart_error') or ''
         if not message and online and osd is None:
             message = '运行中的后端较旧；下次正常重启后可使用新的 OSD 设置。'
+        runtime = st.get('runtime') or {}
+        if not message and runtime and not runtime.get('ready'):
+            message = '项目 runtime 未就绪：打开“调试与维护”，可安装到项目 runtime 目录。'
         if not message and not st.get('mapped'):
-            message = '首次使用：在开发者模式中初始化本机映射；未知机型不要开启硬件写入。'
+            message = '首次使用：在“调试与维护”生成 EC 映射；未知机型不要开启硬件写入。'
         self._set('feedback', message)
-        for name in ('primary', 'osd', 'preview', 'autostart', 'shortcut', 'logs', 'console', 'map', 'scripts'):
+        self._set('stop', '停止面板' if online else '停止面板 · 未连接')
+        for name in ('primary', 'osd', 'preview', 'autostart', 'stop', 'maintenance', 'logs'):
             enabled = not self.busy
             if name == 'primary':
                 enabled = enabled and bool(st) and not starting
@@ -194,6 +224,8 @@ class DesktopWindow:
                     enabled = enabled and osd and st.get('osd_available', False)
             if name == 'autostart':
                 enabled = enabled and bool(st) and not st.get('autostart_error')
+            if name == 'stop':
+                enabled = enabled and online
             n.u.EnableWindow(self.controls[name], enabled)
         tier = st.get('tier') if online else 'unknown'
         if tier != self._tier:
@@ -202,31 +234,107 @@ class DesktopWindow:
                 self.icons[tier] = load_icon(tier, self.px(48))
             n.u.SendMessageW(self.hwnd, 0x0080, 1, self.icons[tier])
             n.u.SendMessageW(self.hwnd, 0x0080, 0, self.icons[tier])
+        if self.view == 'maintenance':
+            self._render_maintenance()
         n.u.InvalidateRect(self.hwnd, None, False)
 
-    def _toggle_developer(self):
-        self.developer = not self.developer
-        self._set('developer', '开发者模式 · ' + ('收起' if self.developer else '展开'))
-        for name in ('console', 'map', 'scripts', 'devnote'):
-            n.u.ShowWindow(self.controls[name], 5 if self.developer else 0)
-        n.u.ShowWindow(self.controls['footer'], 0 if self.developer else 5)
-        bounds = self.rect(0, 0, 600, 746 if self.developer else 648)
-        n.u.AdjustWindowRectEx(c.byref(bounds), STYLE, False, 0)
-        work, current = w.RECT(), w.RECT()
-        n.u.SystemParametersInfoW(48, 0, c.byref(work), 0)
-        n.signature(n.u, 'GetWindowRect', w.BOOL, w.HWND, c.POINTER(w.RECT))
-        n.u.GetWindowRect(self.hwnd, c.byref(current))
-        height = bounds.bottom - bounds.top
-        y = max(work.top, min(current.top, work.bottom - height))
-        n.u.SetWindowPos(self.hwnd, None, current.left, y, bounds.right - bounds.left,
-                        height, 0x0014)
-        n.u.InvalidateRect(self.hwnd, None, True)
+    HOME_CONTROLS = ('brand', 'tagline', 'connection', 'mode', 'detail', 'primary',
+                     'preferences', 'osd', 'preview', 'autostart', 'stop',
+                     'maintenance', 'logs', 'scope', 'feedback', 'footer')
+
+    def _show_home(self):
+        self.view = 'home'
+        for name in self.HOME_CONTROLS:
+            n.u.ShowWindow(self.controls[name], 5)
+        for name in self._maintenance_controls():
+            n.u.ShowWindow(self.controls[name], 0)
+
+    def _show_maintenance(self):
+        self.view = 'maintenance'
+        for name in self.HOME_CONTROLS:
+            n.u.ShowWindow(self.controls[name], 0)
+        for name in self._maintenance_controls():
+            n.u.ShowWindow(self.controls[name], 5)
+        self._render_maintenance()
+
+    @staticmethod
+    def _maintenance_controls():
+        return ('back', 'maint-title', 'maint-sub', 'maint-runtime', 'runtime-install',
+                'scripts-label', 'script-note', 'maint-data', 'maint-scripts',
+                'maint-feedback', 'maint-footer') + tuple(
+                    'script-' + item[0] for item in DEBUG_SCRIPTS)
+
+    def _render_maintenance(self):
+        runtime = self.snapshot.get('runtime') or {}
+        missing = [label for key, label in (('python', 'python.exe'),
+                                            ('panel_alias', 'UmiPanel.exe'),
+                                            ('anchor_alias', 'OcTool.exe')) if not runtime.get(key)]
+        if not runtime:
+            runtime_text = '运行环境：读取中…'
+        elif runtime.get('ready'):
+            runtime_text = '运行环境：已就绪（项目 runtime 目录）'
+        else:
+            runtime_text = '运行环境：缺少 ' + ' / '.join(missing)
+        self._set('maint-runtime', runtime_text)
+        self._set('runtime-install', '项目 runtime 已就绪' if runtime.get('ready') else '安装到项目 runtime')
+        message = self.message or ''
+        if not message:
+            message = ('运行环境会安装到项目 runtime\\ 目录；调试脚本只从 scripts 固定清单启动。')
+        self._set('maint-feedback', message)
+        for name in ('back', 'maint-data', 'maint-scripts') + tuple(
+                'script-' + item[0] for item in DEBUG_SCRIPTS):
+            n.u.EnableWindow(self.controls[name], not self.busy)
+        n.u.EnableWindow(self.controls['runtime-install'],
+                         not self.busy and bool(runtime) and not runtime.get('ready'))
 
     def command(self, name):
-        if name == 'developer':
-            self._toggle_developer()
+        if name == 'maintenance':
+            self.message = ''
+            self._show_maintenance()
+            return
+        if name == 'back':
+            if not self.busy:
+                self._show_home()
             return
         if self.busy:
+            return
+        if name.startswith('script-'):
+            key = name[len('script-'):]
+            script = next((item for item in DEBUG_SCRIPTS if item[0] == key), None)
+            if script is None:
+                return
+            if script[3] == 'stop' and n.u.MessageBoxW(
+                    self.hwnd,
+                    '“%s”会先停止面板，脚本结束后不会自动拉起。\n'
+                    '请确认已阅读脚本窗口中的操作说明。继续？' % script[1],
+                    '运行调试脚本', 0x124) != 6:
+                return
+            if script[3] == 'write' and n.u.MessageBoxW(
+                    self.hwnd,
+                    '“%s”会停止面板、写风扇模式并尝试还原，约 6 分钟。\n'
+                    '仅在明确需要现场调试时继续。' % script[1],
+                    '运行硬件调试脚本', 0x124) != 6:
+                return
+            self._run_action(name, lambda: self.controller.run_debug_script(key))
+            return
+        if name == 'runtime-install':
+            if n.u.MessageBoxW(
+                    self.hwnd,
+                    '将检查并补齐项目 runtime\\ 目录中的 Python 与进程别名。\n'
+                    '缺少本机 Python 时可能联网下载官方 embeddable 包，不请求管理员权限。继续？',
+                    '安装运行环境', 0x124) != 6:
+                return
+            self._run_action(name, self.controller.install_runtime,
+                             '正在安装运行环境，首次可能需要下载…')
+            return
+        if name == 'stop':
+            if n.u.MessageBoxW(
+                    self.hwnd,
+                    '将优雅停止面板并还原改过的电源设置；脚本或托盘也随之退出。\n'
+                    '停止后可用上方按钮重新启动。继续？',
+                    '停止面板', 0x124) != 6:
+                return
+            self._run_action(name, self.controller.stop_service, '正在请求面板停止…')
             return
         st = self.snapshot
         if name in ('osd', 'preview') and st.get('osd') is None:
@@ -236,21 +344,17 @@ class DesktopWindow:
             'osd': lambda: self.controller.set_osd(not st.get('osd')),
             'preview': self.controller.preview_osd,
             'autostart': lambda: self.controller.toggle_autostart(not (st.get('autostart') or {}).get('current')),
-            'shortcut': self.controller.shortcut,
             'logs': lambda: self.controller.open_folder('data'),
-            'console': self.controller.console,
-            'map': self.controller.prepare_map,
-            'scripts': lambda: self.controller.open_folder('scripts'),
+            'maint-data': lambda: self.controller.open_folder('data'),
+            'maint-scripts': lambda: self.controller.open_folder('scripts'),
         }
         action = actions.get(name)
-        if not action:
-            return
-        if name == 'map' and n.u.MessageBoxW(self.hwnd,
-                '即将打开 CMD，读取本机已安装的 OEM 元数据并生成映射文件。\n不会写 EC，也不会停止面板。继续？',
-                '初始化本机映射', 0x124) != 6:
-            return
+        if action:
+            self._run_action(name, action)
+
+    def _run_action(self, name, action, message='正在处理…'):
         self.busy = True
-        self.message = '正在处理…'
+        self.message = message
         self._render()
         self.jobs.put((name, action))
 
@@ -261,7 +365,8 @@ class DesktopWindow:
             rect = w.RECT()
             n.u.GetClientRect(self.hwnd, c.byref(rect))
             n.u.FillRect(dc, c.byref(rect), self.brush)
-            n.round_rect(dc, self.rect(28, 110, 544, 192), P['surface'], self.px(18))
+            if self.view == 'home':
+                n.round_rect(dc, self.rect(28, 110, 544, 192), P['surface'], self.px(18))
             icon = self.icons.get(self._tier) or self.icons['unknown']
             n.u.DrawIconEx(dc, self.px(28), self.px(32), icon, self.px(48), self.px(48), 0, None, 3)
         finally:
