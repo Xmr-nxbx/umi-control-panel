@@ -40,6 +40,7 @@ sys.path.insert(0, ROOT)
 
 from app.act.channels.mqtt_gcu import MqttClient   # noqa: E402
 from app.config import Config                      # noqa: E402
+from app.paths import local_mqtt_endpoint          # noqa: E402
 
 TOPIC = 'Fan/Control'
 GET = {'Action': 'GETSTATUS'}
@@ -88,7 +89,7 @@ def _roundtrip(ident, messages, wait_s=2.5, attempts=3):
     """
     last = None
     for _ in range(attempts):
-        cli = MqttClient('127.0.0.1', 13688, ident['client_id'],
+        cli = MqttClient(ident['host'], ident['port'], ident['client_id'],
                          ident['username'], ident['password'])
         try:
             cli.connect(timeout=2.5)
@@ -170,6 +171,11 @@ def main(argv=None):
     ident = {k: mqtt_cfg.get(k) for k in ('client_id', 'username', 'password')}
     if not all(ident.values()):
         print('没有 broker 身份（data\\mqtt_identity.json），无法继续。')
+        return 2
+    try:
+        ident['host'], ident['port'] = local_mqtt_endpoint(mqtt_cfg)
+    except ValueError as exc:
+        print('端口配置无效，拒绝继续：%s' % exc)
         return 2
 
     print('== 1. 读基线 ==')

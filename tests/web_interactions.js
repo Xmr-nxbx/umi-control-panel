@@ -17,6 +17,7 @@ async function runWebInteractions() {
     stateRequestId: typeof stateRequestId === 'undefined' ? undefined : stateRequestId,
     stateSettledId: typeof stateSettledId === 'undefined' ? undefined : stateSettledId,
     stateSnapshotTs: typeof stateSnapshotTs === 'undefined' ? undefined : stateSnapshotTs,
+    desktopPrefs, desktopBusy, desktopEpoch, desktopReadAttempted, desktopNotice, desktopError, desktopNeedsRefresh,
   };
   const originalView = document.querySelector('.view.active')?.id.replace('view-', '') || 'overview';
   const originalFocus = document.activeElement;
@@ -85,6 +86,10 @@ async function runWebInteractions() {
     state = structuredClone(realState);
     state.ts = Date.now() / 1000;
     state.meta = { ...state.meta, fan_curve_expected_name: true };
+    // OSD has its own isolated suite below; unrelated hardware cases emulate an older backend.
+    delete state.meta.desktop_preferences;
+    desktopPrefs = null; desktopBusy = ''; desktopEpoch++;
+    desktopReadAttempted = false; desktopNotice = ''; desktopError = false; desktopNeedsRefresh = false;
     state.capabilities = { ...state.capabilities };
     for (const cap of ['mode.write', 'power_limit.write', 'cpu.tcc.write', 'fan.curve.write',
       'lighting.rgb.write', 'lighting.effect.write', 'winkey.write', 'fan.switch_speed.write']) {
@@ -216,6 +221,7 @@ async function runWebInteractions() {
     }
     if (path === '/api/fan-curve') return { ...structuredClone(curve), reads: 96, writes: 0, elapsed_s: 3, note: '' };
     if (path === '/api/history') return histData;
+    if (path === '/api/desktop') return structuredClone(state.desktop || { osd: true, available: true });
     if (path === '/api/bench') return { tiers: [] };
     if (path.startsWith('/api/logs')) return { lines: [] };
     unexpected.push(path);
@@ -238,6 +244,8 @@ async function runWebInteractions() {
     return id;
   };
   try {
+    const desktopResults = await runDesktopPreferencesInteractions(originalApi);
+    results.push(...desktopResults.cases);
     await check('并发 poll 新 Office 先到、旧 Turbo 后到不能覆盖状态与界面', async () => {
       reset();
       const oldRead = queueStateRead();
@@ -1334,7 +1342,8 @@ async function runWebInteractions() {
         creatorModeSeen, creatorActiveTab, fanSource, oemCurve, oemOrig, oemDraft, oemOrigName,
         oemEpoch, spcEpoch, oemReadAttempted, oemReadError, oemType, oemWriting, oemLoading,
         oemDragIndex, oemFocusIndex, oemChartGeometry, curveData, curveLoading,
-        spcBusy, spcSubmitted, spcNeedsRefresh, benchWasRunning } = saved);
+        spcBusy, spcSubmitted, spcNeedsRefresh, benchWasRunning,
+        desktopPrefs, desktopBusy, desktopEpoch, desktopReadAttempted, desktopNotice, desktopError, desktopNeedsRefresh } = saved);
       spcDirty.clear(); saved.spcDirty.forEach((key) => spcDirty.add(key));
       quickSending.clear(); saved.quickSending.forEach((key) => quickSending.add(key));
       Object.keys(PENDING).forEach((key) => delete PENDING[key]);
@@ -1345,7 +1354,8 @@ async function runWebInteractions() {
       // 避免恢复视图时触发按需读取；已有草稿按原值保留，不重建成基线。
       oemReadAttempted = true;
       selectLightEffect(saved.lightEffect);
-      showView(originalView, { scroll: false }); showCreatorTab(saved.creatorActiveTab);
+      showView(originalView, { scroll: false, skipDesktopRead: true }); showCreatorTab(saved.creatorActiveTab);
+      renderDesktop();
       renderOverview(lastState); renderCreator(lastState); renderLighting(lastState);
       renderQuick(lastState); renderFanSpeed(lastState); renderCustom(lastState, true);
       renderPresets(); renderOemCurve();
@@ -1379,4 +1389,330 @@ async function runWebInteractions() {
       window.confirm = originalConfirm; api = originalApi;
     }
   }
+}
+
+// Can run independently with a minimal DOM and production desktop/state functions.
+// All requests, including preview, are mocked; never fall back to a real backend.
+async function runDesktopPreferencesInteractions(transportApi = api) {
+  const saved = { lastState, stateRequestId, stateSettledId, stateSnapshotTs,
+    desktopPrefs, desktopBusy, desktopEpoch, desktopReadAttempted, desktopNotice, desktopError, desktopNeedsRefresh };
+  const originalApi = api;
+  const calls = [], cases = [], gates = [], running = [];
+  let state, heldWrite, heldState, heldDesktop, failure;
+  const assert = (ok, text) => { if (!ok) throw new Error(text); };
+  const defer = () => {
+    let resolve;
+    const promise = new Promise((r) => { resolve = r; });
+    gates.push(resolve);
+    return { promise, resolve };
+  };
+  const track = (promise) => { running.push(promise); return promise; };
+  const check = async (name, fn) => { await fn(); cases.push(name); };
+  const reset = () => {
+    state = { ts: Date.now() / 1000, meta: { desktop_preferences: true, version: 'test' },
+      desktop: { osd: true, available: true }, channels: [], capabilities: {} };
+    lastState = structuredClone(state);
+    desktopPrefs = { ...state.desktop };
+    desktopBusy = ''; desktopEpoch++; desktopReadAttempted = false;
+    desktopNotice = ''; desktopError = false; desktopNeedsRefresh = false;
+    stateRequestId = stateSettledId = stateSnapshotTs = 0;
+    heldWrite = heldState = heldDesktop = failure = null;
+    calls.length = 0;
+    renderDesktop();
+  };
+  const read = async () => { const s = await readDeviceState(); renderDesktop(); return s; };
+  const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
+  const response = (data) => ({ ok: true, json: async () => structuredClone(data) });
+  // Exercise the production api() with a fake clock and fetch, not a pre-rejected api mock.
+  const withTransport = async (action) => {
+    const originals = { api, fetch: window.fetch, setTimeout: window.setTimeout, clearTimeout: window.clearTimeout };
+    const timers = new Map();
+    let serial = 0, fetcher;
+    api = transportApi;
+    window.setTimeout = (fn, ms) => { const id = ++serial; timers.set(id, { fn, ms }); return id; };
+    window.clearTimeout = (id) => timers.delete(id);
+    window.fetch = (path, opt) => {
+      assert(['/api/desktop', '/api/desktop/preview', '/api/state', '/api/mode'].includes(path), 'unexpected fetch: ' + path);
+      calls.push({ path, body: opt.body ? JSON.parse(opt.body) : undefined, signal: opt.signal });
+      return fetcher(path, opt);
+    };
+    try {
+      await action({
+        mockFetch: (fn) => { fetcher = fn; },
+        timers,
+        expire: async () => {
+          assert(timers.size === 1, 'desktop request has no finite timeout (or leaked timers)');
+          const [id, timer] = [...timers][0];
+          assert(timer.ms > 0 && timer.ms <= 15000, 'desktop timeout exceeds 15 seconds');
+          timers.delete(id); timer.fn(); await flush();
+        },
+      });
+      assert(timers.size === 0, 'completed requests leaked timeout timers');
+    } finally {
+      // Even failed assertions settle mock work before restoring fetch/api.
+      gates.forEach((resolve) => resolve());
+      await Promise.allSettled(running); await flush();
+      api = originals.api; window.fetch = originals.fetch;
+      window.setTimeout = originals.setTimeout; window.clearTimeout = originals.clearTimeout;
+    }
+  };
+  api = async (path, body) => {
+    calls.push({ path, body });
+    assert(['/api/state', '/api/desktop', '/api/desktop/preview'].includes(path), 'unexpected API: ' + path);
+    if (body) {
+      if (heldWrite) await heldWrite;
+      if (failure) throw new Error(failure);
+      if (path === '/api/desktop') {
+        assert(Object.keys(body).join(',') === 'osd' && typeof body.osd === 'boolean', 'non-strict preference payload');
+        state.desktop.osd = body.osd;
+      } else assert(path === '/api/desktop/preview' && Object.keys(body).length === 0, 'preview payload touches hardware');
+      return { ok: true, detail: 'mock confirmed', desktop: { ...state.desktop } };
+    }
+    const snapshot = structuredClone(path === '/api/state' ? state : state.desktop);
+    const gate = path === '/api/state' ? heldState : heldDesktop;
+    if (gate) await gate;
+    if (failure) throw new Error(failure);
+    return snapshot;
+  };
+  try {
+    await check('OSD is independent of OEM availability and hardware permissions', async () => {
+      reset();
+      assert(!$('desktop-osd').disabled && !$('btn-osd-preview').disabled, 'OSD incorrectly depends on OEM');
+      await $('btn-osd-preview').onclick();
+      assert(calls.length === 1 && calls[0].path === '/api/desktop/preview', 'preview sent other commands');
+      assert(state.desktop.osd && !desktopBusy, 'preview mutated preference or retained busy');
+    });
+    await check('old 0.1/0.2 backend, missing metadata and offline state cannot POST', async () => {
+      for (const reason of ['0.1', '0.2', 'missing-meta', 'offline', 'stale']) {
+        reset();
+        if (reason === 'missing-meta') delete state.meta;
+        else if (reason === 'offline') state.ts = 0;
+        else if (reason === 'stale') state.ts -= 60;
+        else state.meta = { version: reason };
+        await read();
+        assert($('desktop-osd').disabled && $('btn-osd-preview').disabled, reason + ' did not lock controls');
+        await $('desktop-osd').onclick(); await $('btn-osd-preview').onclick();
+        await loadDesktopPreferences();
+        assert(calls.length === 1 && !calls[0].body, reason + ' accessed unsupported preferences');
+        if (reason !== 'offline' && reason !== 'stale') {
+          assert($('desktop-osd-feedback').textContent.includes('正常重启面板'), 'missing honest restart hint');
+        }
+      }
+    });
+    await check('disable then reenable saves booleans; unavailable OSD still permits saving', async () => {
+      reset();
+      await $('desktop-osd').onclick();
+      assert(!desktopPrefs.osd && $('btn-osd-preview').disabled, 'disable did not update UI');
+      await $('btn-osd-preview').onclick();
+      assert(calls.length === 1, 'disabled preview sent a request');
+      await $('desktop-osd').onclick();
+      assert(desktopPrefs.osd && calls[0].body.osd === false && calls[1].body.osd === true, 'reenable failed');
+      state.desktop.available = false; await read();
+      assert(!$('desktop-osd').disabled && $('btn-osd-preview').disabled, 'availability incorrectly blocks persistence');
+      assert($('desktop-osd-feedback').textContent.includes('初始化失败或桌面环境不可用'), 'unavailable OSD explanation is misleading');
+    });
+    await check('save failure keeps previous switch and error through later polls', async () => {
+      reset(); failure = 'save failed E17';
+      await $('desktop-osd').onclick();
+      assert(desktopPrefs.osd && !desktopBusy && desktopError, 'save failure lost original preference');
+      failure = null; await read();
+      assert($('desktop-osd-feedback').textContent.includes('E17'), 'poll erased actionable error');
+      failure = 'not found'; await loadDesktopPreferences();
+      assert($('desktop-osd-feedback').textContent.includes('正常重启面板') && $('desktop-osd').disabled, '404 not gated');
+    });
+    await check('preview failure is reported and releases busy without a preference write', async () => {
+      reset(); failure = 'preview unavailable';
+      await $('btn-osd-preview').onclick();
+      assert(desktopError && !desktopBusy && desktopPrefs.osd, 'preview failure mutated preference or hung');
+      assert(calls.length === 1 && calls[0].path === '/api/desktop/preview', 'preview wrote other settings');
+    });
+    await check('in-flight and delayed polls cannot reverse a successful save or unlock busy controls', async () => {
+      reset();
+      const oldGate = defer(); heldState = oldGate.promise;
+      const oldRead = track(read());
+      const writeGate = defer(); heldWrite = writeGate.promise;
+      const saving = track($('desktop-osd').onclick());
+      assert(desktopBusy === 'save' && $('desktop-osd').disabled && $('btn-osd-preview').disabled, 'save not locked');
+      await $('desktop-osd').onclick(); await $('btn-osd-preview').onclick();
+      oldGate.resolve(); heldState = null; await oldRead;
+      assert(desktopBusy === 'save' && $('desktop-osd').disabled, 'poll unlocked pending save');
+      const duringGate = defer(); heldState = duringGate.promise;
+      const duringRead = track(read());
+      writeGate.resolve(); heldWrite = null; await saving;
+      assert(!desktopPrefs.osd && !desktopBusy, 'save did not settle');
+      duringGate.resolve(); heldState = null; await duringRead;
+      assert(!desktopPrefs.osd && $('desktop-osd').getAttribute('aria-checked') === 'false', 'old read reverted switch');
+      assert(calls.filter((c) => c.body).length === 1, 'duplicate action bypassed busy lock');
+      await read();
+      assert(!desktopPrefs.osd, 'fresh poll reversed saved switch');
+      state.desktop.osd = true; await read();
+      assert(desktopPrefs.osd, 'external preference update no longer synchronizes');
+    });
+    await check('on-demand GET locks controls and stale state GET cannot override it', async () => {
+      reset();
+      const oldGate = defer(); heldState = oldGate.promise;
+      const oldRead = track(read());
+      state.desktop.osd = false;
+      const getGate = defer(); heldDesktop = getGate.promise;
+      const loading = track(loadDesktopPreferences());
+      await $('desktop-osd').onclick();
+      assert(desktopBusy === 'read' && $('desktop-osd').disabled, 'GET did not hold controls');
+      getGate.resolve(); heldDesktop = null; await loading;
+      oldGate.resolve(); heldState = null; await oldRead;
+      assert(!desktopPrefs.osd && !desktopBusy, 'stale poll overwrote preference GET');
+      assert(!calls.some((c) => c.body), 'preference read wrote hardware');
+      delete state.desktop; await read();
+      assert(desktopPrefs.osd === false, 'state without desktop erased on-demand preferences');
+    });
+    await check('desktop POST timeout rechecks preferences before unlocking; late success/error cannot reverse UI', async () => {
+      for (const preview of [false, true]) {
+        for (const lateError of [false, true]) {
+          reset();
+          await withTransport(async ({ mockFetch, expire }) => {
+            const postGate = defer(), getGate = defer();
+            const oldReply = { ok: true, detail: 'late response must not win', desktop: { osd: true, available: true } };
+            mockFetch(async (path, opt) => {
+              if (opt.body) {
+                await postGate.promise; // Deliberately ignore abort, like a late response.
+                if (lateError) throw new Error('late transport error must not win');
+                return response(oldReply);
+              }
+              assert(path === '/api/desktop', 'timeout recovery must read preferences, not send commands');
+              await getGate.promise;
+              return response({ osd: true, available: true });
+            });
+            const action = track(changeDesktopOsd(preview));
+            assert(desktopBusy === (preview ? 'preview' : 'save'), 'POST never entered busy');
+            await expire();
+            assert(calls[0].signal?.aborted, 'timeout did not abort the transport');
+            assert(calls.length === 2 && !calls[1].body && calls[1].path === '/api/desktop', 'timeout did not start a readback');
+            assert($('desktop-osd').disabled && $('btn-osd-preview').disabled, 'unverified preferences reopened controls');
+            assert($('desktop-osd-feedback').textContent.includes('结果未确认'), 'timeout falsely claimed success or failure');
+            await changeDesktopOsd(); await changeDesktopOsd(true);
+            assert(calls.length === 2, 'recovery allowed duplicate POST');
+            getGate.resolve(); await action;
+            assert(!desktopBusy && desktopPrefs.osd && !$('desktop-osd').disabled, 'verified GET failed to release busy');
+            assert(desktopError && desktopNotice.includes('结果未确认'), 'readback falsely confirmed the timed-out operation');
+            // Perform a newer successful save, then release the earlier response.
+            mockFetch(async (path, opt) => response({ ok: true, detail: 'new confirmed save',
+              desktop: { osd: JSON.parse(opt.body).osd, available: true } }));
+            await changeDesktopOsd();
+            const accepted = JSON.stringify(desktopPrefs), notice = desktopNotice;
+            postGate.resolve(); await flush();
+            assert(JSON.stringify(desktopPrefs) === accepted && desktopNotice === notice && !desktopBusy,
+              'late timed-out response reversed newer preferences, notice or busy');
+            assert(calls.filter((call) => call.body).length === 2, 'timeout automatically retried a POST');
+          });
+        }
+      }
+    });
+    await check('timeout while decoding POST and failed recovery remain unconfirmed until an explicit fresh GET', async () => {
+      for (const recovery of ['timeout', 'error', 'invalid']) {
+        reset();
+        await withTransport(async ({ mockFetch, expire }) => {
+          const bodyGate = defer(), getGate = defer();
+          mockFetch(async (path, opt) => {
+            if (opt.body) return { ok: true, json: async () => { await bodyGate.promise; return { ok: true }; } };
+            if (recovery === 'timeout') await getGate.promise;
+            if (recovery === 'error') throw new Error('readback unavailable');
+            return response(recovery === 'invalid' ? {} : { osd: false, available: true });
+          });
+          const action = track(changeDesktopOsd());
+          await flush(); await expire();
+          if (recovery === 'timeout') await expire();
+          await action;
+          assert(!desktopBusy && desktopError && $('desktop-osd').disabled && $('btn-osd-preview').disabled,
+            recovery + ' recovery retained busy or unlocked unverified controls');
+          assert(desktopNotice.includes('结果未确认'), 'recovery failure erased uncertainty');
+          mockFetch(async (path) => response(path === '/api/state' ? state : state.desktop));
+          await read();
+          assert($('desktop-osd').disabled, 'normal polling bypassed required preference verification');
+          await changeDesktopOsd();
+          assert(calls.filter((call) => call.body).length === 1, 'unverified state permitted another POST');
+          await loadDesktopPreferences();
+          assert(!desktopBusy && desktopPrefs.osd && !$('desktop-osd').disabled, 'explicit read did not recover');
+          const accepted = JSON.stringify(desktopPrefs), notice = desktopNotice;
+          bodyGate.resolve(); getGate.resolve(); await flush();
+          assert(JSON.stringify(desktopPrefs) === accepted && desktopNotice === notice, 'late body/GET reversed explicit recovery');
+        });
+      }
+    });
+    await check('disconnect during POST timeout clears busy but keeps uncertainty and requires readback after reconnect', async () => {
+      reset(); desktopReadAttempted = true;
+      await withTransport(async ({ mockFetch, expire }) => {
+        const gate = defer();
+        mockFetch(async () => { await gate.promise; return response({ ok: true }); });
+        const action = track(changeDesktopOsd());
+        state.ts = 0; lastState = structuredClone(state); renderDesktop();
+        await expire(); await action;
+        assert(!desktopBusy && !desktopReadAttempted && desktopNeedsRefresh && calls.length === 1,
+          'offline timeout retained busy, retried POST, or lost deferred verification');
+        assert($('desktop-osd').disabled && $('desktop-osd-feedback').textContent.includes('结果未确认'),
+          'offline feedback hid uncertainty or permitted writes');
+        state.ts = Date.now() / 1000;
+        mockFetch(async (path) => response(path === '/api/state' ? state : state.desktop));
+        await read();
+        assert($('desktop-osd').disabled, 'reconnect poll alone confirmed the preference');
+        await loadDesktopPreferences();
+        assert(!desktopBusy && !desktopNeedsRefresh && !$('desktop-osd').disabled, 'fresh preference read did not recover');
+        gate.resolve(); await flush();
+        assert(calls.filter((call) => call.body).length === 1, 'reconnect resent timed-out POST');
+      });
+    });
+    await check('desktop timeouts do not change hardware POST contract; successful requests cancel timers', async () => {
+      reset();
+      await withTransport(async ({ mockFetch, timers }) => {
+        mockFetch(async () => response({ ok: true, desktop: { osd: false, available: true } }));
+        await changeDesktopOsd();
+        assert(!desktopBusy && !desktopPrefs.osd && timers.size === 0, 'successful desktop request leaked timer');
+        await api('/api/mode', { mode: 'turbo' }); // Transport-only mock: no daemon/hardware invocation.
+        assert(calls.at(-1).signal === undefined && timers.size === 0, 'hardware POST acquired a new timeout');
+      });
+    });
+    return { passed: cases.length, cases, hardwareWrites: 0 };
+  } finally {
+    gates.forEach((resolve) => resolve());
+    await Promise.allSettled(running);
+    ({ lastState, stateRequestId, stateSettledId, stateSnapshotTs,
+      desktopPrefs, desktopBusy, desktopEpoch, desktopReadAttempted, desktopNotice, desktopError, desktopNeedsRefresh } = saved);
+    renderDesktop();
+    api = originalApi;
+  }
+}
+
+// Offline entry point: node tests/web_interactions.js --desktop
+// Evaluate only desktop/state production code in a minimal DOM; never boot the app,
+// open a browser, access localStorage, or fall back to native fetch.
+if (typeof module !== 'undefined' && require.main === module) {
+  if (process.argv[2] !== '--desktop') throw new Error('Use --desktop for the isolated mock suite');
+  const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
+  const source = fs.readFileSync(path.resolve(__dirname, '../app/web/app.js'), 'utf8');
+  const section = (start, end) => {
+    const from = source.indexOf(start), to = source.indexOf(end, from);
+    if (from < 0 || to < 0) throw new Error('Production section not found: ' + start);
+    return source.slice(from, to);
+  };
+  const nodes = new Map(['desktop-osd', 'btn-osd-preview', 'desktop-preferences',
+    'desktop-osd-state', 'desktop-osd-feedback'].map((id) => [id, {
+    disabled: false, textContent: '', attributes: {},
+    setAttribute(key, value) { this.attributes[key] = value; },
+    getAttribute(key) { return this.attributes[key]; },
+    classList: { toggle() {} },
+  }]));
+  const sandbox = { console, structuredClone, AbortSignal, AbortController, setTimeout, clearTimeout,
+    fetch() { throw new Error('Real network access forbidden'); },
+    document: { getElementById(id) {
+      if (!nodes.has(id)) throw new Error('Unexpected DOM access: ' + id);
+      return nodes.get(id);
+    } },
+    setText(id, text) { sandbox.document.getElementById(id).textContent = text; },
+  };
+  sandbox.window = sandbox;
+  const context = vm.createContext(sandbox);
+  vm.runInContext(section('let lastState =', 'let toastTimer =')
+    + section('// ---------- Umi 独立 OSD', 'function showView(')
+    + '\n' + runDesktopPreferencesInteractions.toString(), context);
+  vm.runInContext('runDesktopPreferencesInteractions()', context).then((result) => {
+    console.log(JSON.stringify(result, null, 2));
+  }).catch((error) => { console.error(error); process.exitCode = 1; });
 }

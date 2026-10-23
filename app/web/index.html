@@ -5,12 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Umi Control Panel · 机械革命 Umi Pro 3</title>
 <link rel="stylesheet" href="/style.css">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" href="/umi.svg" type="image/svg+xml">
+<link rel="manifest" href="/manifest.webmanifest">
 </head>
 <body>
 <div class="app">
   <aside class="sidebar">
     <div class="brand">
-      <span class="brand-mark">UM</span>
+      <img class="brand-mark" src="/umi.svg" alt="Umi" width="38" height="38">
       <span class="brand-text"><strong>UMI PANEL</strong><small>GM5MG0Y</small></span>
     </div>
     <nav class="nav" id="nav">
@@ -134,7 +137,7 @@
           <p class="draft-status" id="quick-feedback" role="status" aria-live="polite">正在读取设备状态。</p>
         </section>
         <section class="card"><div class="section-heading"><h2>电池与显示</h2><p>这里显示当前状态，尚未接入的设置仍由 Creator Center 管理。</p></div><div class="readonly-list" id="quick-device-status"></div></section>
-        <details class="disclosure"><summary>为什么有些 CC 开关还不能操作？</summary><p class="parameter-help">USB 关机供电、屏幕提示、色彩模式和独显直连仍在核对本机指令与还原方式；电池保养涉及充电安全，不在这里试写。不会把截图上的开关位置当成设备当前状态。</p></details>
+        <details class="disclosure"><summary>为什么有些 CC 开关还不能操作？</summary><p class="parameter-help">USB 关机供电、OEM 屏幕提示、色彩模式和独显直连仍在核对本机指令与还原方式；电池保养涉及充电安全，不在这里试写。不会把截图上的开关位置当成设备当前状态。</p></details>
       </section>
 
       <section class="view" id="view-creator">
@@ -476,8 +479,20 @@
       </section>
 
       <section class="view" id="view-settings">
+        <section class="card" id="desktop-preferences">
+          <div class="card-head"><h2>Umi 屏幕提示</h2><span class="tag">独立 OSD · 仅本机桌面</span></div>
+          <div class="control-row">
+            <div class="control-copy"><b>操作时显示提示</b><small id="desktop-osd-scope">只控制 Umi 的提示，不控制 Creator Center / OEM 的屏幕提示；关闭后实体模式键和性能切换仍照常工作。</small></div>
+            <span class="control-value" id="desktop-osd-state">等待连接</span>
+            <button class="toggle" id="desktop-osd" role="switch" aria-checked="false" aria-label="Umi 屏幕提示"
+                    aria-describedby="desktop-osd-scope desktop-osd-feedback" disabled><span class="toggle-knob"></span></button>
+          </div>
+          <div class="btn-row"><button id="btn-osd-preview" aria-describedby="desktop-osd-preview-help" disabled>预览提示样式</button></div>
+          <p class="hint" id="desktop-osd-preview-help">仅在运行 Umi 服务的电脑上显示预览，不会切换性能、修改风扇或写入硬件。</p>
+          <p class="draft-status" id="desktop-osd-feedback" role="status" aria-live="polite">正在确认后端是否支持桌面偏好设置。</p>
+        </section>
         <section class="card">
-          <div class="card-head"><h2>更多设置</h2><span class="tag">预留扩展</span></div>
+          <div class="card-head"><h2>扩展能力</h2><span class="tag">预留扩展</span></div>
           <div class="extension-placeholder">
             <span class="extension-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m10 9 5 3-5 3z"/></svg>

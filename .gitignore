@@ -3,6 +3,7 @@
 /dist/
 __pycache__/
 *.pyc
+/Umi Control Panel.lnk
 
 # 状态与日志（用户机器上的可变数据，不入库）
 /data/

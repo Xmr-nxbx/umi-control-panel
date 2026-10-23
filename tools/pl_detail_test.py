@@ -12,7 +12,7 @@ OEM 自己那条 `Fan/Control {"Action":"SET_OPERATING_MODE_DETAIL","PL1":".."}`
 不重复实现也不绕过——护栏被绕过才是这次验证真正要防的事故。
 
 跑之前必须停面板（同一个 clientId 只许一条 MQTT 连接，后到的顶掉先到的，两边互踢就
-什么都测不出来）。脚本会先探测 127.0.0.1:8747 有没有人应答，有人应答就不动手。
+什么都测不出来）。脚本先按 data/port、配置发现本机端口，有人应答或探测不确定就不动手。
 
 判据是 **EC 直读那个设置字节真的变了**，不是「命令发出去了」：档位命令实测 9~26 秒才落到
 EC，所以默认等各 60 秒。还原也走同一条命令发回原值；但 `0x0783-0x0785` 还有 ACPI 侧写者
@@ -41,11 +41,11 @@ from app.act.channels.ec_gpd import EcChannel         # noqa: E402
 from app.act.channels.mqtt_gcu import MqttChannel     # noqa: E402
 from app.config import Config                         # noqa: E402
 from app.logx import Log                              # noqa: E402
+from app.paths import discover_panel_port             # noqa: E402
 from app.sense.clock import ClockSense                # noqa: E402
 from app.sense.thermal import Thermal                 # noqa: E402
 
 REPORT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'out', 'pl-detail-test.txt')
-PANEL_ADDR = ('127.0.0.1', 8747)
 TEMP_GUARD_C = 85.0
 MAX_SENDS = 5
 POLL_S = 2.0
@@ -57,11 +57,12 @@ EC_FIELD = {'PL1': 'pl1_setting', 'PL2': 'pl2_setting', 'PL4': 'pl4_setting'}
 FAN_FIELD = dict((n, f) for n, _, f in PL_KEYS)
 
 
-def panel_alive():
+def panel_alive(port=None):
+    port = discover_panel_port(port)
     try:
-        socket.create_connection(PANEL_ADDR, timeout=1.0).close()
+        socket.create_connection(('127.0.0.1', port), timeout=1.0).close()
         return True
-    except OSError:
+    except ConnectionRefusedError:
         return False
 
 
@@ -165,13 +166,20 @@ def main(argv):
         if '--no-restore' in low and not write:
             rep.out('[停止] --no-restore 只在 --write 时才有意义，演练本来就不发。')
             return done(2)
-        if panel_alive():
-            rep.out('[停止] 面板还在 127.0.0.1:8747 上跑，会和本脚本抢同一个 MQTT clientId、互相踢线。')
-            rep.out('        先停：curl -s -X POST -H "Origin: http://127.0.0.1:8747" '
-                    'http://127.0.0.1:8747/api/shutdown')
+        try:
+            port = discover_panel_port()
+            alive = panel_alive(port)
+        except (OSError, ValueError) as exc:
+            rep.out('[停止] 无法确认面板已停，拒绝继续：%s' % exc)
+            return done(3)
+        if alive:
+            rep.out('[停止] 面板还在端口 %d 上跑，请先手动停止面板，避免 MQTT 身份互踢。' % port)
             return done(3)
 
-        cfg, _err, _bad = Config.load()
+        cfg, err, _bad = Config.load()
+        if err:
+            rep.out('[停止] 配置读取失败，拒绝继续：%s' % err)
+            return done(3)
         log = Log('pl-detail-test')
         mqtt, ec = MqttChannel(cfg, log), EcChannel(cfg, log)
         res['mqtt'], res['ec'] = mqtt, ec

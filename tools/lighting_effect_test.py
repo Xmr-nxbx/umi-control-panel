@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """灯效 SetEffectALL 的首次可逆验证（用 Creator Center 自己点出来的报文当契约）。
 
-    runtime\\python.exe tools\\lighting_effect_test.py            # 只读预演
-    runtime\\python.exe tools\\lighting_effect_test.py --write    # 真下发（最后一定还原）
+    python tools/lighting_effect_test.py --restore-capture <还原.jsonl> --test-capture <测试.jsonl>
+    # 默认只读预演；真下发还需显式加 --write（最后一定还原）
 
 报文来源：
   * --restore-capture 里取用户最后的键盘 Lighting + Welcome 两条 SetEffectALL（原样收藏）；
@@ -32,9 +32,7 @@ sys.path.insert(0, ROOT)
 
 from app.act.channels.mqtt_gcu import MqttClient   # noqa: E402
 from app.config import Config                      # noqa: E402
-
-RESTORE_CAPTURE = os.path.join(ROOT, 'logs', 'mqtt-capture-20261020-201219.jsonl')
-TEST_CAPTURE = os.path.join(ROOT, 'logs', 'mqtt-capture-20261020-205150.jsonl')
+from app.paths import local_mqtt_endpoint          # noqa: E402
 
 SET_EFFECT = 'SetEffectALL'
 
@@ -58,6 +56,10 @@ def _load_identity():
     ident = {k: mqtt_cfg.get(k) for k in ('client_id', 'username', 'password')}
     if not all(ident.values()):
         return None, '没有 broker 身份（data\\mqtt_identity.json）'
+    try:
+        ident['host'], ident['port'] = local_mqtt_endpoint(mqtt_cfg)
+    except ValueError as exc:
+        return None, str(exc)
     return ident, None
 
 
@@ -102,7 +104,7 @@ def _summary(pl):
 
 
 def _connect(ident, topics):
-    cli = MqttClient('127.0.0.1', 13688, ident['client_id'],
+    cli = MqttClient(ident['host'], ident['port'], ident['client_id'],
                      ident['username'], ident['password'])
     cli.connect(timeout=2.5)
     if topics:
@@ -217,8 +219,8 @@ def _matches(view, payload):
 def main(argv=None):
     ap = argparse.ArgumentParser(description='键盘灯效 SetEffectALL 的可逆验证')
     ap.add_argument('--write', action='store_true', help='真的下发（默认只读预演）')
-    ap.add_argument('--restore-capture', default=RESTORE_CAPTURE)
-    ap.add_argument('--test-capture', default=TEST_CAPTURE)
+    ap.add_argument('--restore-capture', required=True, help='显式指定还原抓包，不自动选日志')
+    ap.add_argument('--test-capture', required=True, help='显式指定测试抓包，不自动选日志')
     args = ap.parse_args(argv)
 
     ident, err = _load_identity()

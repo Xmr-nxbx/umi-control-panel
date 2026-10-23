@@ -77,7 +77,7 @@ const VIEW_META = {
   system: ['诊断', '连接、原始读数与日志，排查问题时再看'],
   monitor: ['监控', '看看温度、负载和功耗如何变化'],
   custom: ['我的方案', '把喜欢的设置留下，下次一键应用'],
-  settings: ['更多设置', '扩展能力与接入进展'],
+  settings: ['更多设置', 'Umi 桌面偏好与扩展能力'],
 };
 const ICONS = {
   lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>',
@@ -124,6 +124,13 @@ let lastState = null;
 let stateRequestId = 0;
 let stateSettledId = 0;
 let stateSnapshotTs = 0;
+let desktopPrefs = null;
+let desktopBusy = '';
+let desktopEpoch = 0;
+let desktopReadAttempted = false;
+let desktopNotice = '';
+let desktopError = false;
+let desktopNeedsRefresh = false; // 超时后的普通 state 轮询不能代替专门的偏好核实。
 let benchWasRunning = false;
 let benchTimer = null;   // 跑分进行中改成 1 秒刷一次，进度条才看得出在动
 let histData = { samples: [], marks: [] };
@@ -133,16 +140,40 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 async function api(path, body) {
+  const desktop = path === '/api/desktop' || path === '/api/desktop/preview';
   const opt = body ? { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body) } : { signal: AbortSignal.timeout(15000) };
-  const res = await fetch(path, opt);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || data.error || data.reason || ('HTTP ' + res.status));
-  return data;
+    body: JSON.stringify(body) } : {};
+  const request = async () => {
+    const res = await fetch(path, opt);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || data.error || data.reason || ('HTTP ' + res.status));
+    return data;
+  };
+  if (!desktop) {
+    if (!body) opt.signal = AbortSignal.timeout(15000);
+    return request(); // 硬件 POST 的超时契约保持不变。
+  }
+  const controller = new AbortController();
+  opt.signal = controller.signal;
+  let timer;
+  try {
+    // 同时覆盖响应头和响应体；即使 transport 忽略 abort，迟到结果也不能交给 UI。
+    return await Promise.race([request(), new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const error = new Error('桌面请求超时，结果未确认');
+        error.name = 'TimeoutError';
+        reject(error);
+        controller.abort();
+      }, 15000);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function readDeviceState() {
   const requestId = ++stateRequestId;
+  const preferencesEpoch = desktopEpoch;
   let snapshot;
   try {
     snapshot = await api('/api/state');
@@ -156,6 +187,14 @@ async function readDeviceState() {
   if (!Number.isFinite(snapshot.ts) || snapshot.ts < stateSnapshotTs) return null;
   stateSnapshotTs = snapshot.ts;
   lastState = snapshot;
+  // 写入前或写入中的 GET 即使迟到，也不能把已保存的开关翻回去。
+  if (preferencesEpoch === desktopEpoch && !desktopBusy && !desktopNeedsRefresh) {
+    if (snapshot.meta?.desktop_preferences !== true) desktopPrefs = null;
+    else if (validDesktopPrefs(snapshot.desktop)) {
+      if (!desktopError && desktopPrefs?.osd !== snapshot.desktop.osd) desktopNotice = '';
+      desktopPrefs = { ...snapshot.desktop };
+    }
+  }
   return snapshot;
 }
 
@@ -524,7 +563,7 @@ function renderOem(s) {
     hwRow('TCC 偏移（OEM 读数）', tccText, oem.tcc_offset_c != null),
     hwRow('风扇换挡间隔（OEM 读数）', fanSpeedText, oem.fan_switch_speed_ms != null),
     hwRow('USB 关机充电', onOff(oem.usb_charger_on, '开', '关'), oem.usb_charger_on != null),
-    hwRow('OSD 提示', oem.osd_hidden == null ? '未知' : (oem.osd_hidden ? '隐藏' : '显示'),
+    hwRow('OEM 屏幕提示（非 Umi）', oem.osd_hidden == null ? '未知' : (oem.osd_hidden ? '隐藏' : '显示'),
           oem.osd_hidden != null),
     hwRow('Fn 键 / NumPad', `${onOff(oem.fn_locked, '锁', '未锁')} / ${onOff(oem.numpad_locked, '锁', '未锁')}`,
           oem.fn_locked != null),
@@ -660,7 +699,7 @@ function renderQuick(s) {
     ['电池保养', (META.battery_mode_labels || {})[(((s || {}).hardware || {}).battery_mode)] || null, '充电设置仅显示，不在面板试写'],
     ['独显直连', oem.mux_support === false ? '本机未报告支持' : '状态待核实', '服务标志的直连含义尚未验证，暂由 CC 管理'],
     ['色彩模式', oem.display_mode === 'DISPLAY_STANDARD_MODE' ? '标准' : oem.display_mode ? '未识别' : '未回读', '屏幕颜色配置，暂由 CC 管理'],
-    ['功能键屏幕提示', onOff(oem.osd_hidden, '隐藏', '显示'), '暂由 CC 管理'],
+    ['OEM 功能键屏幕提示', onOff(oem.osd_hidden, '隐藏', '显示'), '由 CC 管理；Umi 独立提示请到更多设置调整'],
     ['关机 USB 供电', onOff(oem.usb_charger_on, '开启', '关闭'), '暂由 CC 管理'],
   ];
   $('quick-device-status').innerHTML = rows.map(([label, value, desc]) => `<div class="readonly-row"><div><b>${esc(label)}</b><small>${esc(desc)}</small></div><span class="tag">${esc(live ? value || '未回读' : '连接待更新')}</span></div>`).join('');
@@ -703,6 +742,126 @@ function renderLightbar(s) {
     + hwRow('控制器', oem.kb_controller || '未知', !!oem.kb_controller);
 }
 
+// ---------- Umi 独立 OSD：不依赖 OEM 在线、能力或任何硬件写入门禁 ----------
+function validDesktopPrefs(value) {
+  return value && typeof value.osd === 'boolean' && typeof value.available === 'boolean';
+}
+
+function desktopConnected() {
+  return !!lastState && Number.isFinite(lastState.ts) && lastState.ts > 0
+    && Date.now() / 1000 - lastState.ts < 8;
+}
+
+function desktopSupported() {
+  // 不用合并后的 META：旧后端重连时缺少该字段，不能继承之前的 true。
+  return desktopConnected() && lastState.meta?.desktop_preferences === true;
+}
+
+function renderDesktop() {
+  const supported = desktopSupported();
+  const ready = supported && !desktopNeedsRefresh && validDesktopPrefs(desktopPrefs);
+  const enabled = desktopPrefs?.osd === true;
+  const toggle = $('desktop-osd');
+  toggle.setAttribute('aria-checked', String(enabled));
+  toggle.disabled = !ready || !!desktopBusy;
+  $('btn-osd-preview').disabled = toggle.disabled || !enabled || !desktopPrefs.available;
+  $('desktop-preferences').setAttribute('aria-busy', String(!!desktopBusy));
+  setText('desktop-osd-state', !ready ? '尚未确认' : enabled ? '已开启' : '已关闭');
+  let message = desktopNotice;
+  if (!desktopConnected()) message = desktopNeedsRefresh
+    ? '请求超时，结果未确认；尚未连接 Umi 服务，恢复连接后需重新读取桌面偏好核实。'
+    : '尚未连接 Umi 服务，暂不能更改或预览；不会修改已保存的设置。';
+  else if (!supported) message = (desktopNeedsRefresh ? '请求超时，结果未确认；' : '')
+    + '当前运行的后端尚不支持桌面偏好（包括旧版 0.1 / 0.2）。更新文件后需正常重启面板；仅刷新网页不会启用新后端。';
+  else if (desktopBusy) message = desktopNeedsRefresh
+    ? '请求超时，结果未确认；正在重新读取桌面偏好核实…'
+    : { read: '正在读取桌面偏好…', save: '正在保存 Umi 屏幕提示设置…', preview: '正在请求样式预览…' }[desktopBusy];
+  else if (!ready) message = message || '桌面偏好尚未读取，请重新进入更多设置。';
+  else {
+    message = message || (enabled ? '已开启：仅在手动操作时提示，自适应换档不会弹出。' : '已关闭 Umi 提示，实体模式键和性能切换不受影响。');
+    if (!desktopPrefs.available) message += ' OSD 初始化失败或桌面环境不可用，偏好可保存，但暂不能预览。';
+  }
+  setText('desktop-osd-feedback', message);
+  $('desktop-osd-feedback').classList.toggle('err', supported && !desktopBusy && desktopError);
+}
+
+function desktopFailure(error) {
+  desktopError = true;
+  desktopNotice = /not found|HTTP 404/i.test(error.message)
+    ? '当前运行的后端没有此接口；更新文件后请正常重启面板，仅刷新网页不会启用新后端。'
+    : '操作未确认：' + error.message + '。请核对状态后重试。';
+}
+
+async function loadDesktopPreferences() {
+  if (!desktopSupported() || desktopBusy) { renderDesktop(); return; }
+  const recovering = desktopNeedsRefresh;
+  const epoch = ++desktopEpoch;
+  desktopReadAttempted = true;
+  desktopBusy = 'read';
+  if (!recovering) { desktopNotice = ''; desktopError = false; }
+  renderDesktop();
+  try {
+    const prefs = await api('/api/desktop');
+    if (epoch !== desktopEpoch) return;
+    if (!validDesktopPrefs(prefs)) throw new Error('桌面偏好格式无效');
+    if (desktopSupported()) {
+      desktopPrefs = { ...prefs };
+      desktopNeedsRefresh = false;
+      if (recovering) {
+        // 回读只能说明当前偏好，不能证明超时的保存/预览是否执行。
+        desktopNotice = '请求超时，结果未确认；已重新读取当前偏好（' + (prefs.osd ? '开启' : '关闭') + '），请核对后再操作。';
+        desktopError = true;
+      }
+    }
+  } catch (e) {
+    if (epoch !== desktopEpoch) return;
+    desktopPrefs = null;
+    desktopFailure(e);
+    if (recovering) desktopNotice = '请求超时，结果未确认；核实偏好失败。' + desktopNotice + ' 请重新进入更多设置读取。';
+  } finally {
+    if (epoch === desktopEpoch) {
+      desktopBusy = ''; desktopEpoch++;
+      renderDesktop();
+    }
+  }
+}
+
+async function changeDesktopOsd(preview = false) {
+  if (!desktopSupported() || desktopBusy || desktopNeedsRefresh || !validDesktopPrefs(desktopPrefs)
+      || (preview && (!desktopPrefs.osd || !desktopPrefs.available))) { renderDesktop(); return; }
+  const wanted = !desktopPrefs.osd;
+  const epoch = ++desktopEpoch;
+  let timedOut = false;
+  desktopBusy = preview ? 'preview' : 'save';
+  desktopNotice = ''; desktopError = false;
+  renderDesktop();
+  try {
+    const result = await api(preview ? '/api/desktop/preview' : '/api/desktop', preview ? {} : { osd: wanted });
+    if (epoch !== desktopEpoch) return;
+    if (result.ok !== true) throw new Error(result.detail || '服务未确认操作');
+    if (!preview) desktopPrefs = validDesktopPrefs(result.desktop) ? { ...result.desktop } : { ...desktopPrefs, osd: wanted };
+    desktopNotice = result.detail || (preview ? '已请求预览，不会切换性能或写入硬件。' : 'Umi 屏幕提示设置已保存。');
+  } catch (e) {
+    if (epoch !== desktopEpoch) return;
+    desktopFailure(e);
+    timedOut = e.name === 'TimeoutError' || e.name === 'AbortError';
+    if (timedOut) {
+      desktopNeedsRefresh = true;
+      desktopReadAttempted = false; // 若此时断线，设置页重连后再尝试一次核实。
+      desktopNotice = '请求超时，结果未确认；需要重新读取桌面偏好核实，不会自动重发。';
+    }
+  } finally {
+    if (epoch === desktopEpoch) {
+      desktopBusy = ''; desktopEpoch++;
+      renderDesktop();
+    }
+  }
+  if (timedOut) await loadDesktopPreferences();
+}
+
+$('desktop-osd').onclick = () => changeDesktopOsd();
+$('btn-osd-preview').onclick = () => changeDesktopOsd(true);
+
 function showView(name, opts) {
   const meta = VIEW_META[name] || VIEW_META.overview;
   const key = VIEW_META[name] ? name : 'overview';
@@ -718,6 +877,11 @@ function showView(name, opts) {
   try { localStorage.setItem('umi.view', key); } catch (e) { /* 隐私模式不记 */ }
   if (key === 'overview' || key === 'monitor') setTimeout(loadHistory, 40);
   if (key === 'custom') { renderCustom(lastState); renderPresets(); }
+  if (key === 'settings') {
+    desktopReadAttempted = false;
+    renderDesktop();
+    if (!opts?.skipDesktopRead) loadDesktopPreferences();
+  }
   if (presetBusy) renderPresetLock();
   if (key === 'creator') {
     renderCreator(lastState);
@@ -2260,6 +2424,8 @@ async function poll() {
     renderTier(s); renderPills(s); renderIntents(); renderProfiles(s); renderMeters(s);
     renderHardware(s); renderOem(s); renderLighting(s); renderCaps(s);
     renderOverview(s); renderCreator(s); renderCustom(s); renderFanSpeed(s); renderQuick(s);
+    renderDesktop();
+    if ($('view-settings').classList.contains('active') && (!desktopPrefs || desktopNeedsRefresh) && !desktopReadAttempted) loadDesktopPreferences();
     if (presetBusy) renderPresetLock();
     if ((s.bench || {}).running || benchWasRunning) loadBench();
     benchWasRunning = !!(s.bench || {}).running;
@@ -2271,6 +2437,7 @@ async function poll() {
       lastState = { ...lastState, ts: 0 };
       renderQuick(lastState); renderCreator(lastState); renderCustom(lastState); renderLighting(lastState); renderFanSpeed(lastState);
     }
+    renderDesktop();
     return false;
   }
 }

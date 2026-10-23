@@ -35,8 +35,9 @@ sys.path.insert(0, ROOT)
 
 from app.act.channels.mqtt_gcu import MqttClient   # noqa: E402
 from app.config import Config                      # noqa: E402
+from app.paths import discover_panel_port, local_mqtt_endpoint  # noqa: E402
 
-PANEL = 'http://127.0.0.1:8747'
+PANEL = None
 TARGET = 15
 DELTA = 10
 
@@ -95,7 +96,7 @@ def _mqtt_read(ident, wait_s=2.0, attempts=3):
 
 
 def _mqtt_read_once(ident, wait_s):
-    cli = MqttClient('127.0.0.1', 13688, ident['client_id'],
+    cli = MqttClient(ident['host'], ident['port'], ident['client_id'],
                      ident['username'], ident['password'])
     cli.connect(timeout=2.5)
     try:
@@ -133,7 +134,7 @@ def _mqtt_send(ident, payload, attempts=3):
     """短连接：只发一条，不订阅、不等应答。消息进 broker 就够了。"""
     last = None
     for attempt in range(attempts):
-        cli = MqttClient('127.0.0.1', 13688, ident['client_id'],
+        cli = MqttClient(ident['host'], ident['port'], ident['client_id'],
                          ident['username'], ident['password'])
         try:
             cli.connect(timeout=2.5)
@@ -178,8 +179,10 @@ def _diff(before, after):
 
 
 def main(argv=None):
+    global PANEL
     ap = argparse.ArgumentParser(description='风扇曲线 MQTT 写入的首次可逆验证')
     ap.add_argument('--write', action='store_true', help='真的下发（默认只读预演）')
+    ap.add_argument('--port', type=int, help='面板端口（优先于 data/port 和配置）')
     args = ap.parse_args(argv)
 
     cfg, err, _ = Config.load()
@@ -190,6 +193,12 @@ def main(argv=None):
     ident = {k: mqtt_cfg.get(k) for k in ('client_id', 'username', 'password')}
     if not all(ident.values()):
         print('没有 broker 身份（data\\mqtt_identity.json），无法下发。')
+        return 2
+    try:
+        PANEL = 'http://127.0.0.1:%d' % discover_panel_port(args.port, cfg)
+        ident['host'], ident['port'] = local_mqtt_endpoint(mqtt_cfg)
+    except (OSError, ValueError) as exc:
+        print('端口配置无效，拒绝继续：%s' % exc)
         return 2
 
     print('== 1. 读基线 ==')

@@ -21,10 +21,6 @@ from app.paths import data_path  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dotnet_probe  # noqa: E402
 
-GCU_CANDIDATES = [
-    r'C:\Program Files\OEM\CreatorCenter\UniwillService\MyControlCenter\GCUService.exe',
-    r'C:\Program Files (x86)\OEM\CreatorCenter\UniwillService\MyControlCenter\GCUService.exe',
-]
 OUT_NAME = 'ec_map.local.json'
 
 REGISTER_TYPE = 'Define.ECSpec'
@@ -34,8 +30,15 @@ ENUM_TYPES = ('Define.ECSpec+MyFanCTLByteFlag', 'Define.ECSpec+MyFan2SpeedByteFl
               'Define.ProjectID', 'Define.PowerPlan')
 
 
+def gcu_candidates():
+    roots = dict.fromkeys(os.environ.get(key) for key in
+                         ('ProgramW6432', 'ProgramFiles', 'ProgramFiles(x86)'))
+    return [os.path.join(root, 'OEM', 'CreatorCenter', 'UniwillService',
+                        'MyControlCenter', 'GCUService.exe') for root in roots if root]
+
+
 def find_gcu(explicit=None):
-    for p in ([explicit] if explicit else []) + GCU_CANDIDATES:
+    for p in ([explicit] if explicit else []) + gcu_candidates():
         if p and os.path.exists(p):
             return p
     return None
@@ -82,7 +85,7 @@ def main(argv):
     gcu = find_gcu(argv[0] if argv else None)
     if not gcu:
         print('找不到 GCUService.exe（Creator Center 的服务端）。')
-        print('已找过：%s' % '；'.join(GCU_CANDIDATES))
+        print('已找过：%s' % '；'.join(([argv[0]] if argv else []) + gcu_candidates()))
         print('可以用参数指定完整路径后重试。')
         return 1
     print('来源：%s' % gcu)

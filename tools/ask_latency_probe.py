@@ -11,12 +11,18 @@ Setting/Status 不问了不推，而改之前有两个卡点：写完不开口�
 背光这条命令做过可逆验证（2026-09-30 15:31），开完一定关回原值；
 拿不到原始读数就一条都不发。Win 锁不在这里动：留给用户自己在面板上点。
 """
+import argparse
 import json
+import os
 import sys
 import time
 import urllib.request
 
-BASE = 'http://127.0.0.1:8747'
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app.paths import discover_panel_port  # noqa: E402
+
+BASE = None
 
 
 def get(path):
@@ -47,7 +53,16 @@ def wait_for(want, limit):
     return None
 
 
-def main():
+def main(argv=None):
+    global BASE
+    ap = argparse.ArgumentParser(description='测量本机面板动作回读延迟')
+    ap.add_argument('--port', type=int, help='面板端口（优先于 data/port 和配置）')
+    args = ap.parse_args(argv)
+    try:
+        BASE = 'http://127.0.0.1:%d' % discover_panel_port(args.port)
+    except (OSError, ValueError) as exc:
+        print('无法确定面板端口，什么都不发：%s' % exc)
+        return 2
     cur = kb_state()
     if cur is None:
         print('读不到 Keyboard/Status 的背光状态，什么都不发。')

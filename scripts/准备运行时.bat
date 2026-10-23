@@ -2,7 +2,7 @@
 setlocal
 rem 准备便携 Python 3.12。纯 cmd，引导只用系统自带 curl/tar，不调用 PowerShell。
 rem 优先复用本机已有的 Python；一个都没有时才下载官方 embeddable 包。
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 if exist "runtime\python.exe" goto run_runtime
 if not defined UMI_PYTHON_SRC goto try_cpython
 if exist "%UMI_PYTHON_SRC%\python.exe" goto copy_src

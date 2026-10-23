@@ -1,6 +1,6 @@
 @echo off
 setlocal
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 net session >nul 2>&1
 if errorlevel 1 (
   echo 需要管理员权限，正在提权重启本脚本...

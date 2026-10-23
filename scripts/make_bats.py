@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-r"""生成入口 bat（必须 GBK 编码 + CRLF 换行）。
+r"""生成兼容/开发者 bat（GBK + CRLF）及桌面入口 vbs（UTF-16 LE BOM + CRLF）。
 
+日常启动只用根目录 Umi Control Panel.vbs；scripts 下保留旧路径供高级操作兼容，
+不搬动、不自动执行诊断/硬件工具。开发者命令行只打开根目录的 cmd。
 中文 Windows 的 cmd 按代码页 936 解析批处理：UTF-8 的中文注释会被截断成乱码命令，
-表现为「双击就闪退」。IDE 的写文件工具默认 UTF-8，所以 bat 一律由本脚本产出，
-以后改 bat 也是改这个脚本再重新生成。
+表现为「双击就闪退」。IDE 的写文件工具默认 UTF-8，所以入口一律由本脚本产出，
+以后改入口也是改这个脚本再重新生成。生成快捷方式脚本并不执行它。
 
 用法：runtime\python.exe scripts\make_bats.py
 """
@@ -15,27 +17,20 @@ OUT = os.path.join(ROOT, 'scripts')
 
 BATS = {}
 
-# 「停面板」不能只发一次 --stop 就走：2026-09-30 那次观察跑到一半，另一个 bat 又把面板
-# 拉起来了，两个实例一起抢 broker 身份，MQTT 报告只留下前 60 秒。所以这里发完 stop 还要
-# 确认 874x 上真的没人听了才继续（最多 5 轮，确认不了就照实警告，不闷头往下跑）。
-STOP_PANEL = r"""set /a STOPTRIES=0
-:stop_panel
-"%EXE%" "main.py" --stop >nul 2>&1
-timeout /t 2 /nobreak >nul
-set /a STOPTRIES+=1
-netstat -ano | findstr /c:":874" | findstr /c:"LISTENING" >nul
-if errorlevel 1 goto stop_panel_done
-if %STOPTRIES% lss 5 goto stop_panel
-echo  警告：874x 端口上还有实例在听，可能另一个观察脚本正在跑。先关掉它再继续，
-echo        否则两边抢同一个 broker 身份，MQTT 那份报告会半路断掉。
-:stop_panel_done
+# 必须确认命名实例已退出；无法核实就终止，不能继续实验。
+STOP_PANEL = r""""%EXE%" "tools\stop_panel.py"
+if errorlevel 1 (
+  echo 无法确认面板已停止，已取消后续操作。请查看上方错误后重试。
+  pause
+  exit /b 1
+)
 """
 
 BATS['准备运行时.bat'] = r"""@echo off
 setlocal
 rem 准备便携 Python 3.12。纯 cmd，引导只用系统自带 curl/tar，不调用 PowerShell。
 rem 优先复用本机已有的 Python；一个都没有时才下载官方 embeddable 包。
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 if exist "runtime\python.exe" goto run_runtime
 if not defined UMI_PYTHON_SRC goto try_cpython
 if exist "%UMI_PYTHON_SRC%\python.exe" goto copy_src
@@ -93,7 +88,7 @@ BATS['重启并自检.bat'] = r"""@echo off
 setlocal
 rem 优雅停止 → 守护模式拉起 → 等端口 → 核对三通道与写能力。
 rem 面板一停 OEM 服务会把功耗墙压低，所以停完必须立刻拉起；这个脚本把这一步自动化。
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 if exist "runtime\UmiPanel.exe" (
   "runtime\UmiPanel.exe" "tools\restart_panel.py"
 ) else (
@@ -106,7 +101,7 @@ BATS['抓CreatorCenter配置.bat'] = r"""@echo off
 setlocal
 rem 让 Creator Center 当一次示范：你在它里面点，面板把原始 MQTT 报文抄到 logs\。
 rem 不停面板、不新建 broker 连接、不发任何命令。
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 if exist "runtime\UmiPanel.exe" (
   "runtime\UmiPanel.exe" "tools\creator_capture.py"
 ) else (
@@ -116,21 +111,27 @@ pause
 """
 
 BATS['启动面板.bat'] = r"""@echo off
-rem 启动 Umi Control Panel（守护模式：进程崩了会自动拉起，面板里点停止才真的退出）。
-rem 用最小化窗口跑，不用 pythonw——它会被安全软件静默查杀。
-cd /d "%~dp0.."
-if exist "runtime\UmiPanel.exe" (
-  start "UmiPanel" /min "runtime\UmiPanel.exe" "main.py" --supervise
-) else (
-  start "UmiPanel" /min "runtime\python.exe" "main.py" --supervise
-)
-echo 正在启动，面板地址 http://127.0.0.1:8747/
-timeout /t 3 >nul
+setlocal DisableDelayedExpansion
+rem 旧路径兼容入口：bat 自身仍可能闪过 CMD；日常请双击根目录 Umi Control Panel.vbs。
+rem 不转发参数；桌面入口由 WScript 隐藏启动，不使用 pythonw。
+cd /d "%~dp0.." || exit /b 1
+"%SystemRoot%\System32\wscript.exe" "%CD%\Umi Control Panel.vbs"
+exit /b %ERRORLEVEL%
+"""
+
+BATS['开发者命令行.bat'] = r"""@echo off
+setlocal DisableDelayedExpansion
+rem 仅供开发者：在项目根目录打开命令行，不自动运行任何诊断/硬件操作。
+cd /d "%~dp0.." || exit /b 1
+echo 开发者命令行。日常启动请双击根目录 Umi Control Panel.vbs。
+echo 此入口不自动执行诊断、服务或硬件操作。
+"%SystemRoot%\System32\cmd.exe" /d /v:off /k
+exit /b %ERRORLEVEL%
 """
 
 BATS['停止面板.bat'] = r"""@echo off
 rem 优雅停止：还原被改过的电源设置后退出（不是直接杀进程）
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 set "EXE=runtime\python.exe"
 if exist "runtime\UmiPanel.exe" set "EXE=runtime\UmiPanel.exe"
 @@STOP@@
@@ -140,7 +141,7 @@ pause
 
 BATS['面板状态.bat'] = r"""@echo off
 rem 自检：采一次遥测 + 调度决策，把结果打成 JSON（不改动电源设置）
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 if exist "runtime\UmiPanel.exe" (
   "runtime\UmiPanel.exe" "main.py" --one-shot
 ) else (
@@ -152,29 +153,39 @@ pause
 """
 
 BATS['安装开机自启.bat'] = r"""@echo off
-rem 登录自启（HKCU Run，不需要管理员），并启用守护模式自动重启。启动后不自动弹浏览器。
-cd /d "%~dp0.."
+setlocal DisableDelayedExpansion
+rem 兼容入口：由桌面控制器安装隐藏登录自启，不直接注册控制台进程。
+cd /d "%~dp0.." || exit /b 1
 set "EXE=%CD%\runtime\UmiPanel.exe"
 if not exist "%EXE%" set "EXE=%CD%\runtime\python.exe"
-reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v UmiControlPanel /t REG_SZ /d "\"%EXE%\" \"%CD%\main.py\" --supervise --no-browser" /f
-if errorlevel 1 (
-  echo 写入失败：可能被安全软件或注册表 ACL 拦截，请检查权限后重试
+if not exist "%EXE%" (
+  echo 缺少运行时。请先手动运行 scripts\准备运行时.bat，再重试。
+  pause
   exit /b 1
 )
-echo 已安装登录自启：%EXE%
-echo 卸载请运行 卸载开机自启.bat
+"%EXE%" "%CD%\desktop.py" --autostart on
+set "RESULT=%ERRORLEVEL%"
+if not "%RESULT%"=="0" echo 安装自启失败，请查看上方错误信息。
 pause
+exit /b %RESULT%
 """
 
 BATS['卸载开机自启.bat'] = r"""@echo off
-rem 只删本软件自己写入的 Run 值，不动其它软件的自启项
-reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v UmiControlPanel /f
-if errorlevel 1 (
-  echo 没有发现 UmiControlPanel 自启项（可能已经卸载）
-) else (
-  echo 已卸载登录自启
+setlocal DisableDelayedExpansion
+rem 兼容入口：由桌面控制器只删除本软件自己的登录自启项。
+cd /d "%~dp0.." || exit /b 1
+set "EXE=%CD%\runtime\UmiPanel.exe"
+if not exist "%EXE%" set "EXE=%CD%\runtime\python.exe"
+if not exist "%EXE%" (
+  echo 缺少运行时。请先手动运行 scripts\准备运行时.bat，再重试。
+  pause
+  exit /b 1
 )
+"%EXE%" "%CD%\desktop.py" --autostart off
+set "RESULT=%ERRORLEVEL%"
+if not "%RESULT%"=="0" echo 卸载自启失败，请查看上方错误信息。
 pause
+exit /b %RESULT%
 """
 
 BATS['生成EC寄存器表.bat'] = r"""@echo off
@@ -182,12 +193,13 @@ setlocal
 rem 从本机安装的 Creator Center 里导出 EC 寄存器表到 data\ec_map.local.json。
 rem 只读元数据，不加载执行 OEM 代码、不碰任何设备。这份表是 OEM 私有定义，
 rem 按约定只留在本机 data\ 目录（已 gitignore），不进仓库、不再分发。
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 if not exist "data" mkdir "data"
+rem 仅此手动工具转发显式路径参数；GUI 仍只调用固定脚本。
 if exist "runtime\UmiPanel.exe" (
-  "runtime\UmiPanel.exe" "tools\gen_ec_map.py"
+  "runtime\UmiPanel.exe" "tools\gen_ec_map.py" %*
 ) else (
-  "runtime\python.exe" "tools\gen_ec_map.py"
+  "runtime\python.exe" "tools\gen_ec_map.py" %*
 )
 echo.
 echo 生成结果：data\ec_map.local.json
@@ -198,7 +210,7 @@ BATS['EC只读自检.bat'] = r"""@echo off
 setlocal
 rem EC 只读自检：普通权限即可（\\.\ACPIDriver 对普通用户开放读写）。
 rem 只发确认过的 ECREAD，绝不穷举、不写任何寄存器。
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 if not exist "tools\out" mkdir "tools\out"
 if not exist "data\ec_map.local.json" (
   echo 还没有本机寄存器表，先运行 生成EC寄存器表.bat
@@ -220,7 +232,7 @@ BATS['跑分对比.bat'] = r"""@echo off
 setlocal
 rem 四档逐一对比跑分（约 2 分钟）：面板在跑就交给面板执行，否则本机独立跑。
 rem 负载是开源工具的真实工作量：zstd 压缩 + CoreMark + 短任务延迟。结束后自动还原电源设置。
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 if not exist "tools\out" mkdir "tools\out"
 if exist "runtime\UmiPanel.exe" (
   "runtime\UmiPanel.exe" "main.py" --bench compare > "tools\out\bench-compare.txt" 2>&1
@@ -235,7 +247,7 @@ BATS['下载跑分工具.bat'] = r"""@echo off
 setlocal
 rem 取开源跑分负载：zstd（facebook/zstd 官方 Release，BSD-3/GPL-2）放到 tools\bin。
 rem 顺带生成固定种子的基准输入文件，保证每次跑的内容一模一样、档位之间才可比。
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 set "PYTHONIOENCODING=utf-8"
 if not exist "tools\out" mkdir "tools\out"
 "runtime\python.exe" "tools\fetch_bench_tools.py" > "tools\out\fetch-bench-tools.txt" 2>&1
@@ -247,7 +259,7 @@ BATS['编译CoreMark.bat'] = r"""@echo off
 setlocal
 rem 从 EEMBC 官方仓库取 CoreMark 源码，用本机编译器编出 tools\bin\coremark.exe。
 rem 不用网上的现成 exe：跑分工具来路不明，分数就没有意义。
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 set "PYTHONIOENCODING=utf-8"
 if not exist "tools\out" mkdir "tools\out"
 "runtime\python.exe" "tools\build_coremark.py" > "tools\out\build-coremark.txt" 2>&1
@@ -270,7 +282,7 @@ setlocal
 rem 恢复 OEM 的 GCUBridge 服务（它是硬件档位 MQTT 命令链路的宿主）。
 rem 之前 OpenRevo 的 takeover 把它停用了（Start=4），所以实体按键链路的后台是断的。
 rem 本脚本只做两件事：设为自动启动 + 启动服务；不装任何东西，不动 Creator Center 的界面。
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 net session >nul 2>&1
 if errorlevel 1 (
   echo 需要管理员权限，正在提权重启本脚本...
@@ -296,7 +308,7 @@ pause
 
 BATS['停用造物者档控制.bat'] = r"""@echo off
 setlocal
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 net session >nul 2>&1
 if errorlevel 1 (
   echo 需要管理员权限，正在提权重启本脚本...
@@ -321,7 +333,7 @@ BATS['一键体检.bat'] = r"""@echo off
 setlocal
 rem 一次性检查：开机自启、便携运行时、面板服务、温度/频率/GPU 采集、EC 通道、寄存器表。
 rem 只读，不改任何设置。结果同时存到 tools\out\health.txt。
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 if not exist "tools\out" mkdir "tools\out"
 if exist "runtime\UmiPanel.exe" (
   "runtime\UmiPanel.exe" "main.py" --health
@@ -336,7 +348,7 @@ setlocal
 rem 只读监听 EC 语义寄存器 90 秒：期间按一次实体「造物者模式」键，
 rem 或在 Creator Center 里切一次模式，屏幕上出现变化的那个寄存器就是档位落点。
 rem 不写任何东西，普通权限即可。结果同时存到 tools\out\ec-watch.txt。
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 if not exist "tools\out" mkdir "tools\out"
 if not exist "data\ec_map.local.json" (
   echo 还没有本机寄存器表，先运行 生成EC寄存器表.bat
@@ -356,7 +368,7 @@ BATS['观察EC全表.bat'] = r"""@echo off
 setlocal
 rem 破 Creator Center 各功能落在哪个 EC 寄存器上：全表只读观察 240 秒。
 rem 必须先停面板——面板自己会写风扇字节，那些改动会混进报告里，分不清是谁干的。
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 if not exist "tools\out" mkdir "tools\out"
 set "EXE=runtime\python.exe"
 if exist "runtime\UmiPanel.exe" set "EXE=runtime\UmiPanel.exe"
@@ -391,7 +403,7 @@ rem 听 GCUBridge 自己说话：Creator Center 每个开关最终都发一条 M
 rem 报文体里就写着 Action 名和参数 —— 比拿 EC 全表差分去猜寄存器可靠得多。
 rem 两个观察器一起跑：MQTT 只订阅不发送，EC 只读不写。都必须先停面板，
 rem 否则面板和观察器抢同一个 broker 身份，会被 GCUBridge 踢线。
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 if not exist "tools\out" mkdir "tools\out"
 set "EXE=runtime\python.exe"
 if exist "runtime\UmiPanel.exe" set "EXE=runtime\UmiPanel.exe"
@@ -432,7 +444,7 @@ setlocal
 rem 实测「造物者模式」按键三态（自动/强冷/自定义）在满载下到底差多少。
 rem 会写风扇模式字节（写完原样还原，带 97°C 保险），所以要先停面板：
 rem 两边的自动跟随会互相抢方向盘，测出来的数不作数。全程约 6 分钟，风扇会很吵。
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 set "EXE=runtime\python.exe"
 if exist "runtime\UmiPanel.exe" set "EXE=runtime\UmiPanel.exe"
 echo 正在停止面板服务…
@@ -448,17 +460,188 @@ pause
 """
 
 
+# WSH 按 BOM 识别中文；不依赖系统 ANSI 代码页。
+VBS = {
+    'Umi Control Panel.vbs': r'''Option Explicit
+' 由 scripts/make_bats.py 生成；日常入口不使用 pythonw 或控制台包装。
+Dim background, shell, fso, root, exe, entry, entryPath, command
+Dim setupRelative, setupPath, cmdExe, answer, result
+background = False
+' 拒绝未知或多余参数，不转发用户输入。
+If WScript.Arguments.Count > 1 Then WScript.Quit 2
+If WScript.Arguments.Count = 1 Then
+    If LCase(WScript.Arguments(0)) <> "/background" Then WScript.Quit 2
+    background = True
+End If
+
+On Error Resume Next
+Set shell = CreateObject("WScript.Shell")
+CheckError "无法使用 Windows 脚本服务，请检查系统是否允许运行 VBS 脚本。"
+Set fso = CreateObject("Scripting.FileSystemObject")
+CheckError "无法访问文件，请检查文件夹权限。"
+root = fso.GetParentFolderName(WScript.ScriptFullName)
+CheckError "无法找到面板文件夹，请将软件完整解压后再双击此入口。"
+shell.CurrentDirectory = root
+CheckError "无法进入面板文件夹，请检查路径和访问权限。"
+exe = FindRuntime()
+If Len(exe) = 0 Then
+    ' 登录自启不弹初始化提示，也不下载。
+    If background Then WScript.Quit 1
+    setupRelative = "scripts\准备运行时.bat"
+    setupPath = fso.BuildPath(root, setupRelative)
+    If Not fso.FileExists(setupPath) Then Fail "缺少初始化脚本，请完整解压软件后重试：" & vbCrLf & setupPath
+    CheckError "无法找到初始化脚本，请检查文件夹权限。"
+    answer = MsgBox("首次使用需要准备 Python 运行环境。" & vbCrLf & vbCrLf & _
+        "是否现在打开可见的命令窗口进行初始化？" & vbCrLf & setupPath & _
+        vbCrLf & vbCrLf & "将优先使用本机 Python；没有可用版本时可能从 python.org 下载，不请求管理员权限。" & _
+        vbCrLf & "请等待窗口提示完成，按任意键关闭后会自动打开面板。" & _
+        vbCrLf & "选择“否”则不作任何更改，稍后可再次双击此入口。", _
+        vbYesNo + vbQuestion + vbDefaultButton2, "Umi Control Panel - 首次使用")
+    CheckError "无法显示初始化提示，请手动运行 scripts\准备运行时.bat。"
+    If answer <> vbYes Then WScript.Quit 1
+    cmdExe = fso.BuildPath(fso.GetSpecialFolder(0), "System32\cmd.exe")
+    CheckError "无法找到 Windows 命令窗口，请检查系统文件。"
+    ' CMD 只接收固定相对文件名，不拼入根目录或用户参数。
+    result = shell.Run(Quote(cmdExe) & " /d /v:off /c " & Quote(Quote(setupRelative)), 1, True)
+    CheckError "无法打开初始化窗口，请手动运行 scripts\准备运行时.bat 并查看提示。"
+    exe = FindRuntime()
+    If result <> 0 Or Len(exe) = 0 Then
+        Fail "初始化未完成，暂时无法打开面板。退出码：" & result & vbCrLf & _
+            "请手动双击以下脚本，查看窗口中的错误提示后重试：" & vbCrLf & setupPath
+    End If
+End If
+
+If background Then
+    entry = "main.py"
+Else
+    entry = "desktop.py"
+End If
+entryPath = fso.BuildPath(root, entry)
+CheckError "无法找到启动脚本，请检查软件是否完整解压。"
+If Not fso.FileExists(entryPath) Then Fail "缺少启动脚本，请完整解压软件后重试：" & vbCrLf & entryPath
+CheckError "无法检查启动脚本，请检查文件夹权限。"
+' Run 会展开路径里的 %变量%；CurrentDirectory 已定位到项目，启动只使用固定相对路径。
+command = Quote(exe) & " " & Quote(entry)
+If background Then command = command & " --supervise --no-browser"
+' 隐藏控制台；进程创建后的界面错误由 desktop.py 处理。
+result = shell.Run(command, 0, False)
+CheckError "无法启动面板，请检查运行环境和文件夹权限，必要时重新运行 scripts\准备运行时.bat。"
+WScript.Quit 0
+
+Function Quote(value)
+    Quote = Chr(34) & value & Chr(34)
+End Function
+
+Function FindRuntime()
+    On Error Resume Next
+    Dim candidate, exists
+    candidate = fso.BuildPath(root, "runtime\UmiPanel.exe")
+    exists = fso.FileExists(candidate)
+    CheckError "无法检查运行环境 runtime\UmiPanel.exe，请检查文件夹权限。"
+    FindRuntime = ""
+    If exists Then
+        FindRuntime = "runtime\UmiPanel.exe"
+        Exit Function
+    End If
+    candidate = fso.BuildPath(root, "runtime\python.exe")
+    exists = fso.FileExists(candidate)
+    CheckError "无法检查运行环境 runtime\python.exe，请检查文件夹权限。"
+    If exists Then FindRuntime = "runtime\python.exe"
+End Function
+
+Sub CheckError(context)
+    Dim detail
+    If Err.Number <> 0 Then
+        detail = Err.Description & " (0x" & Hex(Err.Number) & ")"
+        Err.Clear
+        Fail context & vbCrLf & detail
+    End If
+End Sub
+
+Sub Fail(message)
+    On Error Resume Next
+    If Not background Then MsgBox message, vbOKOnly + vbCritical, "Umi Control Panel - 启动失败"
+    WScript.Quit 1
+End Sub
+''',
+    'scripts/desktop_shortcut.vbs': r'''Option Explicit
+' 由 make_bats.py 生成；手动运行时仅在软件根目录创建快捷方式。
+' 不启动面板、不改登录设置、不写入用户桌面。
+Dim shell, fso, root, entry, link, linkPath, windowsDir
+If WScript.Arguments.Count <> 0 Then WScript.Quit 2
+On Error Resume Next
+Set shell = CreateObject("WScript.Shell")
+CheckError "无法使用 Windows 脚本服务，请检查系统是否允许运行 VBS 脚本。"
+Set fso = CreateObject("Scripting.FileSystemObject")
+CheckError "无法访问文件，请检查文件夹权限。"
+root = fso.GetParentFolderName(fso.GetParentFolderName(WScript.ScriptFullName))
+CheckError "无法找到面板文件夹，请将软件完整解压后重试。"
+shell.CurrentDirectory = root
+CheckError "无法进入面板文件夹，请检查路径和访问权限。"
+entry = fso.BuildPath(root, "Umi Control Panel.vbs")
+If Not fso.FileExists(entry) Then Fail "缺少面板入口，请完整解压软件后重试：" & vbCrLf & entry
+CheckError "无法检查面板入口，请检查文件夹权限。"
+windowsDir = fso.GetSpecialFolder(0)
+CheckError "无法找到 Windows 文件夹，请检查系统文件。"
+linkPath = fso.BuildPath(root, "Umi Control Panel.lnk")
+Set link = shell.CreateShortcut(linkPath)
+CheckError "无法在软件文件夹中创建快捷方式，请检查写入权限。"
+link.TargetPath = fso.BuildPath(windowsDir, "System32\wscript.exe")
+link.Arguments = Quote(entry)
+link.WorkingDirectory = root
+link.IconLocation = Quote(fso.BuildPath(root, "app\web\umi.ico")) & ",0"
+link.Description = "Umi Control Panel - 打开面板"
+link.WindowStyle = 1
+CheckError "无法设置快捷方式，请检查软件文件是否完整。"
+link.Save
+CheckError "无法保存快捷方式，请检查软件文件夹的写入权限。"
+WScript.Quit 0
+
+Function Quote(value)
+    Quote = Chr(34) & value & Chr(34)
+End Function
+
+Sub CheckError(context)
+    Dim detail
+    If Err.Number <> 0 Then
+        detail = Err.Description & " (0x" & Hex(Err.Number) & ")"
+        Err.Clear
+        Fail context & vbCrLf & detail
+    End If
+End Sub
+
+Sub Fail(message)
+    On Error Resume Next
+    MsgBox message, vbOKOnly + vbCritical, "Umi Control Panel - 快捷方式创建失败"
+    WScript.Quit 1
+End Sub
+''',
+}
+
+
+def render_bat(body):
+    body = body.replace('@@STOP@@', STOP_PANEL.rstrip('\n'))
+    if '@@' in body:
+        raise ValueError('bat 里还有没替换的占位符')
+    return body.replace('\r\n', '\n').replace('\n', '\r\n').encode('gbk')
+
+
+def render_vbs(body):
+    return b'\xff\xfe' + body.replace('\r\n', '\n').replace('\n', '\r\n').encode('utf-16-le')
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     for name, body in BATS.items():
-        body = body.replace('@@STOP@@', STOP_PANEL.rstrip('\n'))
-        if '@@' in body:
-            raise SystemExit('%s 里还有没替换的占位符' % name)
         path = os.path.join(OUT, name)
-        with open(path, 'w', encoding='gbk', newline='\r\n') as f:
-            f.write(body)
-        print('已生成 %s (%d 字节)' % (name, os.path.getsize(path)))
-    print('共 %d 个，编码 GBK / 换行 CRLF' % len(BATS))
+        with open(path, 'wb') as f:
+            f.write(render_bat(body))
+        print('已生成兼容/开发者脚本 %s (%d 字节)' % (name, os.path.getsize(path)))
+    for name, body in VBS.items():
+        with open(os.path.join(ROOT, name), 'wb') as f:
+            f.write(render_vbs(body))
+        print('已生成桌面脚本 %s (UTF-16 LE BOM / CRLF；未执行)' % name)
+    print('共 %d 个 bat，编码 GBK / 换行 CRLF；日常请用根目录 Umi Control Panel.vbs' % len(BATS))
 
 
 if __name__ == '__main__':

@@ -38,13 +38,13 @@ from app.act.channels.mqtt_gcu import MqttChannel        # noqa: E402
 from app.bench import Bench                              # noqa: E402
 from app.config import Config                            # noqa: E402
 from app.logx import Log                                 # noqa: E402
+from app.paths import discover_panel_port                # noqa: E402
 from app.sense.clock import ClockSense                   # noqa: E402
 from app.sense.gpu import GpuSense                       # noqa: E402
 from app.sense.system import power_status                # noqa: E402
 from app.sense.thermal import Thermal                    # noqa: E402
 
 REPORT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'out', 'fan-table-test.txt')
-PANEL_ADDR = ('127.0.0.1', 8747)
 TEMP_GUARD_C = 85.0
 GAP_S = 0.05            # 每字节之间的节流：EC 是慢设备，狂写会丢字节
 OBSERVE_S = 45.0        # EC 平滑 30~40 秒，短了量不到
@@ -79,11 +79,12 @@ class Report:
         print('\n报告：%s' % REPORT)
 
 
-def panel_alive():
+def panel_alive(port=None):
+    port = discover_panel_port(port)
     try:
-        socket.create_connection(PANEL_ADDR, timeout=1.0).close()
+        socket.create_connection(('127.0.0.1', port), timeout=1.0).close()
         return True
-    except OSError:
+    except ConnectionRefusedError:
         return False
 
 
@@ -294,10 +295,18 @@ def main(argv):
             return 2
         if not write:
             rep.out('[提示] 演练模式不会写任何东西。')
-        if panel_alive():
-            rep.out('[停止] 面板还在 8747 上跑。两个进程同时写同一张表没有意义，先停：')
-            rep.out('        curl -s -X POST -H "Origin: http://127.0.0.1:8747" '
-                    'http://127.0.0.1:8747/api/shutdown')
+        try:
+            port = discover_panel_port()
+            alive = panel_alive(port)
+        except (OSError, ValueError) as exc:
+            rep.out('[停止] 无法确认面板已停，拒绝继续：%s' % exc)
+            return 3
+        if alive:
+            rep.out('[停止] 面板还在端口 %d 上跑，请先手动停止面板，避免并发操作。' % port)
+            return 3
+        cfg, err, _bad = Config.load()
+        if err:
+            rep.out('[停止] 配置读取失败，拒绝继续：%s' % err)
             return 3
         ps = power_status()
         if not ps.get('on_ac'):
@@ -305,7 +314,6 @@ def main(argv):
                     '免得电池侧的散热策略和这次实验混在一起。' % ps.get('battery_pct'))
             return 3
 
-        cfg, _e, _b = Config.load()
         log = Log('fan-table-test')
         ec, thermal = EcChannel(cfg, log), Thermal()
         res['ec'], res['thermal'] = ec, thermal

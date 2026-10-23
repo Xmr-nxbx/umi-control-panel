@@ -379,7 +379,8 @@ def _supervise(pass_through):
     import subprocess
     ensure_data_dir()
     log = Log('umi-supervisor')
-    root = os.path.dirname(os.path.abspath(sys.argv[0]))
+    from app.paths import ROOT_DIR
+    root = ROOT_DIR
     child_args = [sys.executable, os.path.join(root, 'main.py')] + list(pass_through)
     window = collections.deque(maxlen=8)
     restarts = 0
@@ -496,6 +497,8 @@ def main(argv=None):
             passthrough.append('--no-tray')
         if args.no_browser:
             passthrough.append('--no-browser')
+        if args.port is not None:
+            passthrough.extend(['--port', str(args.port)])
         passthrough.extend(extra)
         return _supervise(passthrough)
 
@@ -585,8 +588,17 @@ def main(argv=None):
             def set_intent(intent):
                 daemon.set_intent(intent)
 
+            def open_desktop():
+                import subprocess
+                from app.paths import ROOT_DIR
+                subprocess.Popen([sys.executable, os.path.join(ROOT_DIR, 'desktop.py')],
+                                 cwd=ROOT_DIR, creationflags=0x08000000,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+
             tray = Tray(cfg, log, open_panel, set_intent,
                         lambda: quit_evt.set(), lambda m: daemon.set_mode_now(m),
+                        on_desktop=open_desktop, on_osd=daemon.set_osd_enabled,
                         on_fan=lambda f: daemon.set_fan_mode(f),
                         # 会话解锁事件挂在这个消息窗口上：--no-tray 时没有这个源，
                         # 亮屏缓冲会自动退回「空闲突降」推断（仍然可用，只是会晚一两秒）
@@ -601,14 +613,13 @@ def main(argv=None):
 
     # 屏幕提示：实体键、网页/托盘手动操作时弹一下；自适应自己换档不弹（打扰）。
     # 和托盘是两码事，--no-tray 时照样要弹。
-    if cfg.get('tray', 'osd', default=True):
-        try:
-            from app.tray.osd import Osd
+    daemon.hw.ec.on_key = daemon.on_fan_key
+    try:
+        from app.tray.osd import Osd
 
-            daemon.osd = Osd(log)
-            daemon.hw.ec.on_key = daemon.on_fan_key
-        except Exception as exc:                           # noqa: BLE001
-            log.error('屏幕提示启动失败（按键仍生效，只是不弹字）：%r' % (exc,))
+        daemon.osd = Osd(log)
+    except Exception as exc:                           # noqa: BLE001
+        log.error('屏幕提示启动失败（按键仍生效，只是不弹字）：%r' % (exc,))
 
     if cfg.get('server', 'open_browser_on_start', default=True) and not args.no_browser:
         webbrowser.open(url)
@@ -637,6 +648,8 @@ def main(argv=None):
             pass
     if state['tray']:
         state['tray'].remove()
+    if daemon.osd:
+        daemon.osd.close()
     daemon.stop()
     srv.stop()
     inst.release()
@@ -672,7 +685,7 @@ def _sync_tray_once(daemon, tray, last):
         return last
     rpm = ('%s RPM' % hw['fan_rpm']) if hw.get('fan_rpm') else '无EC'
     mhz = (' · %sMHz' % sensor['cpu_mhz']) if sensor.get('cpu_mhz') else ''
-    tray.update_state(st.get('tier') or 'bal',
+    tray.update_state(st.get('tier') or 'unknown',
                       '%s档 · %s · %s%s' % (st.get('tier_label') or '?',
                                             st.get('intent') or 'auto', rpm, mhz),
                       intent=st.get('intent'), fan=fan)

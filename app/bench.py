@@ -14,6 +14,7 @@ import os
 import random
 import re
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -132,7 +133,7 @@ def build_coremark(log=None, timeout=900.0):
         log.info('[跑分] 开始编译 CoreMark（EEMBC 官方源码，约 1 分钟）')
     try:
         proc = subprocess.run(
-            [os.path.join(ROOT_DIR, 'runtime', 'python.exe'), COREMARK_BUILD],
+            [sys.executable, COREMARK_BUILD],
             capture_output=True, text=True, encoding='utf-8', errors='replace',
             creationflags=NO_WINDOW, timeout=timeout,
             env=dict(os.environ, PYTHONIOENCODING='utf-8'))
