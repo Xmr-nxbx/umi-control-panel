@@ -7,7 +7,7 @@
     runtime\\python.exe tools\\selfcheck.py --port 8748
 
 只读，可随时运行：全程只用 GET（本仓库所有会改状态的动作都挂在 POST 上），
-数据全部走面板的 HTTP 接口，不读 data/ 下任何文件，配置内容一个字不碰。
+体检数据全部走 HTTP；端口按 --port → data/port → 配置默认只读发现，不加载凭据。
 
 核心判据（notes/hardware-channels.md 6.11 第二十节的教训）：「面板读数翻得慢」
 和「硬件真的生效慢」是两件事——看 OEM 状态快照的时间戳（state.oem.ts）：
@@ -16,10 +16,15 @@
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.error
 import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app.paths import discover_panel_port  # noqa: E402
 
 
 def get(port, path, timeout=8):
@@ -180,8 +185,13 @@ def _is_num(v):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='面板只读体检（全程 GET，可随时运行）')
-    parser.add_argument('--port', type=int, default=8747, help='面板端口（默认 8747）')
+    parser.add_argument('--port', type=int, help='面板端口（优先于 data/port 和配置）')
     args = parser.parse_args(argv)
+    try:
+        args.port = discover_panel_port(args.port)
+    except (OSError, ValueError) as exc:
+        print('无法确定面板端口：%s' % exc)
+        return 2
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except (AttributeError, ValueError):

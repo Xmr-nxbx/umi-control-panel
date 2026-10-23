@@ -26,6 +26,7 @@ sys.path.insert(0, ROOT)
 from app.act.channels.mqtt_gcu import MqttChannel   # noqa: E402
 from app.config import Config                       # noqa: E402
 from app.logx import Log                            # noqa: E402
+from app.paths import discover_panel_port           # noqa: E402
 
 
 def _wait_alive(ch, timeout=6.0):
@@ -37,7 +38,7 @@ def _wait_alive(ch, timeout=6.0):
     return False
 
 
-def _ec_curve(base='http://127.0.0.1:8747'):
+def _ec_curve(base):
     try:
         with urllib.request.urlopen(base + '/api/fan-curve', timeout=8) as resp:
             return json.loads(resp.read().decode('utf-8'))
@@ -63,11 +64,20 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description='只读读取 OEM 风扇曲线（Fan/Table）')
     ap.add_argument('--no-ec', action='store_true', help='不和面板的 EC 直读对照')
     ap.add_argument('--json', help='把原始结果写到这个文件')
+    ap.add_argument('--port', type=int, help='面板端口（优先于 data/port 和配置）')
     args = ap.parse_args(argv)
 
     cfg, err, broken = Config.load()
     if err:
         print('配置读取有问题：%s%s' % (err, ('（已备份到 %s）' % broken) if broken else ''))
+        return 2
+    base = None
+    if not args.no_ec:
+        try:
+            base = 'http://127.0.0.1:%d' % discover_panel_port(args.port, cfg)
+        except (OSError, ValueError) as exc:
+            print('无法确定面板端口：%s' % exc)
+            return 2
     log = Log('fan-curve-mqtt-probe')
     ch = MqttChannel(cfg, log)
     if not (ch.client_id and ch.username):
@@ -91,7 +101,7 @@ def main(argv=None):
         tables = out.get('tables') or {}
         ec = {'ok': False, 'tables': {}}
         if not args.no_ec:
-            ec = _ec_curve()
+            ec = _ec_curve(base)
             if not ec.get('ok'):
                 print('（EC 对照跳过：%s）' % ec.get('reason'))
         for which in ('CPU', 'GPU'):

@@ -3,7 +3,7 @@ setlocal
 rem 恢复 OEM 的 GCUBridge 服务（它是硬件档位 MQTT 命令链路的宿主）。
 rem 之前 OpenRevo 的 takeover 把它停用了（Start=4），所以实体按键链路的后台是断的。
 rem 本脚本只做两件事：设为自动启动 + 启动服务；不装任何东西，不动 Creator Center 的界面。
-cd /d "%~dp0.."
+cd /d "%~dp0.." || exit /b 1
 net session >nul 2>&1
 if errorlevel 1 (
   echo 需要管理员权限，正在提权重启本脚本...

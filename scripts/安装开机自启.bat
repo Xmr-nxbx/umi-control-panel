@@ -1,13 +1,16 @@
 @echo off
-rem 登录自启（HKCU Run，不需要管理员），并启用守护模式自动重启。启动后不自动弹浏览器。
-cd /d "%~dp0.."
+setlocal DisableDelayedExpansion
+rem 兼容入口：由桌面控制器安装隐藏登录自启，不直接注册控制台进程。
+cd /d "%~dp0.." || exit /b 1
 set "EXE=%CD%\runtime\UmiPanel.exe"
 if not exist "%EXE%" set "EXE=%CD%\runtime\python.exe"
-reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v UmiControlPanel /t REG_SZ /d "\"%EXE%\" \"%CD%\main.py\" --supervise --no-browser" /f
-if errorlevel 1 (
-  echo 写入失败：可能被安全软件或注册表 ACL 拦截，请检查权限后重试
+if not exist "%EXE%" (
+  echo 缺少运行时。请先手动运行 scripts\准备运行时.bat，再重试。
+  pause
   exit /b 1
 )
-echo 已安装登录自启：%EXE%
-echo 卸载请运行 卸载开机自启.bat
+"%EXE%" "%CD%\desktop.py" --autostart on
+set "RESULT=%ERRORLEVEL%"
+if not "%RESULT%"=="0" echo 安装自启失败，请查看上方错误信息。
 pause
+exit /b %RESULT%

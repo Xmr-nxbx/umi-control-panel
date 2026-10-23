@@ -10,6 +10,7 @@ from app.bench import (Bench, best_of_each_tier, build_coremark, coremark_missin
                        power_verdict, save_record, set_baseline)
 from app.config import SCHED_PROFILES, SCHEME_LABELS, SCHEMES
 from app.history import History
+from app.paths import install_fingerprint
 from app.policy.scheduler import INTENT_NAMES, TIER_LABELS, Scheduler
 from app.sense.clock import ClockSense
 from app.sense.gpu import GpuSense
@@ -61,9 +62,10 @@ class Daemon:
         self.bench = {'running': False, 'mode': None, 'tier': None, 'label': None,
                       'step': '', 'pct': 0, 'results': [], 'error': None,
                       'started_at': None, 'finished_at': None}
-        # 屏幕提示由 cli 挂进来（--no-osd / 配置关掉时保持 None）。
+        # cli 挂入可延迟初始化的 OSD；初始化失败或桌面环境不可用时仍为 None。
         # 只有「人动手」的路径会调 _osd：自适应自己换档弹提示是打扰，不是反馈。
         self.osd = None
+        self._osd_lock = threading.RLock()
 
     # ---------- 生命周期 ----------
     def start(self):
@@ -310,7 +312,9 @@ class Daemon:
             'bench': {k: self.bench.get(k) for k in
                       ('running', 'mode', 'tier', 'label', 'step', 'pct', 'error')},
             'meta': {'version': __version__,
+                     'install_id': install_fingerprint(),
                      'fan_curve_expected_name': True,
+                     'desktop_preferences': True,
                      'cap_labels': CAP_LABELS, 'mode_labels': MODE_LABELS,
                      'tier_labels': TIER_LABELS,
                      'battery_mode_labels': BATTERY_MODE_LABELS,
@@ -322,7 +326,11 @@ class Daemon:
             self.history.record(self._state, tier, decision.get('throttle'), now)
 
     def state(self):
-        return getattr(self, '_state', {})
+        # 偏好不等下一拍；不要把新值塞进已经交给其他调用者的快照。
+        state = dict(getattr(self, '_state', {}))
+        state['meta'] = dict(state.get('meta') or {}, desktop_preferences=True)
+        state['desktop'] = self.desktop_preferences()
+        return state
 
     def history_view(self, minutes=None):
         return self.history.view(minutes) if self.history else {'samples': [], 'marks': []}
@@ -331,15 +339,60 @@ class Daemon:
         from app.sense.system import is_admin
         return is_admin()
 
+    # ---------- 桌面偏好（不接触硬件与调度） ----------
+    def desktop_preferences(self):
+        with self._osd_lock:
+            return {'osd': bool(self.cfg.get('tray', 'osd', default=True)),
+                    'available': self.osd is not None}
+
+    def set_osd_enabled(self, enabled):
+        if type(enabled) is not bool:
+            return False, 'osd 必须是布尔值'
+        with self._osd_lock:
+            # Always OSD -> Config. Release Config before any UI/action callback;
+            # intent/profile saves also use it and must not commit a pending rollback.
+            with self.cfg.lock:
+                old = self.cfg.get('tray', 'osd', default=True)
+                self.cfg.set('tray', 'osd', enabled)
+                try:
+                    self.cfg.save()
+                except OSError as exc:
+                    self.cfg.set('tray', 'osd', old)
+                    self.log.warn('[OSD] 保存偏好失败：%r' % (exc,))
+                    return False, '保存 Umi 屏幕提示设置失败，已保留原设置'
+            if not enabled and self.osd is not None:
+                try:
+                    self.osd.hide()
+                except Exception as exc:                   # noqa: BLE001
+                    self.log.warn('[OSD] 隐藏提示失败（忽略）：%r' % (exc,))
+                    return True, '已保存关闭设置；当前提示未能立即隐藏，后续不再显示'
+            return True, '已保存：Umi 屏幕提示%s' % ('开启' if enabled else '关闭')
+
+    def preview_osd(self):
+        with self._osd_lock:
+            if not self.desktop_preferences()['osd']:
+                return False, '请先开启 Umi 屏幕提示'
+            if self.osd is None:
+                return False, 'OSD 初始化失败或桌面环境不可用，暂不能预览'
+            try:
+                shown = self.osd.show('性能模式 · 预览', '仅预览样式，不会切换性能或写入硬件', tier='perf')
+                if shown is False:
+                    return False, 'OSD 未能显示预览，请检查桌面会话或稍后重试'
+            except Exception as exc:                       # noqa: BLE001
+                self.log.warn('[OSD] 预览失败：%r' % (exc,))
+                return False, 'OSD 预览失败，请检查桌面会话或稍后重试'
+            return True, '已请求预览；仅预览样式，不会切换性能或写入硬件'
+
     # ---------- 面板动作 ----------
     def _osd(self, title, sub=''):
-        """屏幕提示。没挂 OSD（配置关掉/画不出来）时静默跳过——提示不是功能本体。"""
-        if self.osd is None:
-            return
-        try:
-            self.osd.show(title, sub)
-        except Exception as exc:                           # noqa: BLE001
-            self.log.warn('[OSD] 弹提示失败（忽略）：%r' % (exc,))
+        """每次读取当前偏好；开关只管提示，不是实体键或硬件动作的门禁。"""
+        with self._osd_lock:
+            if not self.desktop_preferences()['osd'] or self.osd is None:
+                return
+            try:
+                self.osd.show(title, sub)
+            except Exception as exc:                       # noqa: BLE001
+                self.log.warn('[OSD] 弹提示失败（忽略）：%r' % (exc,))
 
     def on_fan_key(self, old, new):
         """实体「造物者模式」键：用户眼里它就是模式键，那就让它真的切模式。

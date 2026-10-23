@@ -32,7 +32,10 @@ class Log:
             self._buf.append(line)
             if len(self._buf) > _MAX_LINES:
                 del self._buf[:-_MAX_LINES]
-            print(line, flush=True)
+            try:
+                print(line, flush=True)
+            except (OSError, ValueError):
+                pass
             if self._fh:
                 try:
                     self._fh.write(line + '\n')

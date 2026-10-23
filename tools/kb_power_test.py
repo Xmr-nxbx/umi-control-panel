@@ -37,20 +37,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.act.channels.mqtt_gcu import MqttClient          # noqa: E402
 from app.config import Config                             # noqa: E402
+from app.paths import discover_panel_port                 # noqa: E402
 
 TOPIC_CTRL = 'Keyboard/Ctrl'
 TOPIC_STATUS = 'Keyboard/Status'
-PANEL_PORT = 8747
 WAIT_STATUS_S = 20.0
 ACTIONS = ('KB_POWER_ON', 'KB_POWER_OFF')
 
 
-def panel_alive():
-    """面板在跑就先拦下来：它和这个脚本用同一个 broker 身份，会互相踢下线。"""
+def panel_alive(port=None):
+    """面板在跑就先拦下来；只有明确拒绝连接才视为未运行。"""
+    port = discover_panel_port(port)
     try:
-        with socket.create_connection(('127.0.0.1', PANEL_PORT), timeout=0.4):
+        with socket.create_connection(('127.0.0.1', port), timeout=0.4):
             return True
-    except OSError:
+    except ConnectionRefusedError:
         return False
 
 
@@ -119,12 +120,21 @@ def main(argv):
     keep = '--keep' in argv
     seconds = next((float(a) for a in argv if a.replace('.', '').isdigit()), 8.0)
 
-    if panel_alive():
-        print('面板还在跑（端口 %d），它和脚本抢同一个 broker 身份会被互踢。' % PANEL_PORT)
-        print('先停面板：scripts\\停止面板.bat  或  runtime\\python.exe main.py --stop')
+    try:
+        port = discover_panel_port()
+        alive = panel_alive(port)
+    except (OSError, ValueError) as exc:
+        print('无法确认面板已停，拒绝继续：%s' % exc)
+        return 2
+    if alive:
+        print('面板还在跑（端口 %d），它和脚本抢同一个 broker 身份会被互踢。' % port)
+        print('请先手动停止面板，再运行本工具。')
         return 2
 
-    cfg, _err, _bad = Config.load()
+    cfg, err, _bad = Config.load()
+    if err:
+        print('配置读取失败，拒绝继续：%s' % err)
+        return 2
     m = cfg.get('hardware', 'mqtt', default={}) or {}
     host, port = m.get('host', '127.0.0.1'), int(m.get('port', 13688))
     if not (m.get('client_id') and m.get('username')):

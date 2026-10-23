@@ -6,6 +6,7 @@
 import json
 import os
 import tempfile
+import threading
 
 from app.paths import data_path
 
@@ -232,6 +233,9 @@ def _apply_local_identity(cfg):
 
 class Config:
     def __init__(self, data=None, path=None):
+        # Shared by every mutation/save path; callers may group rollback transactions.
+        # If also taking an OSD lock, always acquire OSD -> Config, never the reverse.
+        self.lock = threading.RLock()
         self.data = _deep_merge(json.loads(json.dumps(DEFAULTS)), data or {})
         self.raw_tier_tuning = (data or {}).get('tier_tuning') if isinstance(data, dict) else None
         self.path = path
@@ -249,35 +253,40 @@ class Config:
         return node
 
     def set(self, *path_and_value):
-        *keys, value = path_and_value
-        node = self.data
-        for k in keys[:-1]:
-            node = node.setdefault(k, {})
-        node[keys[-1]] = value
+        with self.lock:
+            *keys, value = path_and_value
+            node = self.data
+            for k in keys[:-1]:
+                node = node.setdefault(k, {})
+            node[keys[-1]] = value
 
     def set_profile(self, name):
         """换调度性格。写进 sched_base（用户那份）再重算叠层，
         否则 data['scheduler'] 里会留着上一任性格的值。"""
-        if self.sched_base is None:
-            self.sched_base = dict(self.data.get('scheduler') or {})
-        self.sched_base['profile'] = name
-        apply_sched_profile(self)     # 幂等：每次都是从 sched_base 重算，不累加
+        with self.lock:
+            if self.sched_base is None:
+                self.sched_base = dict(self.data.get('scheduler') or {})
+            self.sched_base['profile'] = name
+            apply_sched_profile(self)     # 幂等：每次都是从 sched_base 重算，不累加
 
     def __getitem__(self, k):
         return self.data[k]
 
     # --- 持久化 ---
     def save(self):
-        path = self.path or data_path(CONFIG_NAME)
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix='.tmp')
-        try:
-            with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                json.dump(self._for_disk(), f, ensure_ascii=False, indent=2)
-            os.replace(tmp, path)
-        finally:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        self.path = path
+        # Serialize through replace under ONE lock: an older snapshot must never
+        # replace a newer save, or persist a value that another transaction rolls back.
+        with self.lock:
+            path = self.path or data_path(CONFIG_NAME)
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix='.tmp')
+            try:
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    json.dump(self._for_disk(), f, ensure_ascii=False, indent=2)
+                os.replace(tmp, path)
+            finally:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            self.path = path
 
     def _for_disk(self):
         """落盘的是用户自己那份 scheduler，不含性格叠层 ——

@@ -12,10 +12,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from app.cli import main  # noqa: E402
-
 if __name__ == '__main__':
     try:
+        from app.cli import main
         raise SystemExit(main())
     except SystemExit:
         raise
@@ -28,10 +27,11 @@ if __name__ == '__main__':
         path = os.path.join(log_dir, 'fatal-%s.log' % datetime.now().strftime('%Y%m%d-%H%M%S'))
         with open(path, 'w', encoding='utf-8') as f:
             f.write(traceback.format_exc())
-        print('[致命错误] 详情见 %s' % path)
-        traceback.print_exc()
         try:
-            input('按回车退出…')
-        except (EOFError, OSError):
+            print('[致命错误] 详情见 %s' % path)
+            traceback.print_exc()
+            if sys.stdin is not None and sys.stdin.isatty():
+                input('按回车退出…')
+        except (EOFError, OSError, ValueError):
             pass
         raise SystemExit(1)

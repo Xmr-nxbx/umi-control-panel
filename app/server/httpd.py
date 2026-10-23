@@ -13,6 +13,9 @@ STATIC = {'/': ('index.html', 'text/html; charset=utf-8'),
           '/index.html': ('index.html', 'text/html; charset=utf-8'),
           '/app.js': ('app.js', 'application/javascript; charset=utf-8'),
           '/style.css': ('style.css', 'text/css; charset=utf-8'),
+          '/umi.svg': ('umi.svg', 'image/svg+xml'),
+          '/favicon.ico': ('umi.ico', 'image/x-icon'),
+          '/umi.ico': ('umi.ico', 'image/x-icon'),
           '/manifest.webmanifest': ('manifest.webmanifest', 'application/manifest+json')}
 SENSITIVE_KEYS = {'password', 'token', 'secret'}
 
@@ -115,6 +118,8 @@ def make_handler(daemon, cfg, on_shutdown):
                 return
             if path == '/api/state':
                 self._send(200, daemon.state())
+            elif path == '/api/desktop':
+                self._send(200, daemon.desktop_preferences())
             elif path == '/api/config':
                 self._send(200, _scrub(cfg.data))
             elif path == '/api/logs':
@@ -177,7 +182,17 @@ def make_handler(daemon, cfg, on_shutdown):
                 # 所有会改状态的接口都在 POST 上，宁可挡错也不放行跨站写入
                 self._send(403, {'error': '拒绝：写操作只接受本机面板页面发起的请求'})
                 return
-            if path == '/api/intent':
+            if path == '/api/desktop':
+                if set(body) != {'osd'} or type(body.get('osd')) is not bool:
+                    self._send(400, {'ok': False, 'detail': '只接受 {osd: true/false}，不能带其他字段'})
+                    return
+                ok, detail = daemon.set_osd_enabled(body['osd'])
+                self._send(200 if ok else 409, {'ok': ok, 'detail': detail,
+                                               'desktop': daemon.desktop_preferences()})
+            elif path == '/api/desktop/preview':
+                ok, detail = daemon.preview_osd()
+                self._send(200 if ok else 409, {'ok': ok, 'detail': detail})
+            elif path == '/api/intent':
                 ok, detail = daemon.set_intent(str(body.get('intent', '')))
                 self._send(200 if ok else 400, {'ok': ok, 'detail': detail})
             elif path == '/api/sched-profile':

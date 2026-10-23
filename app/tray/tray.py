@@ -1,14 +1,11 @@
-"""托盘：ctypes Shell_NotifyIcon，图标颜色随档位变化。
-
-图标不依赖任何外部图片：用 32bpp DIB 手画一个圆角方块（不同档位不同主色），
-既避免分发厂商版权素材，也保证缺文件时托盘一定能出来。
-"""
+"""托盘以原创控制台图标的颜色与状态条数量表达当前调度档位。"""
 import ctypes
 import ctypes.wintypes as wt
-import struct
 import threading
 
-from app.policy.scheduler import INTENT_NAMES, TIER_LABELS
+from app.policy.scheduler import INTENT_NAMES
+from app.desktop.appearance import load_icon
+from app.desktop.native import signature
 from app.tray import fankey
 
 u32 = ctypes.windll.user32
@@ -25,6 +22,22 @@ except OSError:
 LRESULT = ctypes.c_ssize_t
 u32.DefWindowProcW.restype = LRESULT
 u32.DefWindowProcW.argtypes = [wt.HWND, ctypes.c_uint, wt.WPARAM, wt.LPARAM]
+signature(k32, 'GetModuleHandleW', wt.HINSTANCE, wt.LPCWSTR)
+signature(u32, 'RegisterClassW', wt.ATOM, ctypes.c_void_p)
+signature(u32, 'CreateWindowExW', wt.HWND, wt.DWORD, wt.LPCWSTR, wt.LPCWSTR, wt.DWORD,
+          ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+          wt.HWND, wt.HMENU, wt.HINSTANCE, ctypes.c_void_p)
+signature(u32, 'CreatePopupMenu', wt.HMENU)
+signature(u32, 'AppendMenuW', wt.BOOL, wt.HMENU, wt.UINT, ctypes.c_size_t, wt.LPCWSTR)
+signature(u32, 'TrackPopupMenu', wt.UINT, wt.HMENU, wt.UINT, ctypes.c_int, ctypes.c_int,
+          ctypes.c_int, wt.HWND, ctypes.c_void_p)
+signature(u32, 'DestroyMenu', wt.BOOL, wt.HMENU)
+signature(u32, 'SetForegroundWindow', wt.BOOL, wt.HWND)
+signature(u32, 'DestroyIcon', wt.BOOL, wt.HICON)
+signature(u32, 'GetMessageW', ctypes.c_int, ctypes.c_void_p, wt.HWND, wt.UINT, wt.UINT)
+signature(u32, 'TranslateMessage', wt.BOOL, ctypes.c_void_p)
+signature(u32, 'DispatchMessageW', LRESULT, ctypes.c_void_p)
+signature(s32, 'Shell_NotifyIconW', wt.BOOL, wt.DWORD, ctypes.c_void_p)
 
 NIM_ADD = 0
 NIM_MODIFY = 1
@@ -48,8 +61,6 @@ MF_STRING = 0x0000
 MF_SEPARATOR = 0x0010
 MF_CHECKED = 0x0008
 MF_GRAYED = 0x0001
-LR_LOADFROMFILE = 0x0010
-IMAGE_ICON = 1
 
 WM_TRAY = WM_USER + 1
 MENU_OPEN = 0x1001
@@ -69,13 +80,8 @@ FAN_ITEMS = ((MENU_FAN_NORMAL, 'Normal_Mode', fankey.FAN_FLAG_TEXT['Normal_Mode'
              (MENU_FAN_TURBO, 'Turbo_Mode', fankey.FAN_FLAG_TEXT['Turbo_Mode'][0]),
              (MENU_FAN_USER, 'User_Fan_HiMode', fankey.USER_FAN_TEXT[0]))
 
-TIER_COLORS = {'perf': (255, 93, 108), 'mid': (255, 182, 72),
-               'bal': (53, 224, 216), 'eco': (74, 222, 128)}
-
-
-class _ICONINFO(ctypes.Structure):
-    _fields_ = [('fIcon', wt.BOOL), ('hbmMask', wt.HBITMAP), ('hbmColor', wt.HBITMAP),
-                ('xHotspot', wt.WORD), ('yHotspot', wt.WORD)]
+MENU_DESKTOP = 0x1030
+MENU_OSD = 0x1031
 
 
 class _NOTIFYICONDATA(ctypes.Structure):
@@ -83,7 +89,9 @@ class _NOTIFYICONDATA(ctypes.Structure):
                 ('uFlags', ctypes.c_uint), ('uCallbackMessage', ctypes.c_uint),
                 ('hIcon', wt.HICON), ('szTip', ctypes.c_wchar * 128),
                 ('dwState', ctypes.c_uint), ('dwStateMask', ctypes.c_uint),
-                ('guidItem', ctypes.c_byte * 16), ('hIconReserved', ctypes.c_void_p)]
+                ('szInfo', ctypes.c_wchar * 256), ('uVersion', ctypes.c_uint),
+                ('szInfoTitle', ctypes.c_wchar * 64), ('dwInfoFlags', wt.DWORD),
+                ('guidItem', ctypes.c_byte * 16), ('hBalloonIcon', wt.HICON)]
 
 
 class _MSG(ctypes.Structure):
@@ -92,28 +100,9 @@ class _MSG(ctypes.Structure):
                 ('time', ctypes.c_uint), ('pt', wt.POINT)]
 
 
-def _make_ico_bytes(size, rgb, dim):
-    """生成 size×size 的 32bpp 图标（BGRA 自下而上）+ AND 掩码。"""
-    head = struct.pack('<HHH', 0, 1, 1)
-    bmp_off = 6 + 16
-    px = bytearray()
-    for y in range(size):
-        for x in range(size):
-            edge = min(x, y, size - 1 - x, size - 1 - y)
-            r, g, b = rgb if edge >= 3 else dim
-            px += struct.pack('<BBBB', b, g, r, 255)
-    mask_rows = (size + 31) // 32
-    and_mask = bytes(mask_rows * 4 * size)
-    ih = struct.pack('<IllHHIIllll', 40, size, size * 2, 1, 32, 0,
-                     len(px), 0, 0, 0, 0)
-    ico_dir = struct.pack('<BBBBHHII', size, size, 0, 0, 1, 32,
-                          len(ih) + len(px) + len(and_mask), bmp_off)
-    return head + ico_dir + ih + bytes(px) + and_mask
-
-
 class Tray:
     def __init__(self, cfg, log, on_open, on_intent, on_quit, on_mode, on_fan=None,
-                 on_session=None):
+                 on_session=None, on_desktop=None, on_osd=None):
         self.cfg = cfg
         self.log = log
         self.on_open = on_open
@@ -122,7 +111,11 @@ class Tray:
         self.on_mode = on_mode
         self.on_fan = on_fan
         self.on_session = on_session
+        self.on_desktop = on_desktop
+        self.on_osd = on_osd
+        self._icon_key = None
         self._fan = None
+        self._intent = None
         self.hwnd = None
         self.icon = None
         self._thread = None
@@ -161,7 +154,7 @@ class Tray:
             self.log.error('托盘窗口创建失败')
             return False
         self._register_session_notifications()
-        self._update_icon('bal', '均衡')
+        self._update_icon('unknown', '正在读取状态')
         if getattr(self, '_added', False):
             self.log.info('[托盘] 已挂载，图标颜色随档位变化（会话解锁事件：%s）' % (
                 '已注册' if getattr(self, '_session_on', False) else '不可用，靠空闲推断'))
@@ -190,18 +183,9 @@ class Tray:
         return ok
 
     def _make_icon(self, tier):
-        rgb = TIER_COLORS.get(tier, (120, 140, 170))
-        dim = tuple(max(0, int(c * 0.45)) for c in rgb)
-        blob = _make_ico_bytes(32, rgb, dim)
-        tmp = __import__('os').path.join(__import__('tempfile').gettempdir(),
-                                         'umi-tray-%s.ico' % tier)
-        with open(tmp, 'wb') as f:
-            f.write(blob)
-        handle = u32.LoadImageW(None, tmp, IMAGE_ICON, 0, 0, LR_LOADFROMFILE)
-        if not handle:
-            handle = u32.LoadIconW(None, ctypes.c_wchar_p(32512))  # IDI_APPLICATION
-        self._tied.setdefault(tier, handle)
-        return handle
+        if tier not in self._tied:
+            self._tied[tier] = load_icon(tier, 32)
+        return self._tied[tier]
 
     def _update_icon(self, tier, label):
         icon = self._make_icon(tier)
@@ -223,6 +207,7 @@ class Tray:
             return
         self._added = True
         self.current_tip = tip
+        self._icon_key = (tier, label)
 
     def update_state(self, tier, label, intent=None, fan=None):
         if intent:
@@ -231,7 +216,7 @@ class Tray:
             self._fan = fan
         if not self.hwnd:
             return
-        if label != self.current_tip:
+        if (tier, label) != self._icon_key:
             self._update_icon(tier, label)
 
     def _fan_matches(self, flag):
@@ -248,6 +233,11 @@ class Tray:
     def _menu(self):
         hmenu = u32.CreatePopupMenu()
         u32.AppendMenuW(hmenu, MF_STRING, MENU_OPEN, '打开控制面板')
+        if self.on_desktop:
+            u32.AppendMenuW(hmenu, MF_STRING, MENU_DESKTOP, '桌面启动与设置')
+        if self.on_osd:
+            checked = MF_CHECKED if self.cfg.get('tray', 'osd', default=True) else 0
+            u32.AppendMenuW(hmenu, MF_STRING | checked, MENU_OSD, 'Umi 屏幕提示')
         u32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
         for mid, intent in ((MENU_AUTO, 'auto'), (MENU_OFFICE, 'office'),
                             (MENU_BALANCE, 'balance'), (MENU_TURBO, 'turbo')):
@@ -281,6 +271,12 @@ class Tray:
     def _on_command(self, cmd):
         if cmd == MENU_OPEN:
             self.on_open()
+        elif cmd == MENU_DESKTOP and self.on_desktop:
+            self.on_desktop()
+        elif cmd == MENU_OSD and self.on_osd:
+            ok, detail = self.on_osd(not self.cfg.get('tray', 'osd', default=True))
+            if not ok:
+                self.log.error('[OSD] ' + detail)
         elif cmd == MENU_QUIT:
             self.on_quit()
         elif cmd in (MENU_AUTO, MENU_OFFICE, MENU_BALANCE, MENU_TURBO):
@@ -345,3 +341,8 @@ class Tray:
             data.uID = 1
             s32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(data))
             self._added = False
+        for handle in self._tied.values():
+            if handle:
+                u32.DestroyIcon(handle)
+        self._tied.clear()
+        self._icon_key = None

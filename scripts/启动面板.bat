@@ -1,11 +1,7 @@
 @echo off
-rem 启动 Umi Control Panel（守护模式：进程崩了会自动拉起，面板里点停止才真的退出）。
-rem 用最小化窗口跑，不用 pythonw——它会被安全软件静默查杀。
-cd /d "%~dp0.."
-if exist "runtime\UmiPanel.exe" (
-  start "UmiPanel" /min "runtime\UmiPanel.exe" "main.py" --supervise
-) else (
-  start "UmiPanel" /min "runtime\python.exe" "main.py" --supervise
-)
-echo 正在启动，面板地址 http://127.0.0.1:8747/
-timeout /t 3 >nul
+setlocal DisableDelayedExpansion
+rem 旧路径兼容入口：bat 自身仍可能闪过 CMD；日常请双击根目录 Umi Control Panel.vbs。
+rem 不转发参数；桌面入口由 WScript 隐藏启动，不使用 pythonw。
+cd /d "%~dp0.." || exit /b 1
+"%SystemRoot%\System32\wscript.exe" "%CD%\Umi Control Panel.vbs"
+exit /b %ERRORLEVEL%

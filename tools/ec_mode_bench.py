@@ -27,6 +27,7 @@ from app.act.channels.ec_gpd import EcChannel, FAN_KEY
 from app.bench import Bench, _Monitor
 from app.config import Config
 from app.logx import Log
+from app.paths import discover_panel_port
 from app.sense.clock import ClockSense
 from app.sense.thermal import Thermal
 
@@ -39,12 +40,11 @@ RPM_REGS = ('ADDR_EC_MAIN_FAN_RPM_BYTE1', 'ADDR_EC_MAIN_FAN_RPM_BYTE2')
 
 
 def _port_open(port):
-    s = socket.socket()
-    s.settimeout(0.4)
     try:
-        return s.connect_ex(('127.0.0.1', port)) == 0
-    finally:
-        s.close()
+        with socket.create_connection(('127.0.0.1', port), timeout=0.4):
+            return True
+    except ConnectionRefusedError:
+        return False
 
 
 class RpmSampler(threading.Thread):
@@ -107,13 +107,21 @@ def main(argv=None):
     # 反序复测：三态是依次测的，机器冷热不一样。如果结论只出现在某个顺序里，
     # 那就是顺序效应而不是档位效应，所以支持把顺序倒过来再跑一遍对照。
     flags = tuple(reversed(FLAGS)) if 'reverse' in (argv or []) else FLAGS
-    cfg = Config.load()[0]
-    log = Log('ec-mode-bench')
-    port = int(cfg.get('server', 'port', default=8747) or 8747)
-    if _port_open(port):
-        print('面板服务还在跑（端口 %d）。它的自动跟随会和本工具抢同一个寄存器，'
-              '先执行 runtime\\python.exe main.py --stop 再测。' % port)
+    try:
+        port = discover_panel_port()
+        alive = _port_open(port)
+    except (OSError, ValueError) as exc:
+        print('无法确认面板已停，拒绝继续：%s' % exc)
         return 2
+    if alive:
+        print('面板服务还在跑（端口 %d）。它的自动跟随会和本工具抢同一个寄存器，'
+              '请先手动停止面板再测。' % port)
+        return 2
+    cfg, err, _bad = Config.load()
+    if err:
+        print('配置读取失败，拒绝继续：%s' % err)
+        return 2
+    log = Log('ec-mode-bench')
     if not bool(cfg.get('hardware', 'ec', 'allow_write', default=False)):
         print('EC 写入未开启（config.hardware.ec.allow_write=false），本工具不测写。')
         return 2
