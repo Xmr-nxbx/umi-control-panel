@@ -67,6 +67,16 @@ def t_readme():
     assert 'v%s' % __version__ in md, 'README 没标 v%s' % __version__
 
 
+@case('README 引用的本地截图都存在')
+def t_readme_images():
+    md = read('README.md')
+    images = re.findall(r'!\[[^\]]*\]\(([^)]+)\)', md)
+    assert images, 'README 没有截图'
+    missing = [src for src in images
+               if '://' not in src and not os.path.isfile(os.path.join(ROOT, src))]
+    assert not missing, missing
+
+
 def main():
     bad = 0
     for name, fn in CASES:
