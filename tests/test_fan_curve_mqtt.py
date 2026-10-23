@@ -10,17 +10,22 @@
   * 写入动作 `SET_FAN_CURVE` 先挂白名单，但能力仍是 `fan.curve.write`（未验证），
     三道闸必须继续挡住它。
 """
+import io
 import json
 import os
 import shutil
 import sys
 import tempfile
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.act.channels.base import CAP_FAN_CURVE, CAP_FAN_CURVE_WRITE   # noqa: E402
 from app.act.channels import mqtt_gcu                                  # noqa: E402
 from app.act.channels.mqtt_gcu import MqttChannel, STATUS_TOPICS       # noqa: E402
+from app.act.hardware import Hardware                                  # noqa: E402
+from app.server.httpd import make_handler                              # noqa: E402
 
 CASES = []
 
@@ -147,13 +152,37 @@ def t_write_still_gated():
     assert ch._outq.empty(), '被拒的命令不许进发送队列'
 
 
-def _curve_ok(duties, name='M3T1'):
+def _curve_ok(duties, name='M3T1', stale=False):
     points = [{'id': i, 'up_t': 255 if i >= 11 else (0 if i == 0 else 50 + i),
                'down_t': 255 if i >= 11 else 48 + i, 'duty_pct': float(d),
                'duty_raw': d * 2, 'sentinel': i >= 11, 'mailbox': False}
               for i, d in enumerate(duties)]
-    return {'ok': True, 'name': name,
+    return {'ok': True, 'name': name, 'stale': stale,
             'tables': {'CPU': points, 'GPU': [dict(p) for p in points]}}
+
+
+def _hardware(ch):
+    """不构造真实硬件通道，只测试 Hardware 的转发。"""
+    hw = Hardware.__new__(Hardware)
+    hw.channels = [ch]
+    return hw
+
+
+def _post_curve(body, hw):
+    """直接调用 HTTP handler，用内存流代替连接，不启动 HTTP 服务。"""
+    raw = json.dumps(body).encode('utf-8')
+    handler_type = make_handler(SimpleNamespace(hw=hw), None, None)
+    handler = handler_type.__new__(handler_type)
+    handler.path = '/api/fan-curve'
+    handler.headers = {'Host': '127.0.0.1:8747',
+                       'Origin': 'http://127.0.0.1:8747',
+                       'Content-Length': str(len(raw))}
+    handler.rfile = io.BytesIO(raw)
+    responses = []
+    handler._send = lambda code, payload: responses.append((code, payload))
+    handler.do_POST()
+    assert len(responses) == 1, responses
+    return responses[0]
 
 
 def _prepare_write_channel():
@@ -228,6 +257,139 @@ def t_write_needs_name():
     assert ok is False and '名字' in detail, detail
     _topic, data = _sent_set(ch)
     assert data is None, data
+
+
+@case('硬件转发 expected_name，同时保留旧工具不传参数的调用')
+def t_hardware_expected_name():
+    calls = []
+
+    def record(duties, type_='CPU', expected_name=None):
+        calls.append((duties, type_, expected_name))
+        return True, '已记录'
+
+    hw = _hardware(SimpleNamespace(alive=True, set_fan_curve=record))
+    duties = [90] * 16
+    assert hw.set_fan_curve(duties) == (True, '已记录')
+    assert hw.set_fan_curve(duties, 'GPU') == (True, '已记录')
+    assert hw.set_fan_curve(duties, 'GPU', expected_name='M2T1') == (True, '已记录')
+    assert calls == [(duties, 'CPU', None), (duties, 'GPU', None),
+                     (duties, 'GPU', 'M2T1')], calls
+    assert all(call[0] is duties for call in calls), calls
+
+
+@case('HTTP 表名匹配：经硬件层只发一条 SET，CPU 默认值与 GPU 都可回读')
+def t_http_write_expected_name_matches():
+    for type_ in ('CPU', 'GPU'):
+        ch = _prepare_write_channel()
+        reads = []
+
+        def fake_curve(wait_s=0):
+            reads.append(wait_s)
+            _topic, data = _sent_set(ch)
+            duties = [data['T%d' % i] for i in range(16)] if data else [100] * 16
+            return _curve_ok(duties, name='M2T1')
+
+        ch.fan_curve = fake_curve
+        body = {'duties': [90] * 16, 'expected_name': 'M2T1'}
+        if type_ == 'GPU':
+            body['type'] = type_
+        code, payload = _post_curve(body, _hardware(ch))
+        assert code == 200 and payload['ok'] is True, (code, payload)
+        assert '回读一致' in payload['detail'], payload
+        topic, data = _sent_set(ch)
+        assert topic == 'Fan/Control', topic
+        assert data['Name'] == 'M2T1' and data['Type'] == type_, data
+        assert [data['T%d' % i] for i in range(16)] == body['duties'], data
+        sets = [json.loads(p) for _t, p in list(ch._outq.queue)
+                if json.loads(p).get('Action') == 'SET_FAN_SPEED_CURVE_SETTING']
+        assert len(sets) == 1, sets
+        assert reads == [2.0, 2.5], reads
+
+
+@case('HTTP 草稿来自旧表：fresh 读取表名已变化，409 且任何写命令之前拒发')
+def t_http_write_name_changed():
+    ch = _prepare_write_channel()
+    tables = iter((_curve_ok([100] * 16, name='M3T1'),
+                   _curve_ok([100] * 16, name='M2T1')))
+    reads, status_reads = [], []
+
+    def fake_curve(wait_s=0):
+        reads.append(wait_s)
+        return next(tables, _curve_ok([100] * 16, name='M2T1'))
+
+    ch.fan_curve = fake_curve
+    ch._status_fresh = lambda wait_s=0: (
+        status_reads.append(wait_s) or {'FAN_SafetyProtect': '0'})
+    draft = ch.fan_curve(wait_s=0)
+    duties = [int(p['duty_pct']) for p in draft['tables']['CPU']]
+    duties[1] = 40
+    code, payload = _post_curve({'duties': duties, 'type': 'CPU',
+                                 'expected_name': draft['name']}, _hardware(ch))
+    assert code == 409 and payload['ok'] is False, (code, payload)
+    assert 'M3T1' in payload['detail'] and 'M2T1' in payload['detail'], payload
+    assert reads == [0, 2.0], reads
+    assert status_reads == [], status_reads
+    assert ch._outq.empty(), '表名变化时不许把任何写命令放进队列'
+
+
+@case('fresh 读取退回 stale：表名匹配或旧调用没传 expected_name，都必须拒发')
+def t_write_stale():
+    for expected_name in (None, 'M3T1'):
+        ch = _prepare_write_channel()
+        reads, status_reads = [], []
+
+        def fake_curve(wait_s=0):
+            reads.append(wait_s)
+            return _curve_ok([100] * 16, stale=True)
+
+        ch.fan_curve = fake_curve
+        ch._status_fresh = lambda wait_s=0: (
+            status_reads.append(wait_s) or {'FAN_SafetyProtect': '0'})
+        if expected_name is None:
+            ok, detail = ch.set_fan_curve([90] * 16)
+        else:
+            ok, detail = ch.set_fan_curve([90] * 16, expected_name=expected_name)
+        assert ok is False and 'stale' in detail, (expected_name, ok, detail)
+        assert reads == [2.0], reads
+        assert status_reads == [], status_reads
+        assert ch._outq.empty(), 'stale 表不许触发任何写命令'
+
+
+@case('HTTP 必须提供非空字符串 expected_name：缺失、空白与非字符串均 400')
+def t_http_write_requires_expected_name():
+    calls = []
+
+    def record(duties, type_='CPU', expected_name=None):
+        calls.append((duties, type_, expected_name))
+        return True, '已记录'
+
+    hw = _hardware(SimpleNamespace(alive=True, set_fan_curve=record))
+    bodies = [{'duties': [90] * 16}]
+    bodies.extend({'duties': [90] * 16, 'expected_name': bad}
+                  for bad in ('', ' \t\n', None, True, 123, [], {}))
+    for body in bodies:
+        code, payload = _post_curve(body, hw)
+        assert code == 400 and payload['ok'] is False, (body, code, payload)
+        assert 'expected_name' in payload['detail'], payload
+        assert calls == [], 'HTTP 参数无效时不许调用硬件层'
+
+
+@case('默认表 GET 仅调用本地只读加载器，不访问硬件通道')
+def t_default_get():
+    for query, name in (('name=M3T1', 'M3T1'), ('name=M2T5', 'M2T5'),
+                        ('name=M3T1&name=M1T1', None), ('', None),
+                        ('name=..%2Fconfig', '../config')):
+        handler_type = make_handler(None, None, None)
+        handler = handler_type.__new__(handler_type)
+        handler.path = '/api/fan-curve/defaults?' + query
+        responses = []
+        handler._send = lambda code, payload: responses.append((code, payload))
+        for ok in (True, False):
+            response = {'ok': ok, 'reason': '' if ok else '默认表不可用'}
+            with patch('app.server.httpd.load_fan_defaults', return_value=response) as loader:
+                handler.do_GET()
+                loader.assert_called_once_with(name)
+            assert responses[-1] == (200 if ok else 409, response), responses
 
 
 @case('订阅清单包含 Creator Center 的控制主题：抓包才听得到命令')

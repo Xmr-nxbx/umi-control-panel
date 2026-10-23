@@ -16,6 +16,7 @@ import inspect
 import io
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -201,8 +202,31 @@ def t_backlight_promoted():
     assert "self.caps[CAP_RGB_WRITE] = 'verified'" in src, '背光没升上来，面板画不出按钮'
     assert 'rgb_write_reason' in src, '升 verified 却不写证据，后面没人知道是怎么验的'
     js = io.open(os.path.join(ROOT, 'app', 'web', 'app.js'), encoding='utf-8').read()
-    assert 'btn-kbpower' in js and 'KB_POWER_ON' in js, '前端没有背光按钮'
-    assert "'lighting.rgb.write'" in js, '按钮没按能力画，写死成一个永远亮着的按钮了'
+    html = io.open(os.path.join(ROOT, 'app', 'web', 'index.html'), encoding='utf-8').read()
+    assert 'id="quick-kb"' in html, '前端没有背光快速开关'
+    assert re.search(r"\$\('quick-kb'\)\.onclick\s*=\s*\(\)\s*=>\s*toggleQuick\('kb'\)", js), \
+        '背光按钮没有接到快速开关处理器'
+    switches = re.search(r'const QUICK_SWITCHES\s*=\s*\{(.*?)\n\};', js, re.S)
+    assert switches, '缺少快速开关映射'
+    kb = re.search(r'\bkb:\s*\{([^}]+)\}', switches.group(1))
+    assert kb, '快速开关缺少背光条目'
+    for field, value in (('key', 'kbpower'), ('field', 'kb_power_on'),
+                         ('cap', 'lighting.rgb.write'), ('on', 'KB_POWER_ON'),
+                         ('off', 'KB_POWER_OFF')):
+        assert re.search(r"\b%s:\s*'%s'" % (field, re.escape(value)), kb.group(1)), (field, value)
+    render = re.search(r'function renderQuick\(s\)\s*\{(.*?)\n\}', js, re.S)
+    assert render and 'Object.entries(QUICK_SWITCHES)' in render.group(1), '按钮绕开了能力映射'
+    disabled = re.search(r'button\.disabled\s*=\s*([^;]+);', render.group(1))
+    assert disabled and re.search(r"\[spec\.cap\].*?\.state\s*!==\s*'verified'",
+                                  disabled.group(1), re.S), '按钮 disabled 没有按 spec.cap 的 verified 能力设闸'
+    toggle = re.search(r'async function toggleQuick\(id\)\s*\{(.*?)\n\}', js, re.S)
+    assert toggle and 'QUICK_SWITCHES[id]' in toggle.group(1), '处理器没有读取快速开关映射'
+    body = toggle.group(1)
+    gate = re.search(r"if\s*\(!spec\s*\|\|\s*\$\('quick-'\s*\+\s*id\)\.disabled\)\s*return;", body)
+    assert gate, '直接调用 toggleQuick 可以绕过 disabled 闸门'
+    assert body.index('renderQuick(lastState)') < gate.start() < body.index("api('/api/action'"), \
+        '发送 action 前没有重新渲染并检查最新 disabled 状态'
+    assert 'action: value ? spec.on : spec.off' in body, '处理器绕过了条目声明的背光命令'
 
 
 @case('通道里用到的 CAP_*/MODE_* 常量必须真的在命名空间里（漏导入会让整条通道连不上）')

@@ -7,13 +7,14 @@
 （logs/mqtt-capture-20261020-205150.jsonl），并用 tools/lighting_effect_test.py
 做过呼吸→波浪→呼吸的可逆验证。这里盯四件事：
   * 报文形状一个字段不少（Mode/Effect/Light/Speed/Direction/nv_save/7 色块/那些 null）；
-  * 波浪必须给方向，其它灯效固定发 None，与 Creator Center 一致；
+  * 波浪必须给方向，闪烁可给无/左/右，其它灯效固定发 None，与 Creator Center 一致；
   * Welcome 是第二条报文，除了 mode 之外与 Lighting 完全相同；
   * 闸门（allow_write / verified / 值域）在执行层，不在 UI。
 """
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -133,6 +134,23 @@ def t_nonwave_direction():
     assert calls[0][1]['direction'] == 'None', calls
 
 
+@case('闪烁支持无/左/右方向；其它非波浪仍然固定 None')
+def t_flash_direction():
+    ch = _channel()
+    calls = _record(ch)
+    ok, detail = ch.set_keyboard_effect('Flash', 3, 2, COLORS, direction='RightLeft')
+    assert ok, detail
+    assert calls[-1][1]['direction'] == 'RightLeft', calls
+    ok, detail = ch.set_keyboard_effect('Flash', 3, 2, COLORS, direction='None')
+    assert ok, detail
+    assert calls[-1][1]['direction'] == 'None', calls
+    ok, detail = ch.set_keyboard_effect('Flash', 3, 2, COLORS, direction='Bogus')
+    assert not ok and 'None/LeftRight/RightLeft' in detail, detail
+    ok, detail = ch.set_keyboard_effect('Mix', 3, 2, COLORS, direction='RightLeft')
+    assert ok, detail
+    assert calls[-1][1]['direction'] == 'None', calls
+
+
 @case('Welcome 是第二条报文，除 mode 外完全相同')
 def t_welcome():
     ch = _channel()
@@ -212,6 +230,39 @@ def t_bad_colors():
     assert _kb_colors({'rkgcolor': '{not json'}) is None
     assert _kb_colors({'rkgcolor': json.dumps({'ColorBuffer': [{'R': 1}]})}) is None
     assert _kb_colors(None) is None
+
+
+@case('灯效后补一条幂等 SetPower 刷新 Keyboard/Status，且不顺手改背光')
+def t_status_refresh():
+    ch = _channel()
+    ch._payloads['Keyboard/Status'] = {'ts': 1.0, 'data': {'powerStatus': 'On'}}
+    calls = _record(ch)
+    ok, detail = ch.set_keyboard_effect('Wave', 3, 2, COLORS, direction='LeftRight')
+    assert ok, detail
+    assert [c[0] for c in calls] == ['SET_KEYBOARD_EFFECT', 'KB_POWER_ON'], calls
+    assert '状态已回读' in detail, detail
+
+    ch2 = _channel()
+    ch2._payloads['Keyboard/Status'] = {'ts': 1.0, 'data': {'powerStatus': 'Off'}}
+    calls2 = _record(ch2)
+    ok2, detail2 = ch2.set_keyboard_effect('Breathing', 3, 2, COLORS)
+    assert ok2, detail2
+    assert [c[0] for c in calls2] == ['SET_KEYBOARD_EFFECT', 'KB_POWER_OFF'], calls2
+    assert '状态已回读' in detail2, detail2
+
+
+@case('外部 SetEffectALL 自动补一次刷新；自己发的不重复刷新')
+def t_external_effect_refresh():
+    ch = _channel()
+    calls = []
+    ch.refresh_keyboard_status = lambda: calls.append('refresh') or (True, '')
+    ch._last_effect_ts = 0.0
+    ch._ingest('Keyboard/Ctrl', json.dumps({'function': 'SetEffectALL', 'effect': 'Wave'}).encode())
+    assert calls == ['refresh'], calls
+    calls.clear()
+    ch._last_effect_ts = time.time()
+    ch._ingest('Keyboard/Ctrl', json.dumps({'function': 'SetEffectALL', 'effect': 'Wave'}).encode())
+    assert calls == [], '自己的灯效命令被当成外部改动'
 
 
 def main():

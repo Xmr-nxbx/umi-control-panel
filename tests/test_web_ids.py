@@ -13,6 +13,7 @@
 import os
 import re
 import sys
+from html.parser import HTMLParser
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HTML_PATH = os.path.join(ROOT, 'app', 'web', 'index.html')
@@ -48,7 +49,7 @@ def view_meta_keys(js):
 
 def nav_values(html, attr):
     block = re.search(r'<nav class="side-nav".*?</nav>', html, re.S)
-    scope = block.group(0) if block else html
+    scope = block.group(0) if block and attr == 'view' else html
     return set(re.findall(r'data-%s="([^"]+)"' % attr, scope))
 
 
@@ -56,6 +57,30 @@ def css_vars(css):
     defined = set(re.findall(r'(--[\w-]+)\s*:', css))
     used = set(re.findall(r'var\((--[\w-]+)', css))
     return defined, used
+
+
+class OverviewParser(HTMLParser):
+    """只检查总览 section（包含嵌套 section），不包含后面的快速开关页。"""
+
+    def __init__(self):
+        super().__init__()
+        self.depth = 0
+        self.found = False
+        self.controls = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'section':
+            if self.depth:
+                self.depth += 1
+            elif dict(attrs).get('id') == 'view-overview':
+                self.found = True
+                self.depth = 1
+        if self.depth and tag in ('button', 'input', 'select'):
+            self.controls.append(tag)
+
+    def handle_endtag(self, tag):
+        if tag == 'section' and self.depth:
+            self.depth -= 1
 
 
 def check():
@@ -87,6 +112,20 @@ def check():
         % (sorted(nav_values(html, 'view')), sorted(views)))
     goto = nav_values(html, 'goto')
     assert goto <= views, 'data-goto 指向不存在的分区：%s' % sorted(goto - views)
+    tabs = set(re.findall(r'data-creator-tab="([^"]+)"', html))
+    panes = set(re.findall(r'data-creator-pane="([^"]+)"', html))
+    assert tabs == panes == {'fan', 'performance', 'benchmark'}, '造物者页签与内容不对应'
+    for required in ('btn-curve-undo', 'btn-curve-default', 'btn-light-welcome', 'view-settings',
+                     'view-quick', 'quick-kb', 'quick-win', 'fanspeed-enabled', 'fanspeed-value',
+                     'btn-fanspeed-apply', 'btn-fanspeed-off', 'btn-spc-default',
+                     'keyboard-preview', 'palette-swatches', 'preset-progress'):
+        assert required in id_set, '缺少关键 id：%s' % required
+    assert re.search(r'id="btn-curve-default"[^>]*disabled', html), '取得可编辑当前表前不能恢复默认'
+    overview = OverviewParser()
+    overview.feed(html)
+    overview.close()
+    assert overview.found and overview.depth == 0, '总览 section 缺失或未闭合'
+    assert not overview.controls, '总览不应有操作控件'
 
     defined, used = css_vars(css)
     assert not (used - defined), 'style.css 用了没定义的变量：%s' % sorted(used - defined)

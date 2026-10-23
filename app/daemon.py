@@ -294,6 +294,7 @@ class Daemon:
                 'cpu_mhz': snap.get('cpu_mhz'),
                 'gpu': snap.get('gpu'),
                 'mem': snap.get('mem'),
+                'disk': snap.get('disk'),
                 'power': snap.get('power'),
                 'idle_s': round(snap.get('idle_s') or 0.0, 1),
                 'foreground': snap.get('foreground'),
@@ -309,6 +310,7 @@ class Daemon:
             'bench': {k: self.bench.get(k) for k in
                       ('running', 'mode', 'tier', 'label', 'step', 'pct', 'error')},
             'meta': {'version': __version__,
+                     'fan_curve_expected_name': True,
                      'cap_labels': CAP_LABELS, 'mode_labels': MODE_LABELS,
                      'tier_labels': TIER_LABELS,
                      'battery_mode_labels': BATTERY_MODE_LABELS,

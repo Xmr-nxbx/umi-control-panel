@@ -15,6 +15,7 @@ import socket
 import struct
 import threading
 import time
+import uuid
 
 from app.act.channels.base import (Channel, CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ,
                                    CAP_PL_WRITE, CAP_RGB, CAP_RGB_WRITE,
@@ -28,8 +29,8 @@ ACTIONS_PATH = os.path.join(os.path.dirname(__file__), 'gcu_actions.json')
 STATUS_TOPICS = ('Tray/Status', 'Fan/Status', 'Fan/Table', 'Setting/Status', 'Keyboard/Status',
                  'HidLightbar/Status', 'Display/Status', 'Monitor/Status',
                  'WhisperMode/Status', 'ProcessControl/Status', 'Customize/Status')
-# Creator Center 点一下就往这些主题发命令。面板本来就握着 broker 身份，
-# 多订几个控制主题就能把它的原始报文抄下来，不必再起第二个客户端去抢身份。
+# 复用现有订阅观察控制报文，不另起客户端抢身份；收到的 MQTT 报文不含发布者身份，
+# 这些主题也可能来自面板或其他客户端，不能仅凭主题归因 Creator Center。
 CONTROL_TOPICS = ('Fan/Control', 'Setting/Control', 'Display/Control', 'Keyboard/Ctrl',
                   'HidLightbar/Ctrl', 'MyRgbLightbar/Control', 'BatteryProtection/Control',
                   'System/Control', 'ProcessControl/Control', 'Customize/Control',
@@ -212,12 +213,14 @@ class MqttChannel(Channel):
         self._last_probe_ts = 0.0
         self._last_ask_ts = 0.0
         self._ask_until = 0.0
+        self._last_effect_ts = 0.0
         self._kick_reason = None
-        self._cap_lock = threading.Lock()
+        self._cap_lock = threading.RLock()  # ingest 的刷新判定与嵌套录制共用同一把锁。
         self._cap_fh = None
         self._cap_path = None
         self._cap_until = 0.0
         self._cap_count = 0
+        self._cap_error = None
         for cap in (CAP_MODE_READ, CAP_MODE_WRITE, CAP_PL_READ, CAP_PL_WRITE, CAP_RGB,
                     CAP_DGPU, CAP_WINKEY_WRITE, CAP_BATTERY_MODE_WRITE, CAP_FAN_CURVE,
                     CAP_FAN_CURVE_WRITE, CAP_TCC_WRITE, CAP_FAN_SWITCH_WRITE):
@@ -410,7 +413,15 @@ class MqttChannel(Channel):
             return
         with self._lock:
             self._payloads[topic] = {'ts': time.time(), 'data': data}
-        self._capture_write(topic, data)
+        # 判定到入队之间不让 start_capture 插入，避免先判未录制、后在录制中发 SetPower。
+        with self._cap_lock:
+            observed = self._capture_write(topic, data)
+            if topic == 'Keyboard/Ctrl' and not observed:
+                # SetEffectALL 不会刷新 Keyboard/Status；正常模式补幂等 SetPower。
+                # 两秒窗口只用于避免自家回声重复刷新，不是发布者身份鉴定。
+                if (str(data.get('function') or '') == 'SetEffectALL'
+                        and time.time() - self._last_effect_ts > 2.0):
+                    self.refresh_keyboard_status()
         if topic == FAN_TABLE_TOPIC:
             # 服务发的是它内存里的表（GetFanTable 只做 TableTransform，不读 EC）。
             # 形状对不上就不点亮能力——宁可显示「未知」，也不拿半张表充数。
@@ -558,32 +569,37 @@ class MqttChannel(Channel):
                         'sentinel': up == 255, 'mailbox': False})
         return out
 
-    # ---------- 原始报文抓取（只读，给 Creator Center 点按时用） ----------
+    # ---------- 原始报文观察（不暂停正常服务动作） ----------
     def start_capture(self, minutes=10.0):
-        """把收到的每一条 MQTT 报文落盘，便于「你在 Creator Center 点一下、我抄报文」。
+        """复用现有订阅录制报文，不新建 broker 连接，也不为录制发送命令。
 
-        不新建 broker 连接（同一 clientId 会互踢），不发送任何命令；
+        默认抑制 ingest 观察 SetEffectALL 引起的自动键盘刷新（它实际会写 SetPower）；
+        其他正常服务动作/状态订阅/调度继续，不保证整机零写入，也不推断发布者。
         输出在 logs\\mqtt-capture-*.jsonl（logs/ 已 gitignore）。
         """
         try:
             minutes = float(minutes)
         except (TypeError, ValueError):
-            return {'active': False, 'error': 'minutes 必须是数字'}
+            with self._cap_lock:
+                return dict(self._capture_status_locked(), error='minutes 必须是数字')
         if not 0 < minutes <= 60:
-            return {'active': False, 'error': 'minutes 必须在 0~60 之间'}
+            with self._cap_lock:
+                return dict(self._capture_status_locked(), error='minutes 必须在 0~60 之间')
         with self._cap_lock:
             self._capture_close_locked()
+            self._cap_error = None
             try:
                 os.makedirs(CAPTURE_DIR, exist_ok=True)
-                path = os.path.join(CAPTURE_DIR, 'mqtt-capture-%s.jsonl'
-                                    % time.strftime('%Y%m%d-%H%M%S'))
-                self._cap_fh = open(path, 'w', encoding='utf-8', buffering=1)
+                path = os.path.join(CAPTURE_DIR, 'mqtt-capture-%s-%s.jsonl'
+                                    % (time.strftime('%Y%m%d-%H%M%S'), uuid.uuid4().hex))
+                # 唯一后缀避免同秒重启撞名；独占创建确保即使撞名也绝不截断旧记录。
+                self._cap_fh = open(path, 'x', encoding='utf-8', buffering=1)
             except OSError as exc:
-                self._cap_fh = None
-                return {'active': False, 'error': '打不开抓包文件：%r' % (exc,)}
-            self._cap_path = path
-            self._cap_until = time.time() + minutes * 60
-            self._cap_count = 0
+                self._cap_error = '打不开抓包文件：%r' % (exc,)
+            else:
+                self._cap_path = path
+                self._cap_until = time.time() + minutes * 60
+                self._cap_count = 0
             status = self._capture_status_locked()
             self.detail['capture'] = status
             return status
@@ -600,36 +616,48 @@ class MqttChannel(Channel):
             return self._capture_status_locked()
 
     def _capture_write(self, topic, data):
+        """返回本条消息是否处于观察中，而非写完之后文件是否还开着。"""
         with self._cap_lock:
             if not self._cap_fh:
-                return
-            if time.time() >= self._cap_until:
-                self._capture_close_locked()
-                return
+                return False
             try:
                 self._cap_fh.write(json.dumps(
-                    {'ts': round(time.time(), 3), 'topic': topic, 'payload': data},
+                    {'ts': round(time.time(), 3), 'topic': topic, 'payload': data,
+                     'source': 'observed', 'publisher': 'unknown'},
                     ensure_ascii=False) + '\n')
                 self._cap_count += 1
-            except OSError:
+            except OSError as exc:
+                self._cap_error = '写抓包文件失败：%r' % (exc,)
                 self._capture_close_locked()
+            else:
+                # 触发到期的边界消息仍落盘；关闭/写失败也不能让本条观察触发 SetPower。
+                if time.time() >= self._cap_until:
+                    self._capture_close_locked()
+            return True
 
     def _capture_close_locked(self):
-        if self._cap_fh:
-            try:
-                self._cap_fh.close()
-            except OSError:
-                pass
+        fh = self._cap_fh
         self._cap_fh = None
         self._cap_until = 0.0
-        if 'capture' in self.detail:
-            self.detail['capture'] = self._capture_status_locked()
+        if fh:
+            try:
+                fh.close()
+            except OSError as exc:
+                self._cap_error = self._cap_error or '关闭抓包文件失败：%r' % (exc,)
+        self.detail['capture'] = self._capture_status_locked()
 
     def _capture_status_locked(self):
-        return {'active': bool(self._cap_fh), 'path': self._cap_path,
-                'count': self._cap_count,
-                'left_s': (max(0.0, round(self._cap_until - time.time(), 1))
-                           if self._cap_fh else 0.0)}
+        active = bool(self._cap_fh)
+        status = {'active': active, 'path': self._cap_path,
+                  'count': self._cap_count,
+                  'left_s': (max(0.0, round(self._cap_until - time.time(), 1))
+                             if active else 0.0),
+                  'auto_keyboard_refresh_suppressed': active,
+                  'suppression_scope': 'ingest_external_set_effect_all',
+                  'normal_service_actions_continue': True}
+        if self._cap_error:
+            status['error'] = self._cap_error
+        return status
 
     def _status_fresh(self, wait_s=2.0):
         """要一份这次请求之后的 `Fan/Status`（高温保护位在里面）。"""
@@ -646,16 +674,18 @@ class MqttChannel(Channel):
             got = self._payloads.get('Fan/Status')
         return dict(got['data']) if got else None
 
-    def set_fan_curve(self, duties, type_='CPU'):
+    def set_fan_curve(self, duties, type_='CPU', expected_name=None):
         """经 OEM 服务写一张表的 16 个占空（只改 Duty）。
 
         五条闸，缺一条都不发：
           1. allow_write；
           2. `fan.curve.write` 必须是 verified（本机 2026-10-20 做过一条哨兵点的可逆验证）；
           3. 16 个值、0~100 的整数；
-          4. 先 GET 当前表拿到 `Name`——名字绝不写死，切档后表名会变（M3T1/M2T1）；
+          4. 先 GET 新鲜的当前表拿到 `Name`，拒绝 stale 缓存；指定 expected_name
+             时必须与当前名字一致，不能把旧表草稿的占空写进切档后的新表；
           5. `Fan/Status.FAN_SafetyProtect` 必须是 0。置位时服务只落盘不写 EC，
              面板会以为改了，等保护解除/切档重灌时值才突然生效。
+        expected_name=None 保留低层工具既有调用；HTTP 必须提供草稿来源表名。
         """
         if not self.allow_write:
             return False, '写操作未在配置中允许（config.hardware.ec.allow_write=false）'
@@ -676,9 +706,14 @@ class MqttChannel(Channel):
         current = self.fan_curve(wait_s=2.0)
         if not current.get('ok'):
             return False, '拿不到当前风扇表，拒绝写：%s' % (current.get('reason') or '未知原因')
+        if current.get('stale'):
+            return False, '当前风扇表是 stale 缓存，拒绝写：请重新读取新鲜表后再提交'
         name = current.get('name')
         if not name:
             return False, '当前表没报名字，拒绝写（名字必须是服务给的，不能写死）'
+        if expected_name is not None and expected_name != name:
+            return False, ('风扇表名已变化（草稿 %r，当前 %r），拒绝写：请重新读取后再提交'
+                           % (expected_name, name))
         point_count = len(current['tables'].get(type_) or [])
         if point_count != 16:
             return False, '当前 %s 表不是 16 点（%d），拒绝写' % (type_, point_count)
@@ -729,12 +764,27 @@ class MqttChannel(Channel):
             'DefaultData': None,
         }
 
+    def refresh_keyboard_status(self):
+        """灯效写完后补一次幂等 SetPower，让服务现读键盘并回 Keyboard/Status。
+
+        SetEffectALL 不会更新 Keyboard/Status（服务只在 SetPower 处理里回读键盘），
+        所以面板写完成波浪后面板自己还显示呼吸。这里用**当前**背光开关状态发一条
+        SetPower：开着的还是开、关着的还是关，只触发回读，不顺手改背光。
+        拿不到当前开关状态就跳过，宁可不刷新也不猜。
+        """
+        kb = (self.payloads().get('Keyboard/Status') or {}).get('data') or {}
+        power = str(kb.get('powerStatus') or '').lower()
+        if power not in ('on', 'off'):
+            return False, '拿不到当前背光开关状态'
+        return self.send_action('KB_POWER_ON' if power == 'on' else 'KB_POWER_OFF',
+                                note='刷新键盘状态（灯效回读）')
+
     def set_keyboard_effect(self, effect, light, speed, colors,
                             direction=None, welcome=False):
         """经 OEM 服务写键盘灯效（SetEffectALL，2026-10-20 已做可逆验证）。
 
         只改灯效，不碰背光开关；`nv_save=0` 表示只当前生效、不写键盘 NVRAM。
-        波浪才有左/右方向，其它灯效固定发 None（Creator Center 抓包就是这样）。
+        波浪必须给左/右方向；闪烁可以给无/左/右；其它灯效固定发 None（Creator Center 实测）。
         """
         if not self.allow_write:
             return False, '写操作未在配置中允许（config.hardware.ec.allow_write=false）'
@@ -753,6 +803,10 @@ class MqttChannel(Channel):
         if effect == 'Wave':
             if direction not in ('LeftRight', 'RightLeft'):
                 return False, '波浪的方向只认 LeftRight/RightLeft，收到 %r' % (direction,)
+        elif effect == 'Flash':
+            # CC 的闪烁模式多一个「无方向」；其它灯效没有方向选项。
+            if direction not in ('None', 'LeftRight', 'RightLeft'):
+                return False, '闪烁的方向只认 None/LeftRight/RightLeft，收到 %r' % (direction,)
         else:
             direction = 'None'
         try:
@@ -765,19 +819,27 @@ class MqttChannel(Channel):
             return False, '颜色分量必须在 0~255 之间'
 
         extra = self._lighting_payload(effect, light_i, speed_i, direction, blocks, 'Lighting')
+        self._last_effect_ts = time.time()
         ok, detail = self.send_action(
             'SET_KEYBOARD_EFFECT', extra=extra,
             note='灯效 %s · 亮度 %d · 速度 %d' % (effect, light_i, speed_i))
         if not ok:
             return False, detail
         if not welcome:
-            return True, detail + '（已下发，键盘会立即切换）'
+            refreshed, r_detail = self.refresh_keyboard_status()
+            return True, detail + (
+                '（已下发，键盘会立即切换；状态已回读）' if refreshed
+                else '（已下发，键盘会立即切换；状态回读跳过：%s）' % r_detail)
         w_extra = self._lighting_payload(effect, light_i, speed_i, direction, blocks, 'Welcome')
         w_ok, w_detail = self.send_action('SET_KEYBOARD_EFFECT', extra=w_extra,
                                           note='欢迎模式 %s' % effect)
         if not w_ok:
+            self.refresh_keyboard_status()
             return True, detail + '；但欢迎模式同步失败：%s' % w_detail
-        return True, detail + '（已下发；欢迎模式已同步，会立刻播放一次）'
+        refreshed, r_detail = self.refresh_keyboard_status()
+        return True, detail + (
+            '（已下发；欢迎模式已同步，会立刻播放一次；状态已回读）' if refreshed
+            else '（已下发；欢迎模式已同步，会立刻播放一次；状态回读跳过：%s）' % r_detail)
 
     # ---------- 精细功耗墙 ----------
     def pl_limits(self):
@@ -1070,6 +1132,16 @@ class MqttChannel(Channel):
             'tcc_offset_max': num(fan.get('CPU_TccOffsetMaximum')) if fan else None,
             'fan_switch_speed_ms': num(fan.get('FAN_FanSwitchSpeed')) if fan else None,
             'fan_switch_speed_enabled': None if speed_switch is None else speed_switch == 1,
+            # SPC 弹窗的只读项：Creator Center 的「仪表盘」里能看见，但本机没验证过
+            # 写入可逆性（尤其核心电压偏移属于超频红线），面板只显示、不下发。
+            'gpu_target_temp': num(fan.get('GPU_TargetTemperature')) if fan else None,
+            'gpu_core_offset': num(fan.get('GPU_CoreClockOffset')) if fan else None,
+            'gpu_mem_offset': num(fan.get('GPU_MemoryClockOffset')) if fan else None,
+            'core_voltage_offset': num(fan.get('CPU_OffsetCoreVoltage')) if fan else None,
+            'tgp_target': num(fan.get('GPU_ConfigurableTGPTarget')) if fan else None,
+            'tgp_enabled': (num(fan.get('GPU_ConfigurableTGPSwitch')) == 1) if fan else None,
+            'dynamic_boost': num(fan.get('GPU_DynamicBoost')) if fan else None,
+            'dynamic_boost_on': (num(fan.get('GPU_DynamicBoostSwitch')) == 1) if fan else None,
             # Fan/Status 里 OEM 自己写的允许范围：以后任何写入都拿这组数当护栏。
             'limits': {k: num(fan.get(v)) for k, v in (
                 ('pl1_min', 'CPU_PL1Minimum'), ('pl1_max', 'CPU_PL1Maximum'),

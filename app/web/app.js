@@ -42,18 +42,42 @@ const KB_EFFECT_NAME_BY_CODE = {
 // 逆向仓库 HIDKeyboard.Translate_ITE_SpeedValue：界面 0..4 → 固件 10/7/5/3/1
 const KB_SPEED_TO_UI = { 10: 0, 7: 1, 5: 2, 3: 3, 1: 4 };
 const KB_DIRECTION_BY_CODE = { 0: 'None', 1: 'LeftRight', 2: 'RightLeft' };
+const KB_EFFECT_OPTS = {
+  Single: { colors: 4, bright: true, speed: false, dir: 'none' },
+  Breathing: { colors: 7, bright: true, speed: true, dir: 'none' },
+  Wave: { colors: 7, bright: true, speed: true, dir: 'lr' },
+  Rainbow: { colors: 0, bright: true, speed: false, dir: 'none' },
+  Mix: { colors: 7, bright: true, speed: true, dir: 'none' },
+  Flash: { colors: 7, bright: true, speed: true, dir: 'all' },
+  Music: { colors: 4, bright: false, speed: false, dir: 'none' },
+};
+// 灯条无可靠状态回声，写入未经可逆验证，因此仅展示选项。
+const LB_EFFECTS = [
+  { id: 'Single', name: '单色', colors: 1, bright: true, speed: false, dir: 'none' },
+  { id: 'Breathing', name: '呼吸', colors: 7, bright: true, speed: true, dir: 'none' },
+  { id: 'Wave', name: '波浪', colors: 7, bright: true, speed: true, dir: 'none' },
+  { id: 'Rainbow', name: '彩虹', colors: 0, bright: true, speed: false, dir: 'none' },
+  { id: 'Mix', name: '混色', colors: 7, bright: true, speed: true, dir: 'none' },
+  { id: 'Impact', name: '碰撞', colors: 7, bright: true, speed: true, dir: 'none' },
+  { id: 'Thinking', name: '思维', colors: 7, bright: true, speed: true, dir: 'none' },
+  { id: 'Raindrop', name: '雨滴', colors: 7, bright: true, speed: true, dir: 'none' },
+  { id: 'Music', name: '音乐', colors: 7, bright: true, speed: true, dir: 'none' },
+];
 let lightEffect = 'Breathing';
 let lightEditorInit = false;
+let lightBusy = false;
+let lightSubmitted = null;
 
 // 侧边栏分区：标题/副标题只在这里维护一份。
 const VIEW_META = {
-  overview: ['总览', '性能、风扇、灯光一眼看清'],
-  performance: ['性能', '控制意图、调度性格与跑分'],
-  cooling: ['风扇', '曲线、换挡间隔与温度控制'],
-  lighting: ['灯光', '键盘灯效、背光与灯条状态'],
-  system: ['硬件', 'EC 直读、OEM 状态、能力矩阵与日志'],
-  monitor: ['监控', '实时遥测与历史曲线'],
-  custom: ['自定义', '把常做的操作存成一键方案'],
+  overview: ['总览', '你的电脑，现在运行得怎么样'],
+  quick: ['快速开关', '常用设置，不必再翻找'],
+  creator: ['造物者', '按你的需要，平衡性能与声音'],
+  lighting: ['灯光', '选一种效果，配上喜欢的颜色'],
+  system: ['诊断', '连接、原始读数与日志，排查问题时再看'],
+  monitor: ['监控', '看看温度、负载和功耗如何变化'],
+  custom: ['我的方案', '把喜欢的设置留下，下次一键应用'],
+  settings: ['更多设置', '扩展能力与接入进展'],
 };
 const ICONS = {
   lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>',
@@ -67,6 +91,15 @@ const PRESET_KEY = 'umi.presets.v1';
 let presets = loadPresets();
 let plDirty = false;
 let plFilled = false;
+let plBusy = false;
+let plSubmitted = null;
+let plNeedsRefresh = false;
+let plEpoch = 0;
+let presetBusy = false;
+let fanSpeedDirty = false;
+let fanSpeedBusy = false;
+let fanSpeedSubmitted = null;
+let lightSelectedColor = 0;
 
 const rgbToHex = (c) => '#' + (c || []).map((v) => {
   const n = Math.max(0, Math.min(255, Number(v) || 0));
@@ -88,6 +121,9 @@ const fanModeWord = (flag) => {
 };
 const hwModeWord = (m) => (m === 'auto' ? '自适应' : (TIERS[m] || null));
 let lastState = null;
+let stateRequestId = 0;
+let stateSettledId = 0;
+let stateSnapshotTs = 0;
 let benchWasRunning = false;
 let benchTimer = null;   // 跑分进行中改成 1 秒刷一次，进度条才看得出在动
 let histData = { samples: [], marks: [] };
@@ -98,11 +134,29 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
 
 async function api(path, body) {
   const opt = body ? { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body) } : {};
+    body: JSON.stringify(body) } : { signal: AbortSignal.timeout(15000) };
   const res = await fetch(path, opt);
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || data.error || ('HTTP ' + res.status));
+  if (!res.ok) throw new Error(data.detail || data.error || data.reason || ('HTTP ' + res.status));
   return data;
+}
+
+async function readDeviceState() {
+  const requestId = ++stateRequestId;
+  let snapshot;
+  try {
+    snapshot = await api('/api/state');
+  } catch (e) {
+    if (requestId < stateSettledId) return null;
+    stateSettledId = requestId;
+    throw e;
+  }
+  if (requestId < stateSettledId) return null;
+  stateSettledId = requestId;
+  if (!Number.isFinite(snapshot.ts) || snapshot.ts < stateSnapshotTs) return null;
+  stateSnapshotTs = snapshot.ts;
+  lastState = snapshot;
+  return snapshot;
 }
 
 let toastTimer = null;
@@ -138,11 +192,19 @@ function markPending(key, want, secs, label) {
 function pendingFor(key, cur) {
   const p = PENDING[key];
   if (!p) return null;
-  if (cur === p.want) { delete PENDING[key]; return null; }
+  if (cur === p.want) {
+    delete PENDING[key];
+    if (key !== 'mode') {
+      toast(p.label + '：已生效');
+      setText('quick-feedback', p.label + '：已生效，设备读数已确认。');
+    }
+    return null;
+  }
   if (Date.now() > p.until) {
     delete PENDING[key];
-    toast(p.label + '：等了约 ' + p.secs + ' 秒没等到回读，可能被别的程序改回去了，'
-      + '照现在的读数再决定要不要重发', true);
+    const message = p.label + '：未等到设备确认，请检查当前状态后再试。';
+    toast(message, true);
+    setText('quick-feedback', message);
     return null;
   }
   return p;
@@ -186,15 +248,22 @@ async function autoProbe(say) {
 }
 
 function renderIntents() {
-  $('intents').innerHTML = INTENTS.map((it) => `
-    <div class="intent ${lastState && lastState.intent === it.id ? 'active' : ''}" data-id="${it.id}">
-      <div class="name">${it.name}</div><div class="desc">${it.desc}</div>
-    </div>`).join('');
-  document.querySelectorAll('.intent').forEach((el) => {
-    el.onclick = async () => {
-      try { await api('/api/intent', { intent: el.dataset.id }); toast('意图已设为 ' + el.textContent.trim()); poll(); }
-      catch (e) { toast('设置失败：' + e.message, true); }
-    };
+  const box = $('intents');
+  if (!box.children.length) {
+    box.innerHTML = INTENTS.map((it) => `<button class="intent" data-id="${it.id}"><span class="name">${it.name}</span><span class="desc">${it.desc}</span></button>`).join('');
+    box.querySelectorAll('button').forEach((el) => {
+      el.onclick = async () => {
+        el.disabled = true;
+        try { await api('/api/intent', { intent: el.dataset.id }); toast('调度方式已设为 ' + INTENT_BY_ID[el.dataset.id].name); await poll(); }
+        catch (e) { toast('设置失败：' + e.message, true); }
+        finally { el.disabled = false; }
+      };
+    });
+  }
+  box.querySelectorAll('button').forEach((el) => {
+    const selected = !!lastState && lastState.intent === el.dataset.id;
+    el.classList.toggle('active', selected);
+    el.setAttribute('aria-pressed', String(selected));
   });
 }
 
@@ -370,66 +439,11 @@ function renderHardware(s) {
   ];
   $('hw').innerHTML = rows.join('');
 
-  const canFan = (caps['fan.mode'] || {}).state === 'verified';
-  const available = Object.keys(s.fan_modes || {});
-  // 只放实体按键真正会到的那几态（GCUBridge 在跑时是 0x10↔0xA0 两态循环，
-  // 半亮那一态也留着，面板点得到）；User_Fan_Level1~5 是自定义曲线的子档，
-  // 放上来只会让面板看起来比实际能控的东西多。
-  // ⚠️ 但这三个按钮**只改指示灯、不改功耗墙**（见下面 hw-hint 的说明）——
-  // 那个字节是服务的输出，不是输入。
-  const flags = FAN_KEY_FLAGS.filter((f) => available.indexOf(f) >= 0);
-  const lockLeft = (ecCh.detail || {}).fan_lock_left || 0;
-  const lockBy = (ecCh.detail || {}).fan_lock_by;
-  const owned = !!(ecCh.detail || {}).fan_user_owned;
-  const fanButtons = canFan ? flags.map((f) => `
-    <button data-fan="${f}" class="${hw.fan_mode_flag === f ? 'primary' : ''}">${esc(fanModeWord(f) || f)}</button>`).join('') : '';
-  const canWrite = (caps['mode.write'] || {}).state === 'verified';
-  // 档位按钮由后端给清单，前端不许写死（上一版写死 office/balance/turbo，
-  // 结果 balance 点了只会报「未知档位」；而三个词用的还是本机界面里没有的
-  // 办公/均衡/狂暴）。清单里只有在本机做过「写→看 EC 真变了→还原」的那两档。
-  const mqttCh = (s.channels || []).find((c) => c.name === 'mqtt') || {};
-  const modeOpts = (mqttCh.detail || {}).mode_options || [];
-  $('hw-buttons').innerHTML = fanButtons
-    + (canWrite ? modeOpts.map((o) => `
-    <button data-mode="${esc(o.id)}">${esc(o.label)}</button>`).join('') : '')
-    + `<button class="ghost" id="btn-refresh-hw">立即自检通道</button>`;
-  document.querySelectorAll('#hw-buttons button[data-fan]').forEach((b) => {
-    b.onclick = async () => {
-      try { const r = await api('/api/fan-mode', { flag: b.dataset.fan }); toast(r.detail || '已下发'); }
-      catch (e) { toast('下发失败：' + e.message, true); }
-      poll();
-    };
-  });
-  document.querySelectorAll('#hw-buttons button[data-mode]').forEach((b) => {
-    b.onclick = async () => {
-      try { const r = await api('/api/mode', { mode: b.dataset.mode }); toast(r.detail || '已下发'); }
-      catch (e) { toast('下发失败：' + e.message, true); }
-      poll();
-    };
-  });
-  $('btn-refresh-hw').onclick = () => {
-    // 手点就是「我现在就要知道结果」，所以绕开自动探测的最短间隔，并且要弹提示
-    lastProbeAt = 0;
-    autoProbe(true);
-  };
-  const why = (c) => (c.detail || {}).reason || '未探测';
-  const hints = [];
-  if (lockLeft) hints.push(`${lockBy || '人工'}优先，${Math.round(lockLeft)} 秒内面板不自动改硬件模式`);
-  else if (owned) hints.push('当前是低功耗档（自定义曲线），面板不会自动改（点上面的按钮可接管）');
-  // 这一态不是「只改风扇」：全表差分抓到 PL1 被压到 10W，满载实测慢 23~26%（notes/hardware-channels.md 6.4）
-  if ((hw.fan_mode_flag || '').indexOf('User_Fan') === 0) {
-    hints.push('⚠ 这一态把功耗墙压到 10W，满载实测慢 23~26%，换来的是安静和低温');
+  if (!$('btn-refresh-hw')) {
+    $('hw-buttons').innerHTML = '<button class="ghost" id="btn-refresh-hw">重新检查连接</button>';
+    $('btn-refresh-hw').onclick = () => { lastProbeAt = 0; autoProbe(true); };
   }
-  // 上一版这里没有这条说明，结果「性能模式」按钮写着「功耗墙 75W」却是假的：
-  // 实测裸写那个字节 100 秒、52 个采样点，PL1 一次都没动（notes/hardware-channels.md 6.11 十五）。
-  if (canFan) hints.push('上面那三个按钮只改指示灯和字节，**改不动功耗墙**——要改墙请用下面的「OEM 硬件档」');
-  // 能写也要说延迟：实测下发 OEM 档位约 24 秒后功耗墙才动，Win 锁约 6 秒，
-  // 不说这一句用户会以为没点上，接着连点几次。
-  if (canWrite) hints.push('OEM 硬件档按钮改的是功耗墙，**生效约需 24 秒**，点了别重复按');
-  if (!canWrite) hints.push('OEM 档位不可写：' + ((mqttCh.detail || {}).mode_write_reason || why(mqttCh)));
-  if (!canFan) hints.push('硬件模式不可写：' + ((ecCh.detail || {}).fan_mode_reason || why(ecCh)));
-  $('hw-hint').textContent = hints.join('；');
-  $('hw-hint').classList.toggle('err', !canWrite && !canFan);
+  $('hw-hint').textContent = '这些是设备与服务的原始读数；整机模式请在“造物者”中切换。';
 }
 
 // GCUBridge 报上来的开关状态。这一块**只读**：语义还没逐条验证过，
@@ -448,7 +462,6 @@ function renderOem(s) {
     box.innerHTML = [hwRow('GCUBridge', '未连接', false),
       hwRow('OEM 状态', '拿不到（要 GCUService 在跑，且 clientId 没被别人占用）', false)].join('');
     if ($('oem-buttons')) $('oem-buttons').innerHTML = '';   // 通道掉了，按钮也得跟着收走
-    if ($('oem-controls')) $('oem-controls').hidden = true;
     hint.classList.add('err');
     hint.textContent = '原因：' + ((mqCh.detail || {}).reason || '未探测')
       + '。这一卡片只读，连上后会自动填。';
@@ -458,10 +471,11 @@ function renderOem(s) {
 
   // 等待态在这里算一次、两处（读数行 + 按钮）共用：pendingFor 会销账也会超时，
   // 同一轮渲染里算两遍会出现「行上还在等、按钮已经好了」的错位。
-  const winPend = pendingFor('winkey', oem.win_key_locked);
-  const kbPend = pendingFor('kbpower', oem.kb_power_on);
-  const tccPend = pendingFor('tcc', oem.tcc_offset_enabled);
-  const fanSpeedPend = pendingFor('fanspeed', oem.fan_switch_speed_enabled);
+  const live = deviceOnline(s);
+  const winPend = pendingFor('winkey', live ? oem.win_key_locked : null);
+  const kbPend = pendingFor('kbpower', live ? oem.kb_power_on : null);
+  const tccPend = pendingFor('tcc', live ? oem.tcc_offset_enabled : null);
+  const fanSpeedPend = fanSpeedSubmitted;
 
   const lim = oem.limits || {};
   const limText = lim.pl1_min != null
@@ -526,93 +540,8 @@ function renderOem(s) {
           ? onOff(oem.ac_recovery_on, '开', '关') : '不支持（OEM 报 NotSupport）', true),
   ].join('');
 
-  // Win 键锁定是目前唯一做完可逆验证的 OEM 写操作（2026-09-30 01:43：下发 UNLOCK
-  // 后 EC 的 ADDR_STAUTS_BYTE 1→0，再下发 LOCK 又回到 1，EC 与 Setting/Status 两条
-  // 通道读数一致），所以整张卡片只给它一个按钮，其余照旧只读。
-  const btns = $('oem-buttons');
-  // canWin 与 winNote 在 if 外面算：卡片底下那行说明也要用同一句话
-  const caps = s.capabilities || {};
-  const canWin = (caps['winkey.write'] || {}).state === 'verified' && oem.win_key_locked != null;
-  // 键盘背光：2026-09-30 15:31 做完可逆验证（Off→On 约 0.3 秒，关回后亮度/灯效/速度不变），
-  // 所以整张卡片现在有两个按钮。亮度/灯效是另外两条命令，没验，照旧不给按钮。
-  const canKb = (caps['lighting.rgb.write'] || {}).state === 'verified' && oem.kb_power_on != null;
-  // TCC / 风扇换挡：2026-10-20 都用 tools/tcc_fan_speed_test.py --write 做过可逆验证，
-  // 能力升 verified 后才把下面这组固定控件放出来。输入框不重建，避免 2 秒轮询把
-  // 用户正在输入的值冲掉；只有不在焦点上时才同步成回读值。
-  const canTcc = (caps['cpu.tcc.write'] || {}).state === 'verified'
-    && oem.tcc_offset_c != null && oem.tcc_offset_max != null
-    && oem.tcc_offset_enabled != null;
-  const canFanSpeed = (caps['fan.switch_speed.write'] || {}).state === 'verified'
-    && oem.fan_switch_speed_ms != null && oem.fan_switch_speed_enabled != null;
-  const controls = $('oem-controls');
-  if (controls) {
-    controls.hidden = !(canTcc || canFanSpeed);
-    const tccInput = $('tcc-value');
-    if (tccInput) {
-      tccInput.max = oem.tcc_offset_max != null ? oem.tcc_offset_max : 5;
-      if (document.activeElement !== tccInput && oem.tcc_offset_c != null) tccInput.value = oem.tcc_offset_c;
-      tccInput.disabled = !canTcc || !!tccPend;
-    }
-    const tccApply = $('btn-tcc-apply');
-    if (tccApply) tccApply.disabled = !canTcc || !!tccPend;
-    const tccOff = $('btn-tcc-off');
-    if (tccOff) tccOff.disabled = !canTcc || !!tccPend || !oem.tcc_offset_enabled;
-    const fanInput = $('fanspeed-value');
-    if (fanInput) {
-      if (document.activeElement !== fanInput && oem.fan_switch_speed_ms != null) {
-        fanInput.value = oem.fan_switch_speed_ms;
-      }
-      fanInput.disabled = !canFanSpeed || !!fanSpeedPend;
-    }
-    const fanApply = $('btn-fanspeed-apply');
-    if (fanApply) fanApply.disabled = !canFanSpeed || !!fanSpeedPend;
-    const fanOff = $('btn-fanspeed-off');
-    if (fanOff) fanOff.disabled = !canFanSpeed || !!fanSpeedPend || !oem.fan_switch_speed_enabled;
-  }
-  const winNote = (mqCh.detail || {}).winkey_write_reason || '';
-  if (btns) {
-    btns.innerHTML = (canWin
-      ? `<button id="btn-winkey"${winPend ? ' disabled' : ''}>${
-          winPend ? PENDING_WORD : (oem.win_key_locked ? '解锁 Win 键' : '锁定 Win 键')}</button>` : '')
-      + (canKb
-        ? `<button id="btn-kbpower"${kbPend ? ' disabled' : ''}>${
-            kbPend ? PENDING_WORD : (oem.kb_power_on ? '关闭键盘背光' : '打开键盘背光')}</button>` : '');
-    const b = $('btn-winkey');
-    if (b) {
-      b.onclick = async () => {
-        const lock = !oem.win_key_locked;
-        const act = lock ? 'WINKEY_LOCK' : 'WINKEY_UNLOCK';
-        try { const r = await api('/api/action', { action: act }); toast(r.detail || '已下发'); }
-        catch (e) { toast('下发失败：' + e.message, true); return; }
-        markPending('winkey', lock, WINKEY_WAIT_S, 'Win 键锁定');
-        poll();
-      };
-    }
-    const kb = $('btn-kbpower');
-    if (kb) {
-      kb.onclick = async () => {
-        // 被闸门拒绝时后端回 409，api() 会抛错，detail 原样弹出来（不静默吞掉）
-        const on = !oem.kb_power_on;
-        try { const r = await api('/api/action',
-                 { action: on ? 'KB_POWER_ON' : 'KB_POWER_OFF' });
-               toast(r.detail || '已下发'); }
-        catch (e) { toast('下发失败：' + e.message, true); return; }
-        markPending('kbpower', on, KB_WAIT_S, '键盘背光');
-        poll();
-      };
-    }
-  }
-
-  hint.textContent = '数据来自 GCUBridge 的 Setting/Status · HidLightbar/Status · Fan/Status · Keyboard/Status'
-    + '，全是 OEM 自己报的读数。只有做过「下发 → EC 回读 → 还原」可逆验证的开关才给按钮，'
-    + '其余一律只读；认不出来的值照实写「未知」，不猜。'
-    + '「OEM 允许范围」是 Fan/Status 里 OEM 自己写的上下限，以后任何写入都拿它当护栏。'
-    + (canTcc || canFanSpeed ? ' TCC 偏移越大越保守（更早降频）；风扇换挡间隔只收 100~2000 ms、100 的整数倍。' : '')
-    + (canWin && winNote ? ' ' + winNote : '')
-    + (canKb && (mqCh.detail || {}).rgb_write_reason ? ' ' + mqCh.detail.rgb_write_reason : '')
-    + (canTcc && (mqCh.detail || {}).tcc_write_reason ? ' ' + mqCh.detail.tcc_write_reason : '')
-    + (canFanSpeed && (mqCh.detail || {}).fan_switch_write_reason
-       ? ' ' + mqCh.detail.fan_switch_write_reason : '');
+  $('oem-buttons').replaceChildren();
+  hint.textContent = '以下是官方服务上次报告的状态，不保证每项都有硬件反馈。常用操作在“快速开关”和“造物者”，这里仅用于诊断。';
 }
 
 // ---------- 侧边栏 / 总览 / 自定义 ----------
@@ -652,133 +581,116 @@ function renderOverview(s) {
   const x = (s && s.sensor) || {};
   const g = x.gpu || {};
   const hw = (s && s.hardware) || {};
-  const oem = hw.oem || {};
+  const mem = x.mem || {};
+  const disk = x.disk || {};
+  // 顶栏
   setText('top-cpu', x.cpu_temp != null ? x.cpu_temp + '°C' : '--');
   setText('top-gpu', g.temp_c != null ? g.temp_c + '°C' : '--');
   setText('top-fan', hw.fan_rpm != null ? fmtRpm(hw.fan_rpm) : '--');
+  // CPU 卡
   setText('ov-cpu-temp', x.cpu_temp != null ? x.cpu_temp : '--');
   setText('ov-cpu-mhz', x.cpu_mhz != null ? x.cpu_mhz + ' MHz' : '-- MHz');
   setText('ov-cpu-load', x.cpu_pct != null ? '占用 ' + x.cpu_pct + '%' : '占用 --');
   setBar('ov-cpu-bar', x.cpu_pct);
+  // GPU 卡
   setText('ov-gpu-temp', g.temp_c != null ? g.temp_c : '--');
   setText('ov-gpu-w', g.power_w != null ? g.power_w + ' W' : '-- W');
   setText('ov-gpu-load', x.gpu_pct != null ? '占用 ' + x.gpu_pct + '%' : '占用 --');
   setBar('ov-gpu-bar', x.gpu_pct);
+  // 内存卡
+  setText('ov-mem-used', mem.used_gb != null ? mem.used_gb : '--');
+  setText('ov-mem-total', mem.total_gb != null ? '共 ' + mem.total_gb + ' GB' : '共 -- GB');
+  setText('ov-mem-pct', mem.pct != null ? '占用 ' + mem.pct + '%' : '占用 --');
+  setBar('ov-mem-bar', mem.pct);
+  // 存储卡（型号/温度还没采，先给容量与占用；拿不到就显示未知）
+  setText('ov-disk-drive', disk.drive ? '（' + disk.drive + '）' : '');
+  setText('ov-disk-used', disk.used_gb != null ? disk.used_gb : '--');
+  setText('ov-disk-total', disk.total_gb != null ? '共 ' + disk.total_gb + ' GB' : '共 -- GB');
+  setText('ov-disk-pct', disk.pct != null ? '已用 ' + disk.pct + '%' : '已用 --');
+  setBar('ov-disk-bar', disk.pct);
+  const mode = currentOemMode(s);
+  const status = $('ov-status-card');
+  const pending = PENDING.mode;
+  const fresh = !!(s && Date.now() / 1000 - s.ts < 8);
+  status.dataset.mode = pending ? 'pending' : mode || 'unknown';
+  status.dataset.fresh = String(fresh);
+  setText('ov-state-freshness', fresh ? '本机实时读数' : '读数待更新');
+  setText('ov-creator-mode', pending ? '正在切换' : mode == null ? '等待回读' : mode === 'turbo' ? '已开启' : '已关闭');
+  setText('ov-creator-desc', pending ? '等待 OEM 硬件档位生效'
+    : mode === 'turbo' ? 'OEM 性能档 · Turbo' : mode === 'office' ? 'OEM 省电档 · Office' : '尚未确认 OEM 硬件档位');
+  setText('ov-perf-tier', TIERS[s && s.tier] || (s && s.tier) || '--');
+  const it = INTENT_BY_ID[s && s.intent];
+  setText('ov-intent', it ? it.name : '--');
   setText('ov-fan-rpm', hw.fan_rpm != null ? fmtRpm(hw.fan_rpm) : '--');
-  setText('ov-fan2-rpm', hw.fan2_rpm != null ? '副风扇 ' + fmtRpm(hw.fan2_rpm) : '副风扇 --');
-  setText('ov-fan-duty', hw.fan_duty_l != null ? '占空 ' + hw.fan_duty_l + '%' : '占空 --');
-  setBar('ov-fan-bar', hw.fan_duty_l != null ? hw.fan_duty_l
-    : (hw.fan_rpm != null ? Math.min(100, hw.fan_rpm / 50) : 0));
+  setText('ov-fan-detail', '副风扇 ' + (hw.fan2_rpm != null ? fmtRpm(hw.fan2_rpm) : '--'));
   const pl1 = hw.pl1 != null ? hw.pl1 : hw.pl1_setting;
-  const pl2 = hw.pl2 != null ? hw.pl2 : hw.pl2_setting;
-  const pl4 = hw.pl4_setting != null ? hw.pl4_setting : hw.pl4;
-  setText('ov-pl1', pl1 != null ? pl1 : '--');
-  setText('ov-pl2', 'PL2 ' + (pl2 != null ? pl2 + ' W' : '--'));
-  setText('ov-pl4', 'PL4 ' + (pl4 != null ? pl4 + ' W' : '--'));
-  setText('ov-hw-mode', '硬件模式 ' + (hwModeWord(hw.hw_mode) || (oem.profile_name || '未知')));
-  setText('cool-fan-rpm', hw.fan_rpm != null ? fmtRpm(hw.fan_rpm) : '--');
+  setText('ov-pl1', pl1 != null ? pl1 + ' W' : '--');
+  setText('cool-fan-rpm', hw.fan_rpm != null ? Math.round(hw.fan_rpm).toLocaleString() : '--');
   setText('cool-fan-duty', '占空 ' + (hw.fan_duty_l != null ? hw.fan_duty_l + '%' : '--'));
-  setText('cool-fan2-rpm', hw.fan2_rpm != null ? fmtRpm(hw.fan2_rpm) : '--');
+  setText('cool-fan2-rpm', hw.fan2_rpm != null ? Math.round(hw.fan2_rpm).toLocaleString() : '--');
   setText('cool-fan2-duty', '占空 ' + (hw.fan_duty_r != null ? hw.fan_duty_r + '%' : '--'));
   setText('cool-cpu-temp', x.cpu_temp != null ? x.cpu_temp : '--');
   setText('cool-hw-mode', '硬件模式 ' + (hwModeWord(hw.hw_mode) || '未知'));
-  renderOverviewModes(s);
-  renderOverviewQuick(s);
   renderLightbar(s);
 }
 
-function renderOverviewModes(s) {
-  const box = $('ov-modes');
-  if (!box) return;
-  const mq = (s.channels || []).find((c) => c.name === 'mqtt') || {};
-  const opts = (mq.detail || {}).mode_options || [];
-  const cur = currentOemMode(s);
-  const pending = PENDING.mode ? PENDING.mode.want : null;
-  box.innerHTML = opts.map((o) => `
-    <button class="mode-card${cur === o.id ? ' active' : ''}${pending === o.id ? ' pending' : ''}" data-mode="${esc(o.id)}">
-      <span class="mode-name">${esc(MODE_NAME[o.id] || o.label || o.id)}</span>
-      <span class="mode-desc">${esc(MODE_DESC[o.id] || '')}</span>
-      <span class="mode-badge">${pending === o.id ? '正在生效…约 24 秒'
-        : (cur === o.id ? '当前档位' : 'OEM 硬件档 · 约 24 秒生效')}</span>
-    </button>`).join('')
-    + `<button class="mode-card custom" data-goto="custom">
-        <span class="mode-name">自定义</span>
-        <span class="mode-desc">把常做的设置存成一键方案</span>
-        <span class="mode-badge">我的方案 · 可编辑</span>
-      </button>`;
-  box.querySelectorAll('[data-mode]').forEach((b) => {
-    b.onclick = async () => {
-      const mode = b.dataset.mode;
-      b.disabled = true;
-      try {
-        const r = await api('/api/mode', { mode });
-        markPending('mode', mode, 45, 'OEM 硬件档');
-        toast((r.detail || '已下发') + ' · 约 24 秒后回读确认');
-      } catch (e) { toast('切档失败：' + e.message, true); }
-      poll();
-    };
-  });
-  box.querySelectorAll('[data-goto]').forEach((b) => {
-    b.onclick = () => showView(b.dataset.goto);
-  });
-  const hint = $('ov-mode-hint');
-  if (hint) {
-    hint.textContent = cur
-      ? `当前 OEM 档位：${cur === 'turbo' ? '性能模式' : '省电模式'}。切档后功耗墙和风扇表由服务重算，约 24 秒生效。`
-      : '当前档位认不出来（可能是实体键的中间态）；点上面的按钮可以接管。';
+const QUICK_SWITCHES = {
+  kb: { key: 'kbpower', field: 'kb_power_on', cap: 'lighting.rgb.write', label: '键盘背光', on: 'KB_POWER_ON', off: 'KB_POWER_OFF', wait: KB_WAIT_S },
+  win: { key: 'winkey', field: 'win_key_locked', cap: 'winkey.write', label: 'Win 键锁定', on: 'WINKEY_LOCK', off: 'WINKEY_UNLOCK', wait: WINKEY_WAIT_S },
+};
+const quickSending = new Set();
+
+function renderQuick(s) {
+  const oem = ((s || {}).hardware || {}).oem || {};
+  const live = deviceOnline(s);
+  for (const [id, spec] of Object.entries(QUICK_SWITCHES)) {
+    const value = oem[spec.field];
+    const waiting = !!PENDING[spec.key] || quickSending.has(id);
+    const button = $('quick-' + id);
+    button.disabled = !live || typeof value !== 'boolean' || waiting || presetBusy
+      || (((s || {}).capabilities || {})[spec.cap] || {}).state !== 'verified'
+      || (id === 'kb' && (lightBusy || !!lightSubmitted));
+    button.classList.toggle('on', value === true);
+    button.classList.toggle('pending', waiting);
+    button.setAttribute('aria-checked', String(value === true));
+    setText('quick-' + id + '-state', waiting ? '等待确认…' : !live ? '连接待更新'
+      : typeof value !== 'boolean' ? '状态未知' : value ? '已开启' : '已关闭');
+  }
+  const rows = [
+    ['电池保养', (META.battery_mode_labels || {})[(((s || {}).hardware || {}).battery_mode)] || null, '充电设置仅显示，不在面板试写'],
+    ['独显直连', oem.mux_support === false ? '本机未报告支持' : '状态待核实', '服务标志的直连含义尚未验证，暂由 CC 管理'],
+    ['色彩模式', oem.display_mode === 'DISPLAY_STANDARD_MODE' ? '标准' : oem.display_mode ? '未识别' : '未回读', '屏幕颜色配置，暂由 CC 管理'],
+    ['功能键屏幕提示', onOff(oem.osd_hidden, '隐藏', '显示'), '暂由 CC 管理'],
+    ['关机 USB 供电', onOff(oem.usb_charger_on, '开启', '关闭'), '暂由 CC 管理'],
+  ];
+  $('quick-device-status').innerHTML = rows.map(([label, value, desc]) => `<div class="readonly-row"><div><b>${esc(label)}</b><small>${esc(desc)}</small></div><span class="tag">${esc(live ? value || '未回读' : '连接待更新')}</span></div>`).join('');
+  if (!live) setText('quick-feedback', '等待设备连接；确认当前状态前不会发送开关指令。');
+  else if (!PENDING.kbpower && !PENDING.winkey && !quickSending.size && /^(等待设备|正在读取设备)/.test($('quick-feedback').textContent)) {
+    setText('quick-feedback', '设备已连接，可以操作。');
   }
 }
 
-function renderOverviewQuick(s) {
-  const box = $('ov-quick');
-  if (!box) return;
-  const caps = s.capabilities || {};
-  const oem = ((s.hardware || {}).oem) || {};
-  const canWin = (caps['winkey.write'] || {}).state === 'verified' && oem.win_key_locked != null;
-  const canKb = (caps['lighting.rgb.write'] || {}).state === 'verified' && oem.kb_power_on != null;
-  const items = [];
-  if (canWin) {
-    items.push({ id: 'winkey', icon: 'lock', title: 'Win 键锁定',
-      small: oem.win_key_locked ? '已锁定' : '未锁定', on: oem.win_key_locked });
+async function toggleQuick(id) {
+  const spec = QUICK_SWITCHES[id];
+  renderQuick(lastState);
+  if (!spec || $('quick-' + id).disabled) return;
+  const value = !lastState.hardware.oem[spec.field];
+  quickSending.add(id);
+  renderQuick(lastState);
+  setText('quick-feedback', '正在下发' + spec.label + '…');
+  try {
+    await api('/api/action', { action: value ? spec.on : spec.off });
+    markPending(spec.key, value, spec.wait, spec.label);
+    setText('quick-feedback', spec.label + '：已下发，等待设备确认。');
+    toast(spec.label + '：已下发');
+  } catch (e) {
+    setText('quick-feedback', '未完成：' + e.message);
+    toast('下发失败：' + e.message, true);
+  } finally {
+    quickSending.delete(id);
+    renderQuick(lastState);
   }
-  if (canKb) {
-    items.push({ id: 'kbpower', icon: 'light', title: '键盘背光',
-      small: oem.kb_power_on ? '已开启' : '已关闭', on: oem.kb_power_on });
-  }
-  items.push({ id: 'goto-cooling', icon: 'fan', title: '风扇曲线', small: '去调占空与换挡' });
-  items.push({ id: 'goto-lighting', icon: 'spark', title: '键盘灯效', small: '7 种效果与配色' });
-  box.innerHTML = items.map((it) => `
-    <button class="quick-tile${it.on ? ' on' : ''}" data-quick="${it.id}">
-      <span class="q-icon">${ICONS[it.icon] || ''}</span>
-      <span class="q-text"><b>${esc(it.title)}</b><small>${esc(it.small)}</small></span>
-    </button>`).join('');
-  box.querySelectorAll('[data-quick]').forEach((b) => {
-    b.onclick = async () => {
-      const id = b.dataset.quick;
-      if (id === 'goto-cooling') { showView('cooling'); return; }
-      if (id === 'goto-lighting') { showView('lighting'); return; }
-      if (id === 'winkey') {
-        const on = !oem.win_key_locked;
-        try { const r = await api('/api/action', { action: on ? 'WINKEY_LOCK' : 'WINKEY_UNLOCK' }); toast(r.detail || '已下发'); }
-        catch (e) { toast('下发失败：' + e.message, true); return; }
-        markPending('winkey', on, WINKEY_WAIT_S, 'Win 键锁定');
-        poll();
-        return;
-      }
-      if (id === 'kbpower') {
-        const on = !oem.kb_power_on;
-        try { const r = await api('/api/action', { action: on ? 'KB_POWER_ON' : 'KB_POWER_OFF' }); toast(r.detail || '已下发'); }
-        catch (e) { toast('下发失败：' + e.message, true); return; }
-        markPending('kbpower', on, KB_WAIT_S, '键盘背光');
-        poll();
-      }
-    };
-  });
-  const hint = $('ov-quick-hint');
-  if (hint) {
-    hint.textContent = 'Win 锁和背光是做过可逆验证的开关；风扇曲线、灯效点进去继续调。'
-      + (oem.kb_controller ? ` 键盘控制器：${oem.kb_controller}。` : '');
-  }
+  poll();
 }
 
 function renderLightbar(s) {
@@ -805,14 +717,14 @@ function showView(name, opts) {
   document.title = `${meta[0]} · Umi Control Panel`;
   try { localStorage.setItem('umi.view', key); } catch (e) { /* 隐私模式不记 */ }
   if (key === 'overview' || key === 'monitor') setTimeout(loadHistory, 40);
-  if (key === 'custom') { renderCustom(lastState, true); renderPresets(); }
-  if (key === 'cooling') {
-    renderFanCurve();
-    renderOemCurve();
-    if (!curveData && !oemCurve) {
-      const wrap = $('fan-curve-chart-wrap');
-      if (wrap) wrap.hidden = true;
-    }
+  if (key === 'custom') { renderCustom(lastState); renderPresets(); }
+  if (presetBusy) renderPresetLock();
+  if (key === 'creator') {
+    renderCreator(lastState);
+    requestAnimationFrame(() => {
+      if (fanSource === 'mqtt') drawOemCurveEditor();
+      else renderFanCurve();
+    });
   }
   if (!(opts && opts.scroll === false)) window.scrollTo(0, 0);
 }
@@ -822,7 +734,13 @@ function initNav() {
     b.onclick = () => showView(b.dataset.view);
   });
   document.querySelectorAll('[data-goto]').forEach((b) => {
-    b.onclick = () => showView(b.dataset.goto);
+    b.onclick = () => {
+      showView(b.dataset.goto);
+      if (b.dataset.creatorTarget) showCreatorTab(b.dataset.creatorTarget);
+    };
+    if (b.tagName !== 'BUTTON') b.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); b.click(); }
+    };
   });
   let saved = 'overview';
   try {
@@ -853,16 +771,7 @@ function effectLabel(id) {
 }
 
 function captureLighting() {
-  const colors = [];
-  for (let i = 0; i < 7; i++) colors.push(hexToRgb(($('light-color-' + i) || {}).value));
-  return {
-    effect: lightEffect,
-    light: Number(($('light-brightness') || {}).value),
-    speed: Number(($('light-speed') || {}).value),
-    direction: lightEffect === 'Wave' ? (($('light-direction') || {}).value || 'LeftRight') : 'None',
-    colors,
-    welcome: !!($('light-welcome') || {}).checked,
-  };
+  return lightingEditorPayload();
 }
 
 function capturePreset(name, include) {
@@ -874,21 +783,24 @@ function capturePreset(name, include) {
     const mode = currentOemMode(s);
     if (mode) p.mode = mode;
   }
-  if (include.tcc && oem.tcc_offset_c != null) {
-    p.tcc = { value: oem.tcc_offset_c, enabled: !!oem.tcc_offset_enabled };
+  if (include.tcc && currentOemMode(s) === 'turbo' && oem.tcc_offset_c != null
+      && typeof oem.tcc_offset_enabled === 'boolean') {
+    p.tcc = { value: oem.tcc_offset_c, enabled: oem.tcc_offset_enabled };
   }
-  if (include.fanspeed && oem.fan_switch_speed_ms != null) {
-    p.fanSpeed = { ms: oem.fan_switch_speed_ms, enabled: !!oem.fan_switch_speed_enabled };
+  if (include.fanspeed && currentOemMode(s) === 'turbo' && oem.fan_switch_speed_ms != null
+      && typeof oem.fan_switch_speed_enabled === 'boolean') {
+    p.fanSpeed = { ms: oem.fan_switch_speed_ms, enabled: oem.fan_switch_speed_enabled };
   }
-  if (include.light) p.lighting = captureLighting();
+  if (include.light && lightEditorInit && !lightBusy && !lightSubmitted
+      && oem.kb_power_on === true) p.lighting = captureLighting();
   return p;
 }
 
 function presetChips(p) {
   const chips = [];
-  if (p.mode) chips.push(`<span class="chip cyan">${p.mode === 'turbo' ? '性能档' : '省电档'}</span>`);
-  if (p.tcc) chips.push(`<span class="chip amber">TCC ${p.tcc.value}°C · ${p.tcc.enabled ? '开' : '关'}</span>`);
-  if (p.fanSpeed) chips.push(`<span class="chip">换挡 ${p.fanSpeed.ms} ms · ${p.fanSpeed.enabled ? '启用' : '关闭'}</span>`);
+  if (p.mode) chips.push(`<span class="chip cyan">造物者${p.mode === 'turbo' ? '开启' : '关闭'}</span>`);
+  if (p.tcc) chips.push(`<span class="chip amber">提前降温 ${esc(p.tcc.value)}°C · ${p.tcc.enabled ? '开' : '关'}</span>`);
+  if (p.fanSpeed) chips.push(`<span class="chip">响应 ${esc(p.fanSpeed.ms)} ms · ${p.fanSpeed.enabled ? '自定义' : '自动'}</span>`);
   if (p.lighting) chips.push(`<span class="chip purple">${esc(effectLabel(p.lighting.effect))}</span>`);
   return chips.join('') || '<span class="chip">空方案</span>';
 }
@@ -897,7 +809,7 @@ function renderPresets() {
   const box = $('preset-list');
   if (!box) return;
   if (!presets.length) {
-    box.innerHTML = '<div class="preset-empty">还没有方案。先在「灯光」「风扇」页调好，再回来保存。</div>';
+    box.innerHTML = '<div class="preset-empty">还没有方案。先在「造物者」和「灯光」调好，再回来保存。</div>';
     return;
   }
   box.innerHTML = presets.map((p) => `
@@ -923,38 +835,180 @@ function renderPresets() {
   });
 }
 
+function deviceOnline(s) {
+  return !!s && Number.isFinite(s.ts) && Date.now() / 1000 - s.ts < 8
+    && !!((s.channels || []).find((c) => c.name === 'mqtt') || {}).alive;
+}
+
+function canOemMode(s, mode) {
+  const channel = ((s || {}).channels || []).find((c) => c.name === 'mqtt') || {};
+  return ((((s || {}).capabilities || {})['mode.write']) || {}).state === 'verified'
+    && ((channel.detail || {}).mode_options || []).some((option) => option.id === mode);
+}
+
+function lightingMatches(oem, body) {
+  const opts = KB_EFFECT_OPTS[body.effect];
+  return !!opts && KB_EFFECT_NAME_BY_CODE[String(oem.kb_effect)] === body.effect
+    && (!opts.bright || oem.kb_light === body.light)
+    && (!opts.speed || KB_SPEED_TO_UI[String(oem.kb_speed)] === body.speed)
+    && (opts.dir === 'none' || KB_DIRECTION_BY_CODE[String(oem.kb_direction)] === body.direction)
+    && (!opts.colors || (Array.isArray(oem.kb_colors)
+      && body.colors.slice(0, opts.colors).every((color, i) =>
+        JSON.stringify(color) === JSON.stringify(oem.kb_colors[i]))));
+}
+
+function renderPresetLock() {
+  document.querySelectorAll('.view:not(#view-custom)').forEach((view) => { view.inert = presetBusy; });
+  document.querySelectorAll('#view-custom button, #view-custom input').forEach((el) => {
+    if (presetBusy) el.disabled = true;
+    else if (!el.id.endsWith('-range')) el.disabled = false;
+  });
+}
+
+async function waitPresetState(match, timeout = 45000) {
+  const until = Date.now() + timeout;
+  while (Date.now() < until) {
+    const s = await readDeviceState();
+    if (deviceOnline(s) && match(s)) return s;
+    await new Promise((resolve) => setTimeout(resolve, 800));
+  }
+  throw new Error('未等到设备确认，后续设置未发送');
+}
+
 async function applyPreset(id, btn) {
   const p = presets.find((x) => x.id === id);
-  if (!p) return;
-  const lines = [];
-  if (p.mode) lines.push(`OEM 硬件档：${p.mode === 'turbo' ? '性能' : '省电'}`);
-  if (p.tcc) lines.push(`TCC：${p.tcc.value}°C，${p.tcc.enabled ? '开启' : '关闭'}`);
-  if (p.fanSpeed) lines.push(`风扇换挡：${p.fanSpeed.ms} ms，${p.fanSpeed.enabled ? '启用' : '关闭'}`);
-  if (p.lighting) lines.push(`键盘灯效：${effectLabel(p.lighting.effect)}`);
-  if (!lines.length) { toast('这个方案没有可下发的内容', true); return; }
-  if (!confirm(`应用方案「${p.name}」？\n\n${lines.join('\n')}`)) return;
-
-  const steps = [];
-  if (p.mode) steps.push(['OEM 硬件档', () => api('/api/mode', { mode: p.mode })]);
-  if (p.tcc) steps.push(['TCC 偏移', () => api('/api/tcc', { value: p.tcc.value, enabled: p.tcc.enabled })]);
-  if (p.fanSpeed) steps.push(['风扇换挡', () => api('/api/fan-switch-speed', { ms: p.fanSpeed.ms, enabled: p.fanSpeed.enabled })]);
-  if (p.lighting) steps.push(['键盘灯效', () => api('/api/keyboard-effect', p.lighting)]);
-
-  if (btn) btn.disabled = true;
-  let label = '';
-  try {
-    for (let i = 0; i < steps.length; i++) {
-      label = steps[i][0];
-      toast(`正在应用「${p.name}」 ${i + 1}/${steps.length}：${label}…`);
-      await steps[i][1]();
-    }
-    toast(`方案「${p.name}」已全部下发` + (p.mode ? '（OEM 档位约 24 秒生效）' : ''));
-    poll();
-  } catch (e) {
-    toast(`方案「${p.name}」在「${label}」这一步失败：${e.message}`, true);
-  } finally {
-    if (btn) btn.disabled = false;
+  if (!p || presetBusy) return;
+  if (oemWriting || spcBusy || spcSubmitted || plBusy || plSubmitted || fanSpeedBusy || fanSpeedSubmitted
+      || lightBusy || lightSubmitted || quickSending.size || Object.keys(PENDING).length) {
+    toast('其他设置正在生效，请确认完成后再应用方案', true); return;
   }
+  if (!deviceOnline(lastState)) { toast('请先等待设备连接', true); return; }
+  if (p.mode && !canOemMode(lastState, p.mode)) { toast('方案中的档位当前未开放', true); return; }
+  if ((p.tcc || p.fanSpeed) && (p.mode || currentOemMode(lastState)) !== 'turbo') {
+    toast('含降温或风扇响应设置的方案需要开启造物者模式', true); return;
+  }
+  const steps = [];
+  if (p.mode) steps.push({ label: '造物者开关', cap: 'mode.write', path: '/api/mode', body: { mode: p.mode },
+    match: (s) => currentOemMode(s) === p.mode });
+  if (p.tcc) steps.push({ label: '提前降温', cap: 'cpu.tcc.write', path: '/api/tcc', body: p.tcc,
+    match: (s) => s.hardware.oem.tcc_offset_enabled === p.tcc.enabled
+      && s.hardware.oem.tcc_offset_c === p.tcc.value });
+  if (p.fanSpeed) steps.push({ label: '风扇响应', cap: 'fan.switch_speed.write', path: '/api/fan-switch-speed', body: p.fanSpeed,
+    match: (s) => s.hardware.oem.fan_switch_speed_enabled === p.fanSpeed.enabled
+      && (!p.fanSpeed.enabled || s.hardware.oem.fan_switch_speed_ms === p.fanSpeed.ms) });
+  if (p.lighting) steps.push({ label: '键盘灯效', cap: 'lighting.effect.write', path: '/api/keyboard-effect', body: p.lighting,
+    match: (s) => lightingMatches(s.hardware.oem, p.lighting) });
+  if (!steps.length) { toast('这个方案没有可应用的内容', true); return; }
+  if (steps.some((step) => ((lastState.capabilities || {})[step.cap] || {}).state !== 'verified')) {
+    toast('方案中有当前不可操作的项目，请检查设备连接和功能状态', true); return;
+  }
+  if (p.lighting && !((lastState.hardware || {}).oem || {}).kb_power_on) {
+    toast('请先打开键盘背光再应用含灯效的方案', true); return;
+  }
+  if (!confirm(`应用方案「${p.name}」？\n\n${steps.map((step) => step.label).join(' → ')}\n逐步确认；中途失败即停止，不自动回退已经生效的步骤。`)) return;
+  const progress = $('preset-progress');
+  const completed = [];
+  let label = '';
+  presetBusy = true;
+  progress.hidden = false;
+  renderPresetLock();
+  try {
+    for (const [index, step] of steps.entries()) {
+      label = step.label;
+      progress.textContent = `${index + 1}/${steps.length} · 正在下发${label}…`;
+      const fresh = await readDeviceState();
+      if (!deviceOnline(fresh)) throw new Error('未取得新的在线设备读数');
+      if (((fresh.capabilities || {})[step.cap] || {}).state !== 'verified') throw new Error('功能当前不可写');
+      if (step.path === '/api/mode' && !canOemMode(fresh, p.mode)) throw new Error('档位当前未开放');
+      if (step.path === '/api/keyboard-effect' && fresh.hardware.oem.kb_power_on !== true) throw new Error('键盘背光已关闭');
+      if ((step.path === '/api/tcc' || step.path === '/api/fan-switch-speed')
+          && currentOemMode(fresh) !== 'turbo') throw new Error('造物者模式已改变');
+      if (step.path === '/api/mode' && step.match(fresh)) {
+        completed.push(label);
+        progress.textContent = `${index + 1}/${steps.length} · ${label}已是目标档位，无需重复切换。`;
+        continue;
+      }
+      await api(step.path, step.body);
+      progress.textContent = `${index + 1}/${steps.length} · ${label}已下发，等待设备确认…`;
+      await waitPresetState(step.match, step.path === '/api/mode' ? 45000 : 20000);
+      completed.push(label);
+    }
+    progress.textContent = `方案「${p.name}」已生效：${completed.join('、')}读数已确认。`;
+    toast('方案已生效');
+  } catch (e) {
+    progress.textContent = `${label}未完成：${e.message}。已完成：${completed.join('、') || '无'}；未自动回退。`;
+    toast('方案已停止，请查看执行结果', true);
+  } finally {
+    presetBusy = false;
+    renderPresetLock();
+    if (btn) btn.disabled = false;
+    await poll();
+  }
+}
+
+function renderFanSpeed(s) {
+  const oem = (((s || {}).hardware || {}).oem || {});
+  const checkbox = $('fanspeed-enabled');
+  const input = $('fanspeed-value');
+  const can = deviceOnline(s) && currentOemMode(s) === 'turbo' && !PENDING.mode
+    && (((s.capabilities || {})['fan.switch_speed.write'] || {}).state === 'verified')
+    && typeof oem.fan_switch_speed_enabled === 'boolean' && oem.fan_switch_speed_ms != null;
+  if (fanSpeedSubmitted) {
+    const wanted = fanSpeedSubmitted.body;
+    if (deviceOnline(s) && oem.fan_switch_speed_enabled === wanted.enabled
+        && (!wanted.enabled || oem.fan_switch_speed_ms === wanted.ms)) {
+      fanSpeedSubmitted = null;
+      fanSpeedDirty = false;
+      setText('fanspeed-feedback', '已生效：响应设置读数已确认。');
+      toast('风扇响应：已生效');
+    } else if (Date.now() > fanSpeedSubmitted.until) {
+      fanSpeedSubmitted = null;
+      setText('fanspeed-feedback', '未等到一致读数，草稿已保留；请核对设备后再试。');
+      toast('风扇响应未确认', true);
+    }
+  }
+  if (!fanSpeedDirty && !fanSpeedBusy && !fanSpeedSubmitted) {
+    checkbox.checked = oem.fan_switch_speed_enabled === true;
+    input.value = oem.fan_switch_speed_ms == null ? '' : oem.fan_switch_speed_ms;
+  }
+  const locked = !can || fanSpeedBusy || !!fanSpeedSubmitted || presetBusy;
+  checkbox.disabled = locked;
+  input.disabled = locked || !checkbox.checked;
+  $('btn-fanspeed-apply').disabled = locked;
+  $('btn-fanspeed-off').disabled = locked || oem.fan_switch_speed_enabled !== true;
+  if (!can) setText('fanspeed-feedback', '开启造物者并读取当前响应设置后，可以编辑。');
+  else if (fanSpeedBusy) setText('fanspeed-feedback', '正在下发响应设置…');
+  else if (fanSpeedSubmitted) setText('fanspeed-feedback', '已下发，正在确认开关和间隔读数…');
+  else if (fanSpeedDirty && !/^未等到|^未完成/.test($('fanspeed-feedback').textContent)) {
+    setText('fanspeed-feedback', '有未保存的修改，不会自动应用。');
+  } else if (!fanSpeedDirty && !$('fanspeed-feedback').textContent.startsWith('已生效')) {
+    setText('fanspeed-feedback', '当前设备读数。间隔越短，转速响应越快；关闭自定义则由设备管理。');
+  }
+}
+
+async function applyFanSpeed(enabled = $('fanspeed-enabled').checked) {
+  renderFanSpeed(lastState);
+  if ($('btn-fanspeed-apply').disabled) return;
+  const ms = Number($('fanspeed-value').value);
+  if (enabled && (!Number.isInteger(ms) || ms < 100 || ms > 2000 || ms % 100)) {
+    toast('响应间隔须为 100–2000 ms，且为 100 的整数倍', true); return;
+  }
+  const body = enabled ? { enabled, ms } : { enabled };
+  fanSpeedDirty = true;
+  fanSpeedBusy = true;
+  renderFanSpeed(lastState);
+  try {
+    await api('/api/fan-switch-speed', body);
+    fanSpeedSubmitted = { body, until: Date.now() + FANSPEED_WAIT_S * 1000 };
+    toast('风扇响应：已下发，等待确认');
+  } catch (e) {
+    setText('fanspeed-feedback', '未完成：' + e.message);
+    toast('下发失败：' + e.message, true);
+  } finally {
+    fanSpeedBusy = false;
+    renderFanSpeed(lastState);
+  }
+  await poll();
 }
 
 function plBounds(s) {
@@ -970,45 +1024,48 @@ function plBounds(s) {
 }
 
 function fillPlControls(s, force) {
+  if (force) { plDirty = false; plFilled = false; plNeedsRefresh = false; }
   const hint = $('pl-hint');
   const bounds = plBounds(s);
-  if (!bounds) {
-    ['pl1', 'pl2', 'pl4'].forEach((k) => {
-      const el = $(k + '-range');
-      if (el) el.disabled = true;
-    });
-    const btn = $('btn-pl-apply');
-    if (btn) btn.disabled = true;
-    if (hint) hint.textContent = '拿不到 OEM 在 Fan/Status 里报的上下限，功耗墙控件已禁用。';
-    return;
-  }
   const hw = (s && s.hardware) || {};
   const values = {
     pl1: hw.pl1_setting != null ? hw.pl1_setting : hw.pl1,
     pl2: hw.pl2_setting != null ? hw.pl2_setting : hw.pl2,
     pl4: hw.pl4_setting != null ? hw.pl4_setting : hw.pl4,
   };
+  if (plSubmitted) {
+    if (deviceOnline(s) && currentOemMode(s) === 'turbo'
+        && Object.entries(plSubmitted.body).every(([key, value]) => values[key] === value)) {
+      plSubmitted = null; plDirty = false;
+      toast('已生效：临时功耗读数已确认');
+    } else if (Date.now() > plSubmitted.until) {
+      plSubmitted = null; plNeedsRefresh = true;
+      toast('临时功耗未确认，草稿保留，请重读后再操作', true);
+    }
+  }
+  const locked = plBusy || !!plSubmitted || plNeedsRefresh || presetBusy || spcBusy || !!spcSubmitted
+    || !deviceOnline(s) || currentOemMode(s) !== 'turbo' || !!PENDING.mode;
+  const can = !!bounds && (((s || {}).capabilities || {})['power_limit.write'] || {}).state === 'verified';
   for (const k of ['pl1', 'pl2', 'pl4']) {
     const el = $(k + '-range');
-    if (!el) continue;
-    el.min = bounds[k][0];
-    el.max = bounds[k][1];
-    el.disabled = false;
-    if (force || !plFilled || (!plDirty && document.activeElement !== el)) {
-      const v = values[k] != null ? values[k] : bounds[k][0];
-      el.value = Math.max(bounds[k][0], Math.min(bounds[k][1], v));
+    if (bounds) { el.min = bounds[k][0]; el.max = bounds[k][1]; }
+    el.disabled = !can || locked || values[k] == null;
+    if (bounds && values[k] != null && !plDirty && !plBusy && !plSubmitted) {
+      el.value = Math.max(bounds[k][0], Math.min(bounds[k][1], values[k]));
     }
-    const lab = $(k + '-val');
-    if (lab) lab.textContent = el.value + ' W';
+    $(k + '-val').textContent = values[k] == null ? '未回读' : el.value + ' W';
     paintRange(el);
   }
-  const btn = $('btn-pl-apply');
-  if (btn) btn.disabled = false;
-  if (hint) {
-    hint.textContent = `边界来自 OEM：PL1 ${bounds.pl1[0]}~${bounds.pl1[1]} W、`
-      + `PL2 ${bounds.pl2[0]}~${bounds.pl2[1]} W、PL4 ${bounds.pl4[0]}~${bounds.pl4[1]} W。`
-      + '这是当前档位的临时墙，切档/息屏或服务重算都可能改回去。';
-  }
+  $('btn-pl-apply').disabled = ['pl1', 'pl2', 'pl4'].every((k) => $(k + '-range').disabled);
+  $('btn-pl-refresh').disabled = plBusy || !!plSubmitted || presetBusy || spcBusy || !!spcSubmitted
+    || !!PENDING.mode || !deviceOnline(s);
+  hint.textContent = plNeedsRefresh ? '档位变化或回读未确认，草稿已保留。请按当前读数重填后再操作。'
+    : plBusy ? '正在下发临时功耗…'
+    : plSubmitted ? '已下发，等待所有功耗读数一致后解锁。'
+    : !deviceOnline(s) || currentOemMode(s) !== 'turbo' ? '连接设备并开启造物者模式后可以调整。'
+    : !can ? '未取得设备允许范围或写入能力，暂时不能调整功耗。'
+    : plDirty ? '有未保存的修改。长时功耗 ≤ 短时功耗 ≤ 瞬时功耗。'
+    : '当前临时功耗读数；切档、息屏或官方服务重算后可能变化。';
   plFilled = true;
 }
 
@@ -1016,14 +1073,335 @@ function renderCustom(s, force) {
   fillPlControls(s, !!force);
 }
 
+// ---------- 造物者模式（OEM 硬件档 + 三页签） ----------
+let creatorActiveTab = 'fan';
+let creatorModeSeen = null;
+let spcDirty = new Set();
+let spcSubmitted = null;
+let spcBusy = false;
+let spcNeedsRefresh = false;
+let spcEpoch = 0;
+
+function ensureCreatorCurve() {
+  if ($('view-creator').classList.contains('active') && creatorActiveTab === 'fan'
+      && fanSource === 'mqtt' && currentOemMode(lastState) === 'turbo'
+      && !oemReadAttempted && !oemLoading) loadOemCurve(false);
+}
+
+function showCreatorTab(key) {
+  creatorActiveTab = ['fan', 'performance', 'benchmark'].includes(key) ? key : 'fan';
+  document.querySelectorAll('[data-creator-tab]').forEach((button) => {
+    const active = button.dataset.creatorTab === creatorActiveTab;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  document.querySelectorAll('[data-creator-pane]').forEach((pane) => {
+    const active = pane.dataset.creatorPane === creatorActiveTab;
+    pane.hidden = !active;
+    pane.classList.toggle('active', active);
+  });
+  ensureCreatorCurve();
+  if (creatorActiveTab === 'fan') requestAnimationFrame(() => {
+    if (fanSource === 'mqtt') drawOemCurveEditor();
+    else renderFanCurve();
+  });
+  if (creatorActiveTab === 'performance' && lastState) fillSpc(lastState);
+}
+
+function renderCreator(s) {
+  const mode = currentOemMode(s);
+  const tableName = (((s || {}).hardware || {}).oem || {}).fan_table;
+  if (mode !== creatorModeSeen || (oemCurve && tableName && tableName !== oemCurve.name)) {
+    creatorModeSeen = mode;
+    oemEpoch += 1;
+    spcEpoch += 1;
+    oemCurve = null; oemDraft = null; oemOrig = null; oemOrigName = null;
+    $('fan-default-feedback').hidden = true;
+    oemReadAttempted = false; oemReadError = ''; oemChartGeometry = null; oemDragIndex = null; oemFocusIndex = null;
+    curveData = null;
+    $('fan-curve').innerHTML = '';
+    $('fan-curve-editor').innerHTML = '';
+    $('fan-curve-chart-wrap').hidden = true;
+    $('fan-curve-empty').hidden = false;
+    $('btn-curve-undo').disabled = true;
+    setText('fan-table-meta', '档位或表已变化，请重新读取');
+    spcNeedsRefresh = spcDirty.size > 0;
+    spcSubmitted = null;
+    plEpoch += 1;
+    plNeedsRefresh = plDirty;
+    plSubmitted = null;
+  }
+  const on = mode === 'turbo';
+  const known = mode != null;
+  const pending = PENDING.mode;
+  const btn = $('btn-creator-mode');
+  if (btn) {
+    btn.classList.toggle('on', on);
+    btn.classList.toggle('pending', !!pending);
+    btn.disabled = !known || !!pending || oemWriting || spcBusy || !!spcSubmitted
+      || plBusy || !!plSubmitted || fanSpeedBusy || !!fanSpeedSubmitted || presetBusy || !deviceOnline(s)
+      || !canOemMode(s, on ? 'office' : 'turbo');
+    btn.setAttribute('aria-checked', String(on));
+  }
+  setText('creator-mode-state', !known ? '未知档位'
+    : (on ? '已开启' : '已关闭'));
+  setText('creator-mode-desc', known
+    ? (on ? '性能档（Turbo）· 风扇、性能与跑分已开放'
+      : '省电档（Office）· 开启后才能编辑，切换约 24 秒')
+    : '认不出当前 OEM 档位，先等状态刷新。');
+  const pendEl = $('creator-pending');
+  if (pendEl) pendEl.hidden = !pending;
+  if (pending) {
+    setText('creator-pending', `正在切到${pending.want === 'turbo' ? '性能档' : '省电档'}…约 24 秒`);
+  }
+  const workspace = $('creator-workspace');
+  if (workspace) {
+    workspace.classList.toggle('locked', !on || !!pending);
+    workspace.inert = !on || !!pending;
+    workspace.setAttribute('aria-disabled', String(!on || !!pending));
+  }
+  const lock = $('creator-lock');
+  if (lock) lock.hidden = on && !pending;
+  document.querySelectorAll('.fan-point-input').forEach((input) => { input.disabled = !oemWritable(); });
+  if ($('btn-curve-apply')) $('btn-curve-apply').disabled = !oemWritable();
+  $('btn-curve-undo').disabled = !oemWritable() || !oemDraftChanged(oemType);
+  $('btn-curve-default').disabled = !oemWritable();
+  fillSpc(s);
+  ensureCreatorCurve();
+}
+
+function fillSpc(s, force = false) {
+  if (force) { spcDirty.clear(); spcSubmitted = null; spcNeedsRefresh = false; }
+  const hw = (s && s.hardware) || {};
+  const oem = hw.oem || {};
+  const bounds = plBounds(s);
+  const vals = {
+    pl1: hw.pl1_setting != null ? hw.pl1_setting : hw.pl1,
+    pl2: hw.pl2_setting != null ? hw.pl2_setting : hw.pl2,
+    pl4: hw.pl4_setting != null ? hw.pl4_setting : hw.pl4,
+  };
+  const caps = (s || {}).capabilities || {};
+  const plCan = !!bounds && (caps['power_limit.write'] || {}).state === 'verified';
+  const tccCan = (caps['cpu.tcc.write'] || {}).state === 'verified'
+    && oem.tcc_offset_c != null && oem.tcc_offset_enabled != null;
+  if (spcSubmitted) {
+    const confirmed = deviceOnline(s) && Object.entries(spcSubmitted.values).every(([key, value]) => {
+      const read = key === 'tcc' ? oem.tcc_offset_c
+        : key === 'tcc-enabled' ? oem.tcc_offset_enabled : vals[key];
+      return read != null && Number(read) === Number(value);
+    });
+    if (confirmed) {
+      Object.keys(spcSubmitted.values).forEach((key) => spcDirty.delete(key));
+      spcSubmitted = null;
+      toast('已生效：处理器设置回读一致');
+    } else if (Date.now() > spcSubmitted.until) {
+      spcSubmitted = null;
+      toast('处理器设置未等到一致回读，草稿保留，请核对后再操作', true);
+    }
+  }
+  const locked = spcBusy || !!spcSubmitted || plBusy || !!plSubmitted || spcNeedsRefresh || presetBusy
+    || currentOemMode(s) !== 'turbo' || !!PENDING.mode || !deviceOnline(s);
+  const plReady = Object.keys(vals).some((key) => vals[key] != null);
+  $('btn-spc-apply').disabled = !plCan || !plReady || locked;
+  $('btn-spc-tcc-apply').disabled = !tccCan || locked || !!PENDING.tcc;
+  $('btn-spc-refresh').disabled = spcBusy || !!spcSubmitted || presetBusy;
+  $('btn-spc-default').disabled = !plCan || locked || Object.entries({ pl1: 75, pl2: 75, pl4: 165 })
+    .some(([key, value]) => vals[key] == null || value < bounds[key][0] || value > bounds[key][1]);
+  for (const k of ['pl1', 'pl2', 'pl4']) {
+    setText('spc-' + k + '-range', bounds ? `${bounds[k][0]}–${bounds[k][1]} W · 设备允许范围` : '等待允许范围');
+    const el = $('spc-' + k);
+    if (!el) continue;
+    if (bounds) {
+      el.min = bounds[k][0];
+      el.max = bounds[k][1];
+      el.disabled = !plCan || vals[k] == null || locked;
+      if (!spcDirty.has(k) && vals[k] != null) {
+        el.value = Math.max(bounds[k][0], Math.min(bounds[k][1], Number(vals[k])));
+      }
+    } else {
+      el.disabled = true;
+    }
+    const lab = $('spc-' + k + '-val');
+    if (lab) lab.textContent = vals[k] == null ? '未回读' : el.value + ' W';
+    paintRange(el);
+  }
+  const max = oem.tcc_offset_max != null ? oem.tcc_offset_max : 5;
+  setText('spc-tcc-help', `提前降温偏移（TCC）：数值越大，越早降低性能以控制温度。当前设备允许 0–${max} °C。`);
+  const chk = $('spc-tcc-enabled');
+  if (chk) {
+    if (!spcDirty.has('tcc-enabled')) chk.checked = !!oem.tcc_offset_enabled;
+    chk.disabled = !tccCan || locked;
+  }
+  const tcc = $('spc-tcc');
+  if (tcc) {
+    tcc.max = max;
+    tcc.disabled = !tccCan || locked || !chk.checked;
+    if (!spcDirty.has('tcc') && oem.tcc_offset_c != null) {
+      tcc.value = Math.max(0, Math.min(max, Number(oem.tcc_offset_c)));
+    }
+    const lab = $('spc-tcc-val');
+    if (lab) lab.textContent = oem.tcc_offset_c == null ? '未回读' : tcc.value + ' °C';
+    paintRange(tcc);
+  }
+  const cpu = $('spc-cpu-readonly');
+  if (cpu) cpu.innerHTML = hwRow('核心电压偏移 · 只读',
+    oem.core_voltage_offset != null ? oem.core_voltage_offset + ' mV' : '未回读',
+    oem.core_voltage_offset != null);
+  const gpu = $('spc-gpu');
+  if (gpu) {
+    gpu.innerHTML = hwRow('GPU 核心时钟偏移',
+        oem.gpu_core_offset != null ? oem.gpu_core_offset + ' MHz · 未验证' : '未知',
+        oem.gpu_core_offset != null)
+      + hwRow('GPU 内存时钟偏移',
+        oem.gpu_mem_offset != null ? oem.gpu_mem_offset + ' MHz · 未验证' : '未知',
+        oem.gpu_mem_offset != null)
+      + hwRow('目标温度',
+        oem.gpu_target_temp != null ? oem.gpu_target_temp + ' °C · 只读' : '未知',
+        oem.gpu_target_temp != null)
+      + hwRow('显卡功耗预算（TGP）',
+        oem.tgp_target != null ? oem.tgp_target + ' W · ' + (oem.tgp_enabled ? '开' : '关') + ' · 只读' : '未知',
+        oem.tgp_target != null)
+      + hwRow('动态功耗增益',
+        oem.dynamic_boost != null ? oem.dynamic_boost + ' W · ' + (oem.dynamic_boost_on ? '开' : '关') + ' · 只读' : '未知',
+        oem.dynamic_boost != null);
+  }
+  const fanRows = $('spc-fan-rows');
+  if (fanRows) {
+    fanRows.innerHTML = hwRow('风扇独立输出',
+      oemCurve ? triText(oemCurve.fan_control_respective, '开', '关') : '尚未读取 OEM 表',
+      !!oemCurve)
+      + hwRow('风扇换挡间隔',
+        oem.fan_switch_speed_ms != null
+          ? `${oem.fan_switch_speed_ms} ms · ${oem.fan_switch_speed_enabled ? '启用' : '关闭'}`
+          : '未知',
+        oem.fan_switch_speed_ms != null);
+  }
+  const fstate = $('spc-fan-state');
+  if (fstate) {
+    fstate.textContent = oemCurve && oemCurve.name ? `当前表 ${oemCurve.name}` : 'OEM 表未读取';
+  }
+  const hint = $('spc-hint');
+  if (hint) {
+    hint.textContent = spcNeedsRefresh ? '档位已变化，旧草稿不能保存。请先点击“撤销 / 重读”。'
+      : spcBusy ? '正在下发处理器设置…'
+      : spcSubmitted ? '已下发，正在等待读数确认；确认前暂时锁定编辑。'
+      : spcDirty.size ? '有未保存的修改。确认数值后，点击对应的保存按钮。'
+      : bounds ? '显示当前设备读数。设置只在当前档位生效，切档或息屏后可能变化。'
+      : '未取得设备允许范围，暂时不能调整功耗。';
+  }
+}
+
 // ---------- 键盘灯效（OEM SetEffectALL，2026-10-20 已做可逆验证） ----------
+function lightOpts() {
+  return KB_EFFECT_OPTS[lightEffect] || { colors: 7, dir: 'none' };
+}
+
+function lightingEditorPayload() {
+  const opts = lightOpts();
+  const colors = [];
+  for (let i = 0; i < 7; i++) colors.push(hexToRgb(($('light-color-' + i) || {}).value));
+  // 常亮/音乐只开放 4 个色块；OEM 报文固定要 7 组，后 3 组跟随第 4 组（和 CC 的显示一致）
+  if (opts.colors === 4) {
+    for (let i = 4; i < 7; i++) colors[i] = colors[3].slice();
+  }
+  const dirEl = $('light-direction');
+  const current = dirEl ? dirEl.value : 'None';
+  const direction = opts.dir === 'none' ? 'None'
+    : (opts.dir === 'lr'
+      ? (current === 'RightLeft' ? 'RightLeft' : 'LeftRight')
+      : (['None', 'LeftRight', 'RightLeft'].includes(current) ? current : 'None'));
+  return {
+    effect: lightEffect,
+    light: Number(($('light-brightness') || {}).value),
+    speed: Number(($('light-speed') || {}).value),
+    direction,
+    colors,
+    welcome: false,
+  };
+}
+
 function selectLightEffect(name) {
   lightEffect = KB_EFFECTS.some((e) => e.id === name) ? name : 'Breathing';
   document.querySelectorAll('#light-effects button').forEach((b) => {
     b.classList.toggle('active', b.dataset.effect === lightEffect);
+    b.setAttribute('aria-pressed', String(b.dataset.effect === lightEffect));
   });
+  const opts = KB_EFFECT_OPTS[lightEffect] || { colors: 7, bright: true, speed: true, dir: 'none' };
+  const cols = $('light-colors');
+  const previewWrap = $('light-preview-wrap');
+  const preview = $('light-preview');
+  if (cols) cols.hidden = opts.colors === 0;
+  if (previewWrap) previewWrap.hidden = opts.colors === 0;
+  if (preview && opts.colors > 0) preview.style.gridTemplateColumns = `repeat(${opts.colors}, minmax(0, 1fr))`;
+  const label = $('light-colors-label');
+  if (label) {
+    label.textContent = opts.colors === 0 ? '颜色由固件生成'
+      : (opts.colors === 4 ? '4 色块' : '7 色块');
+  }
+  for (let i = 0; i < 7; i++) {
+    const inp = $('light-color-' + i);
+    if (inp) inp.hidden = i >= opts.colors;
+    const cell = preview ? preview.children[i] : null;
+    if (cell) cell.hidden = i >= opts.colors;
+  }
+  // 亮度 / 速度：音乐没有亮度，常亮/彩虹/音乐没有速度——按矩阵整段显隐，不留灰控件骗人
+  const brightBox = $('light-bright-box');
+  if (brightBox) brightBox.hidden = !opts.bright;
+  const speedBox = $('light-speed-box');
+  if (speedBox) speedBox.hidden = !opts.speed;
   const box = $('light-direction-box');
-  if (box) box.hidden = lightEffect !== 'Wave';
+  if (box) box.hidden = opts.dir === 'none';
+  const sel = $('light-direction');
+  if (sel && opts.dir !== 'none') {
+    const current = sel.value;
+    sel.innerHTML = opts.dir === 'all'
+      ? '<option value="None">无方向</option><option value="LeftRight">左 → 右</option><option value="RightLeft">右 → 左</option>'
+      : '<option value="LeftRight">左 → 右</option><option value="RightLeft">右 → 左</option>';
+    sel.value = opts.dir === 'all' && current === 'None' ? 'None'
+      : (current === 'RightLeft' ? 'RightLeft' : 'LeftRight');
+  }
+  const note = $('light-effect-note');
+  if (note) {
+    const parts = [];
+    parts.push(opts.colors === 0 ? '颜色由固件生成'
+      : (opts.colors === 4 ? '4 个键盘分区' : '7 个灯效色位'));
+    parts.push(opts.bright ? '亮度' : '无亮度');
+    parts.push(opts.speed ? '速度' : '无速度');
+    parts.push(opts.dir === 'lr' ? '左→右 / 右→左（必选）'
+      : (opts.dir === 'all' ? '无 / 左→右 / 右→左' : '无方向'));
+    note.textContent = '这个灯效开放：' + parts.join(' · ') + '。';
+    note.hidden = false;
+  }
+  syncLightPreview();
+}
+
+function showLightTab(key) {
+  document.querySelectorAll('#light-tabs button').forEach((b) => {
+    b.classList.toggle('active', b.dataset.lightTab === key);
+  });
+  const kb = $('light-pane-kb');
+  const lb = $('light-pane-lb');
+  if (kb) kb.hidden = key !== 'kb';
+  if (lb) lb.hidden = key !== 'lb';
+}
+
+function renderLbEffects() {
+  const box = $('lb-effects');
+  if (!box) return;
+  box.innerHTML = LB_EFFECTS.map((e) => {
+    const bits = [
+      e.colors === 0 ? '固件生成颜色' : e.colors + ' 色块',
+      e.bright ? '亮度' : '无亮度',
+      e.speed ? '速度' : '无速度',
+      '无方向',
+    ];
+    return `
+    <div class="lb-effect${e.colors === 0 ? ' none' : ''}">
+      <b>${esc(e.name)}</b>
+      <small>${esc(bits.join(' · '))}</small>
+    </div>`;
+  }).join('');
 }
 
 function updateLightVals() {
@@ -1046,7 +1424,15 @@ function fillLightControls(oem) {
   if (speedEl) speedEl.value = speed == null ? 2 : speed;
   const dir = KB_DIRECTION_BY_CODE[String(oem.kb_direction)];
   const dirEl = $('light-direction');
-  if (dirEl) dirEl.value = dir === 'RightLeft' ? 'RightLeft' : 'LeftRight';
+  const opts = KB_EFFECT_OPTS[name] || { dir: 'none' };
+  if (dirEl) {
+    if (opts.dir === 'lr') {
+      dirEl.value = dir === 'RightLeft' ? 'RightLeft' : 'LeftRight';
+    } else if (opts.dir === 'all') {
+      dirEl.value = dir === 'RightLeft' ? 'RightLeft'
+        : (dir === 'LeftRight' ? 'LeftRight' : 'None');
+    }
+  }
   const colors = Array.isArray(oem.kb_colors) && oem.kb_colors.length === 7 ? oem.kb_colors : null;
   for (let i = 0; i < 7; i++) {
     const inp = $('light-color-' + i);
@@ -1060,14 +1446,31 @@ function fillLightControls(oem) {
 function syncLightPreview() {
   const box = $('light-preview');
   if (!box) return;
+  const opts = lightOpts();
+  lightSelectedColor = Math.min(lightSelectedColor, Math.max(0, opts.colors - 1));
   for (let i = 0; i < 7; i++) {
-    const c = ($('light-color-' + i) || {}).value || '#00ffff';
-    const el = box.children[i];
-    if (el) {
-      el.style.background = c;
-      el.style.boxShadow = `0 0 14px ${c}55 inset`;
-    }
+    const input = $('light-color-' + i);
+    const color = input ? input.value : '#00ffff';
+    if (box.children[i]) box.children[i].style.background = color;
+    if (input) input.classList.toggle('active', i === lightSelectedColor);
   }
+  document.querySelectorAll('#keyboard-preview [data-zone]').forEach((button, i) => {
+    const color = opts.colors === 4 ? $('light-color-' + i).value
+      : opts.colors ? $('light-color-' + lightSelectedColor).value
+      : ['#ef6b70', '#dfaf36', '#2baa98', '#787de0'][i];
+    button.style.setProperty('--zone-color', color);
+    button.disabled = opts.colors !== 4;
+    button.classList.toggle('active', opts.colors === 4 && i === lightSelectedColor);
+    button.setAttribute('aria-pressed', String(opts.colors === 4 && i === lightSelectedColor));
+  });
+  $('palette-swatches').hidden = !opts.colors;
+  document.querySelectorAll('#palette-swatches button').forEach((button) => {
+    button.setAttribute('aria-pressed', String(button.dataset.color === ($('light-color-' + lightSelectedColor) || {}).value));
+  });
+  setText('keyboard-preview-caption', opts.colors === 4
+    ? `正在编辑第 ${lightSelectedColor + 1} 区 · 点击其他分区，再选择颜色。示意图不代表实际键位。`
+    : opts.colors ? `正在编辑第 ${lightSelectedColor + 1} 个灯效色位 · 7 色按效果播放，不是 7 个物理分区。`
+      : '彩虹颜色由键盘自动生成，无需选择颜色。这里仅作示意。');
 }
 
 function buildLightEditor() {
@@ -1096,10 +1499,39 @@ function buildLightEditor() {
       const inp = document.createElement('input');
       inp.type = 'color';
       inp.id = 'light-color-' + i;
-      inp.title = '色块 ' + (i + 1);
+      inp.title = '色位 ' + (i + 1);
+      inp.setAttribute('aria-label', '色位 ' + (i + 1));
       inp.value = '#00ffff';
-      inp.addEventListener('input', syncLightPreview);
+      inp.onfocus = () => { lightSelectedColor = i; syncLightPreview(); };
+      inp.addEventListener('input', () => { lightSelectedColor = i; syncLightPreview(); });
       cols.appendChild(inp);
+    }
+  }
+  const keyboard = $('keyboard-preview');
+  if (!keyboard.children.length) {
+    for (let i = 0; i < 4; i++) {
+      const button = document.createElement('button');
+      button.type = 'button'; button.className = 'key-zone'; button.dataset.zone = i;
+      button.setAttribute('aria-label', '选择键盘第 ' + (i + 1) + ' 区');
+      button.innerHTML = '<i aria-hidden="true"></i>'.repeat(12);
+      button.onclick = () => { lightSelectedColor = i; syncLightPreview(); };
+      keyboard.appendChild(button);
+    }
+  }
+  const palette = $('palette-swatches');
+  if (!palette.children.length) {
+    for (const [label, color] of [['青色', '#00ffff'], ['蓝色', '#0080ff'], ['紫色', '#a040ff'],
+      ['粉色', '#ff40a0'], ['红色', '#ff3030'], ['橙色', '#ff9000'], ['绿色', '#30ff70'], ['白色', '#ffffff']]) {
+      const button = document.createElement('button');
+      button.type = 'button'; button.dataset.color = color;
+      button.setAttribute('aria-label', label); button.title = label;
+      button.style.setProperty('--swatch', color);
+      button.onclick = () => {
+        if (!lightOpts().colors) return;
+        $('light-color-' + lightSelectedColor).value = color;
+        syncLightPreview();
+      };
+      palette.appendChild(button);
     }
   }
   ['light-brightness', 'light-speed'].forEach((id) => {
@@ -1107,7 +1539,8 @@ function buildLightEditor() {
     if (el) el.oninput = updateLightVals;
   });
   const apply = $('btn-light-apply');
-  if (apply) apply.onclick = applyLighting;
+  if (apply) apply.onclick = () => applyLighting(false);
+  $('btn-light-welcome').onclick = () => applyLighting(true);
   const read = $('btn-light-read');
   if (read) {
     read.onclick = () => {
@@ -1116,70 +1549,116 @@ function buildLightEditor() {
       toast('已按 OEM 上次回读填入（不一定是此刻的灯效）');
     };
   }
+  const refresh = $('btn-light-refresh');
+  if (refresh) {
+    refresh.onclick = async () => {
+      renderLighting(lastState);
+      if (refresh.disabled) return;
+      const oem = ((lastState || {}).hardware || {}).oem || {};
+      quickSending.add('kb');
+      renderLighting(lastState); renderQuick(lastState);
+      try {
+        // 服务只在 SetPower 里回读键盘；用当前开关状态发一条幂等命令，不改变背光。
+        await api('/api/action', { action: oem.kb_power_on ? 'KB_POWER_ON' : 'KB_POWER_OFF' });
+        await new Promise((r) => setTimeout(r, 800));
+        if (!await poll() || !deviceOnline(lastState)) throw new Error('未取得新的在线读数，灯光草稿已保留');
+        fillLightControls(((lastState || {}).hardware || {}).oem || {});
+        toast('已请求键盘回读并重填，请核对当前灯效');
+      } catch (e) {
+        toast('刷新失败：' + e.message, true);
+      } finally {
+        quickSending.delete('kb');
+        renderLighting(lastState); renderQuick(lastState);
+      }
+    };
+  }
+  document.querySelectorAll('#light-tabs button').forEach((b) => {
+    b.onclick = () => showLightTab(b.dataset.lightTab);
+  });
+  showLightTab('kb');
+  renderLbEffects();
   selectLightEffect(lightEffect);
   updateLightVals();
   syncLightPreview();
 }
 
-async function applyLighting() {
-  const colors = [];
-  for (let i = 0; i < 7; i++) colors.push(hexToRgb(($('light-color-' + i) || {}).value));
-  const body = {
-    effect: lightEffect,
-    light: Number(($('light-brightness') || {}).value),
-    speed: Number(($('light-speed') || {}).value),
-    direction: lightEffect === 'Wave' ? ($('light-direction') || {}).value : 'None',
-    colors,
-    welcome: !!($('light-welcome') || {}).checked,
-  };
+async function applyLighting(welcome = false) {
+  if (lightBusy || lightSubmitted || $('btn-light-apply').disabled || $('light-editor').hidden) return;
+  if (welcome && !confirm('将当前灯效同步到欢迎模式？同步时键盘会播放一次。')) return;
+  const body = { ...lightingEditorPayload(), welcome };
+  lightBusy = true;
+  renderLighting(lastState);
   try {
     const r = await api('/api/keyboard-effect', body);
-    toast(r.detail || '已下发');
+    toast(welcome ? '已下发当前灯效及欢迎模式同步' : (r.detail || '已下发灯效，等待读数确认'));
+    lightSubmitted = { body, until: Date.now() + 15000 };
   } catch (e) {
     toast('下发失败：' + e.message, true);
+  } finally {
+    lightBusy = false;
+    renderLighting(lastState);
   }
+  poll();
+  setTimeout(poll, 1200);
 }
 
 function updateLightPower(oem, caps) {
-  const state = $('light-power-state');
   const btn = $('btn-light-power');
-  if (state) state.textContent = oem.kb_power_on == null ? '未知' : (oem.kb_power_on ? '已开启' : '已关闭');
-  if (!btn) return;
-  const can = (caps['lighting.rgb.write'] || {}).state === 'verified' && oem.kb_power_on != null;
-  btn.disabled = !can;
-  btn.textContent = oem.kb_power_on == null ? '--' : (oem.kb_power_on ? '关闭背光' : '打开背光');
-  btn.onclick = can ? async () => {
-    const on = !oem.kb_power_on;
-    try { const r = await api('/api/action', { action: on ? 'KB_POWER_ON' : 'KB_POWER_OFF' }); toast(r.detail || '已下发'); }
-    catch (e) { toast('下发失败：' + e.message, true); return; }
-    markPending('kbpower', on, KB_WAIT_S, '键盘背光');
-    poll();
-  } : null;
+  setText('light-power-state', oem.kb_power_on == null ? '未知' : oem.kb_power_on ? '已开启' : '已关闭');
+  btn.disabled = !deviceOnline(lastState) || (caps['lighting.rgb.write'] || {}).state !== 'verified'
+    || oem.kb_power_on == null || lightBusy || !!lightSubmitted || !!PENDING.kbpower
+    || quickSending.has('kb') || presetBusy;
+  btn.textContent = PENDING.kbpower || quickSending.has('kb') ? '等待确认…'
+    : oem.kb_power_on == null ? '等待状态' : oem.kb_power_on ? '关闭背光' : '打开背光';
+  btn.onclick = () => toggleQuick('kb');
 }
 
 function renderLighting(s) {
   const editor = $('light-editor');
   const hint = $('light-hint');
   if (!editor) return;
-  const caps = s.capabilities || {};
-  const oem = (s.hardware || {}).oem || {};
-  const mqCh = (s.channels || []).find((c) => c.name === 'mqtt') || {};
+  const caps = (s || {}).capabilities || {};
+  const oem = ((s || {}).hardware || {}).oem || {};
+  const mqCh = ((s || {}).channels || []).find((c) => c.name === 'mqtt') || {};
   const cap = caps['lighting.effect.write'] || {};
   const can = mqCh.alive && cap.state === 'verified';
+  if (lightSubmitted) {
+    const body = lightSubmitted.body;
+    const confirmed = deviceOnline(s) && lightingMatches(oem, body);
+    if (confirmed) { lightSubmitted = null; toast('已生效：当前键盘灯效回读一致'); }
+    else if (Date.now() > lightSubmitted.until) {
+      lightSubmitted = null;
+      toast('灯效未等到一致回读，编辑内容保留，请核对键盘状态', true);
+    }
+  }
+  const locked = lightBusy || !!lightSubmitted || !!PENDING.kbpower || quickSending.has('kb') || presetBusy;
+  const editable = can && deviceOnline(s) && oem.kb_power_on === true && !locked;
+  editor.inert = !editable;
+  $('btn-light-apply').disabled = !editable;
+  $('btn-light-welcome').disabled = !editable;
+  $('btn-light-refresh').disabled = locked || !deviceOnline(s)
+    || typeof oem.kb_power_on !== 'boolean' || (caps['lighting.rgb.write'] || {}).state !== 'verified';
+  $('btn-light-read').disabled = locked || !deviceOnline(s);
   updateLightPower(oem, caps);
-  editor.hidden = !can;
   if (!can) {
+    editor.hidden = true;
     hint.classList.add('err');
     hint.textContent = '灯效写入需要 GCUBridge 通道和 lighting.effect.write 能力（当前 '
       + (cap.state || '未上报') + '）。';
     return;
   }
+  if (oem.kb_power_on !== true) {
+    editor.hidden = true;
+    hint.classList.remove('err');
+    hint.textContent = oem.kb_power_on == null ? '背光开关状态未知，当前不可编辑或同步。'
+      : '打开键盘背光后才能编辑灯效和同步欢迎模式。';
+    return;
+  }
+  editor.hidden = false;
   hint.classList.remove('err');
   if (!lightEditorInit) fillLightControls(oem);
-  hint.textContent = '灯效只改键盘的颜色/亮度/速度，不动背光开关；7 个色块对应键盘的 7 个分区。'
-    + '「按 OEM 读数重填」用的是服务上次 SetPower 时读到的键盘状态，可能不是此刻的值。'
-    + ((mqCh.detail || {}).lighting_effect_write_reason
-       ? ' ' + mqCh.detail.lighting_effect_write_reason : '');
+  hint.textContent = locked ? '操作进行中，正在等待读数确认；编辑内容会保留。'
+    : '选灯效 → 选色位和颜色 → 应用灯效。预览不会改变键盘，保存时也不会改变背光开关。';
 }
 
 // ---------- 风扇曲线（EC 直读，只读） ----------
@@ -1206,15 +1685,24 @@ function curveTable(which, points) {
 
 const triText = (v, on, off) => (v == null ? '读不到' : (v ? on : off));
 
+function chartColor(token) {
+  return getComputedStyle(document.documentElement).getPropertyValue(token).trim();
+}
+
 // 风扇曲线图：横轴温度、纵轴占空；信箱/哨兵点不画（它们不是温度/占空）。
-function drawFanCurveChart(series) {
-  const cv = $('fan-curve-chart');
-  const wrap = $('fan-curve-chart-wrap');
-  if (!cv || !wrap) return;
+function drawFanCurveChart(series, opts) {
+  const o = opts || {};
+  const cv = $(o.canvasId || 'fan-curve-chart');
+  const wrap = o.wrapId === null ? null : $(o.wrapId || 'fan-curve-chart-wrap');
+  if (!cv) return;
   const ok = (p) => p && p.duty_pct != null && p.up_t != null && !p.mailbox && !p.sentinel;
   const any = (series || []).some((s) => (s.points || []).some(ok));
-  if (!any) { wrap.hidden = true; return; }
-  wrap.hidden = false;
+  if (!any) {
+    if (wrap && o.hideWhenEmpty !== false) wrap.hidden = true;
+    return;
+  }
+  if (wrap) wrap.hidden = false;
+  if (cv.id === 'fan-curve-chart') document.querySelector('.fan-axis-note').textContent = 'EC 只读对照 · 横轴温度（线性刻度） · 纵轴占空';
   const dpr = window.devicePixelRatio || 1;
   const w = cv.clientWidth || 900;
   const h = cv.clientHeight || 190;
@@ -1227,32 +1715,34 @@ function drawFanCurveChart(series) {
   const iw = w - padL - padR; const ih = h - padT - padB;
   const px = (t) => padL + Math.max(0, Math.min(100, Number(t))) / 100 * iw;
   const py = (d) => padT + ih - Math.max(0, Math.min(100, Number(d))) / 100 * ih;
+  const line = chartColor('--line'); const dim = chartColor('--dim');
   g.font = '10px system-ui'; g.lineWidth = 1;
   for (let i = 0; i <= 4; i += 1) {
     const yy = padT + ih * i / 4;
-    g.strokeStyle = '#202b3c';
+    g.strokeStyle = line;
     g.beginPath(); g.moveTo(padL, yy); g.lineTo(w - padR, yy); g.stroke();
-    g.fillStyle = '#5f728c'; g.textAlign = 'right';
+    g.fillStyle = dim; g.textAlign = 'right';
     g.fillText(String(100 - i * 25) + '%', padL - 6, yy + 3);
   }
   for (let t = 0; t <= 100; t += 20) {
     const xx = px(t);
-    g.strokeStyle = '#141d2a';
+    g.strokeStyle = line;
     g.beginPath(); g.moveTo(xx, padT); g.lineTo(xx, padT + ih); g.stroke();
-    g.fillStyle = '#5f728c'; g.textAlign = 'center';
+    g.fillStyle = dim; g.textAlign = 'center';
     g.fillText(t + '°', xx, padT + ih + 16);
   }
   (series || []).forEach((s, si) => {
     const pts = (s.points || []).filter(ok).slice().sort((a, b) => a.up_t - b.up_t);
     if (!pts.length) return;
-    g.strokeStyle = s.color; g.lineWidth = 2;
+    const color = chartColor(s.color);
+    g.strokeStyle = color; g.lineWidth = 2;
     g.beginPath();
     pts.forEach((p, i) => {
       if (i === 0) g.moveTo(px(p.up_t), py(p.duty_pct));
       else g.lineTo(px(p.up_t), py(p.duty_pct));
     });
     g.stroke();
-    g.fillStyle = s.color;
+    g.fillStyle = color;
     pts.forEach((p) => {
       g.beginPath(); g.arc(px(p.up_t), py(p.duty_pct), 2.6, 0, Math.PI * 2); g.fill();
     });
@@ -1286,8 +1776,8 @@ function renderFanCurve() {
             ctx.ap_exist != null)
     + `</div><div class="curve-wrap">${curveTable('CPU', t.CPU)}${curveTable('GPU', t.GPU)}</div>`;
   drawFanCurveChart([
-    { label: 'EC CPU', color: '#2dd4bf', points: t.CPU },
-    { label: 'EC GPU', color: '#8b5cf6', points: t.GPU },
+    { label: 'EC CPU', color: '--cyan', points: t.CPU },
+    { label: 'EC GPU', color: '--purple', points: t.GPU },
   ]);
   const bits = [`本轮读了 ${curveData.reads} 次、写了 ${curveData.writes} 次`,
                 `用时 ${curveData.elapsed_s} 秒`];
@@ -1305,170 +1795,408 @@ function renderFanCurve() {
 }
 
 async function loadFanCurve(say) {
-  if (curveLoading) return;
+  if (curveLoading || oemLoading || oemWriting) return;
+  fanSource = 'ec';
+  const epoch = ++oemEpoch;
   curveLoading = true;
+  oemChartGeometry = null;
   const btn = $('btn-fan-curve');
-  btn.disabled = true;
   btn.textContent = '读取中（约 3 秒）…';
+  renderOemCurve();
   try {
-    curveData = await api('/api/fan-curve');
-    if (say) {
-      const head = `风扇表读到了：${curveData.reads} 次读、${curveData.writes} 次写、`
-        + `${curveData.elapsed_s} 秒`;
-      toast(curveData.ok
-        ? (curveData.reason ? `${head}（${curveData.reason}）` : head)
-        : ('读取不完整：' + (curveData.reason || '未知原因')), !curveData.ok);
-    }
+    const loaded = await api('/api/fan-curve');
+    if (epoch !== oemEpoch || fanSource !== 'ec') return;
+    curveData = loaded;
+    if (say) toast(loaded.ok ? '已读取 EC 曲线，只读对照，不修改 OEM 草稿'
+      : '读取不完整：' + (loaded.reason || '未知原因'), !loaded.ok);
+    setText('fan-curve-tag', 'EC 对照 · 只读');
+    setText('fan-table-meta', 'EC 实际表 · OEM 草稿保留');
+    $('fan-curve-empty').hidden = true;
+    renderFanCurve();
   } catch (e) {
-    // 读失败不清掉上一次的结果：用户宁可看着旧表也不想看到卡片突然空掉。
-    // 旧表有多旧，提示行里写着（缓存几秒前 / 什么时候读的）。
     if (say) toast('读取失败：' + e.message, true);
+  } finally {
+    curveLoading = false;
+    btn.textContent = 'EC 对照';
+    renderOemCurve();
   }
-  curveLoading = false;
-  btn.disabled = false;
-  btn.textContent = curveData ? '重新读取（约 3 秒）' : '读取曲线（约 3 秒）';
-  if (curveData && curveData.ok) {
-    oemCurve = null; oemOrig = null;
-    const box2 = $('fan-curve-editor'); if (box2) box2.innerHTML = '';
-    const tag = $('fan-curve-tag'); if (tag) tag.textContent = 'EC 直读 · 只读';
-  }
-  renderFanCurve();
-  poll();     // 读成功会把 fan.curve 能力点成「可用」，顺手刷新能力矩阵
 }
 
 // ---------- 风扇曲线（OEM 表，可写占空） ----------
-// 写入走 GCUBridge 的 SET_FAN_SPEED_CURVE_SETTING（服务落盘 + 写 EC），
-// 首次可逆验证见 tools/fan_curve_mqtt_write_test.py 与 notes/creator-center-features.md。
-// 只能改 Duty；Name 必须用服务报的当前表名（切档会变），绝不写死。
+// 写入走 GCUBridge 的 SET_FAN_SPEED_CURVE_SETTING（服务落盘 + 写 EC）。
+// 只能改 Duty；Name 必须使用服务报告的当前表名，绝不写死。
+let fanSource = 'mqtt';
+let oemEpoch = 0;
+let oemReadAttempted = false;
+let oemReadError = '';
 let oemCurve = null;
 let oemOrig = null;
+let oemOrigName = null;
+let oemDraft = null;
 let oemType = 'CPU';
 let oemLoading = false;
+let oemWriting = false;
+let oemDragIndex = null;
+let oemFocusIndex = null;
+let oemChartGeometry = null;
+
+function normalizeOemCurve(loaded) {
+  if (!loaded || !loaded.ok || !loaded.name || loaded.stale) {
+    throw new Error((loaded || {}).reason || '未取得新鲜 OEM 表，不能编辑缓存曲线');
+  }
+  const tables = {};
+  for (const type of ['CPU', 'GPU']) {
+    const points = (loaded.tables || {})[type];
+    if (!Array.isArray(points) || points.length !== 16) throw new Error(type + ' 表不是完整的 16 点');
+    const ordered = Array(16);
+    for (const point of points) {
+      if (!point || !Number.isInteger(point.id) || point.id < 0 || point.id > 15 || ordered[point.id]
+          || !Number.isInteger(point.duty_pct) || point.duty_pct < 0 || point.duty_pct > 100
+          || !Number.isInteger(point.up_t) || (point.up_t !== 255 && (point.up_t < 0 || point.up_t > 100))) {
+        throw new Error(type + ' 表节点编号、温度或占空不合法');
+      }
+      ordered[point.id] = { ...point, sentinel: point.up_t === 255 };
+    }
+    const active = ordered.filter((p) => !p.sentinel && !p.mailbox);
+    if (!active.length || active.some((p, i) => i > 0 && p.up_t < active[i - 1].up_t)) {
+      throw new Error(type + ' 表温度节点顺序异常');
+    }
+    tables[type] = ordered;
+  }
+  return { ...loaded, tables };
+}
 
 function oemWritable() {
   const cap = (((lastState || {}).capabilities) || {})['fan.curve.write'] || {};
-  return cap.state === 'verified';
+  const name = ((((lastState || {}).hardware || {}).oem) || {}).fan_table;
+  return fanSource === 'mqtt' && !!oemCurve && !oemCurve.stale && !oemLoading && !oemWriting
+    && cap.state === 'verified' && currentOemMode(lastState) === 'turbo' && !PENDING.mode
+    && !presetBusy && deviceOnline(lastState)
+    && !!((lastState || {}).meta || {}).fan_curve_expected_name
+    && (!name || name === oemCurve.name);
+}
+
+function oemActivePoints() {
+  return ((oemCurve && oemCurve.tables || {})[oemType] || [])
+    .filter((p) => !p.sentinel && !p.mailbox);
+}
+
+function oemDraftChanged(type) {
+  return !!oemDraft && !!oemOrig && oemDraft[type].some((v, i) => v !== oemOrig[type][i]);
+}
+
+function setOemDuty(idx, value) {
+  if (!oemWritable() || !oemDraft || !Number.isFinite(value)) return;
+  const active = oemActivePoints();
+  const pos = active.findIndex((p) => p.id === idx);
+  if (pos < 0) return;
+  const prev = pos > 0 ? oemDraft[oemType][active[pos - 1].id] : 0;
+  const next = pos + 1 < active.length ? oemDraft[oemType][active[pos + 1].id] : 100;
+  oemDraft[oemType][idx] = Math.max(prev, Math.min(next, Math.round(value)));
+  $('fan-default-feedback').hidden = true;
+  oemFocusIndex = idx;
+  const input = document.querySelector(`.fan-point-input[data-idx="${idx}"]`);
+  if (input) input.value = oemDraft[oemType][idx];
+  $('btn-curve-undo').disabled = !oemDraftChanged(oemType);
+  setText('fan-table-meta', `${active.length} 个温度点 · ${oemDraftChanged(oemType) ? '有未保存的修改' : '当前读数'}`);
+  drawOemCurveEditor();
+}
+
+function drawOemCurveEditor() {
+  const cv = $('fan-curve-chart');
+  const wrap = $('fan-curve-chart-wrap');
+  if (!cv || fanSource !== 'mqtt' || !oemCurve || !oemDraft) return;
+  const points = oemActivePoints();
+  if (!points.length) return;
+  if (wrap) wrap.hidden = false;
+  cv.style.setProperty('--fan-node-count', points.length);
+  document.querySelector('.fan-axis-note').textContent = '节点等距排列，标签为真实温度（非线性刻度） · 纵轴占空 · 窄屏可横向滚动';
+  const w = cv.clientWidth;
+  const h = cv.clientHeight;
+  if (!w || !h) { oemChartGeometry = null; return; }
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = Math.round(w * dpr);
+  cv.height = Math.round(h * dpr);
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  const pad = { left: 48, right: 24, top: 26, bottom: 38 };
+  const iw = w - pad.left - pad.right;
+  const ih = h - pad.top - pad.bottom;
+  const px = (index) => pad.left + (index + .5) * iw / points.length;
+  const py = (d) => pad.top + ih - Math.max(0, Math.min(100, Number(d))) / 100 * ih;
+
+  const line = chartColor('--line'); const dim = chartColor('--dim');
+  const cyan = chartColor('--cyan'); const panel = chartColor('--panel');
+  g.font = '11px system-ui';
+  g.lineWidth = 1;
+  for (let i = 0; i <= 4; i += 1) {
+    const value = 100 - i * 25;
+    const y = py(value);
+    g.strokeStyle = i === 4 ? dim : line;
+    g.beginPath(); g.moveTo(pad.left, y); g.lineTo(w - pad.right, y); g.stroke();
+    g.fillStyle = dim; g.textAlign = 'right'; g.fillText(value + '%', pad.left - 8, y + 4);
+  }
+  points.forEach((p, index) => {
+    const x = px(index);
+    g.strokeStyle = line;
+    g.beginPath(); g.moveTo(x, pad.top); g.lineTo(x, pad.top + ih); g.stroke();
+    g.fillStyle = dim; g.textAlign = 'center'; g.fillText(p.up_t + '°C', x, h - 10);
+  });
+
+  const mapped = points.map((p, index) => ({
+    idx: p.id, temp: p.up_t, duty: oemDraft[oemType][p.id],
+    x: px(index), y: py(oemDraft[oemType][p.id]),
+  }));
+  const fill = g.createLinearGradient(0, pad.top, 0, pad.top + ih);
+  fill.addColorStop(0, chartColor('--color-chart-fill-start'));
+  fill.addColorStop(1, chartColor('--color-chart-fill-end'));
+  g.beginPath();
+  mapped.forEach((p, i) => { if (i) g.lineTo(p.x, p.y); else g.moveTo(p.x, p.y); });
+  g.lineTo(mapped[mapped.length - 1].x, pad.top + ih);
+  g.lineTo(mapped[0].x, pad.top + ih);
+  g.closePath(); g.fillStyle = fill; g.fill();
+
+  g.beginPath();
+  mapped.forEach((p, i) => { if (i) g.lineTo(p.x, p.y); else g.moveTo(p.x, p.y); });
+  g.strokeStyle = cyan; g.lineWidth = 3; g.lineJoin = 'round'; g.stroke();
+  mapped.forEach((p) => {
+    g.beginPath(); g.arc(p.x, p.y, p.idx === oemDragIndex ? 8 : 6, 0, Math.PI * 2);
+    g.fillStyle = p.idx === oemDragIndex ? panel : cyan; g.fill();
+    g.strokeStyle = p.idx === oemDragIndex ? cyan : panel; g.lineWidth = 3; g.stroke();
+  });
+  const selected = mapped.find((p) => p.idx === (oemDragIndex == null ? oemFocusIndex : oemDragIndex));
+  if (selected) {
+    g.fillStyle = chartColor('--txt'); g.font = '600 12px system-ui';
+    const label = selected.temp + ' °C · ' + selected.duty + '%';
+    const half = g.measureText(label).width / 2;
+    const x = Math.max(pad.left + half, Math.min(w - pad.right - half, selected.x));
+    const y = selected.y < 45 ? selected.y + 26 : selected.y - 15;
+    g.textAlign = 'center'; g.fillText(label, x, y);
+  }
+  oemChartGeometry = { mapped, pad, ih, h };
+}
+
+function bindOemCurveCanvas() {
+  const cv = $('fan-curve-chart');
+  if (!cv || cv.dataset.dragBound) return;
+  cv.dataset.dragBound = '1';
+  cv.style.touchAction = 'pan-x';
+  cv.onpointerdown = (e) => {
+    if (!oemWritable() || !oemChartGeometry) return;
+    const rect = cv.getBoundingClientRect();
+    const x = e.clientX - rect.left; const y = e.clientY - rect.top;
+    const nearest = oemChartGeometry.mapped.reduce((best, p) => {
+      const dist = Math.hypot(p.x - x, p.y - y);
+      return !best || dist < best.dist ? { idx: p.idx, dist } : best;
+    }, null);
+    if (!nearest || nearest.dist > 22) return;
+    oemDragIndex = nearest.idx;
+    cv.setPointerCapture(e.pointerId);
+    drawOemCurveEditor();
+  };
+  cv.onpointermove = (e) => {
+    if (!oemWritable() || !oemChartGeometry) return;
+    const rect = cv.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    if (oemDragIndex == null) {
+      const x = e.clientX - rect.left;
+      const nearest = oemChartGeometry.mapped.reduce((a, b) =>
+        Math.hypot(a.x - x, a.y - y) < Math.hypot(b.x - x, b.y - y) ? a : b);
+      oemFocusIndex = Math.hypot(nearest.x - x, nearest.y - y) <= 22 ? nearest.idx : null;
+      drawOemCurveEditor();
+      return;
+    }
+    const duty = (oemChartGeometry.pad.top + oemChartGeometry.ih - y) * 100 / oemChartGeometry.ih;
+    setOemDuty(oemDragIndex, duty);
+  };
+  const finish = (e) => {
+    if (oemDragIndex == null) return;
+    oemDragIndex = null;
+    if (cv.hasPointerCapture(e.pointerId)) cv.releasePointerCapture(e.pointerId);
+    drawOemCurveEditor();
+  };
+  cv.onpointerup = finish;
+  cv.onpointercancel = finish;
+  cv.onpointerleave = () => {
+    if (oemDragIndex == null) { oemFocusIndex = null; drawOemCurveEditor(); }
+  };
 }
 
 function renderOemCurve() {
   const box = $('fan-curve-editor');
-  if (!box) return;
-  if (!oemCurve) { box.innerHTML = ''; return; }
   const hint = $('fan-curve-hint');
-  if (!oemCurve.ok && !oemCurve.tables) {
-    box.innerHTML = '';
-    hint.classList.add('err');
-    hint.textContent = 'OEM 表读不到：' + (oemCurve.reason || '未知原因');
-    return;
-  }
+  if (!box) return;
+  $('btn-fan-curve-oem').disabled = oemLoading || oemWriting || curveLoading;
+  $('btn-fan-curve').disabled = oemLoading || oemWriting || curveLoading;
+  $('btn-curve-undo').disabled = !oemWritable() || !oemDraftChanged(oemType);
+  $('btn-curve-default').disabled = !oemWritable();
+  $('fan-curve-empty').hidden = !!oemCurve || !!curveData;
+  setText('fan-independent-state', '独立输出 · ' + (oemCurve ? triText(oemCurve.fan_control_respective, '开启 · 只读', '关闭 · 只读') : '等待回读'));
+  if (fanSource !== 'mqtt' || !oemCurve) { box.innerHTML = ''; return; }
   hint.classList.remove('err');
-  const points = (oemCurve.tables || {})[oemType] || [];
   const can = oemWritable();
-  const ctx = hwRow('表名', oemCurve.name || '未报', !!oemCurve.name)
-    + hwRow('表状态', oemCurve.activated ? '已激活' : '未激活', oemCurve.activated != null)
-    + hwRow('CPU/GPU 独立控制', triText(oemCurve.fan_control_respective, '开', '关'),
-            oemCurve.fan_control_respective != null)
-    + hwRow('数据来源', 'OEM 服务内存里的表（不是 EC 实时值）', true);
-  const rows = points.map((p) => {
-    const up = p.up_t != null ? (p.sentinel ? '0xFF 哨兵' : p.up_t) : '—';
-    return `<tr><td>${p.id}</td><td>${esc(up)}</td>
-      <td>${p.down_t != null ? p.down_t : '—'}</td>
-      <td><input class="curve-duty" data-idx="${p.id}" type="number" min="0" max="100"
-           step="1" value="${p.duty_pct != null ? Math.round(p.duty_pct) : 0}"
-           ${can ? '' : 'disabled'}></td></tr>`;
-  }).join('');
-  box.innerHTML = `<div class="curve-ctx">${ctx}</div>
-    <div class="btn-row">
-      <select id="curve-type" class="curve-type">
-        <option value="CPU" ${oemType === 'CPU' ? 'selected' : ''}>CPU 表</option>
-        <option value="GPU" ${oemType === 'GPU' ? 'selected' : ''}>GPU 表</option>
-      </select>
-      <button id="btn-curve-apply" class="primary" ${can ? '' : 'disabled'}>下发这张表</button>
-      <button id="btn-curve-restore" ${can && oemOrig ? '' : 'disabled'}>还原到本次读取时</button>
-    </div>
-    <table class="curve"><caption>${esc(CURVE_WORD[oemType] || oemType)}（OEM 表 · 只改占空）</caption>
-    <thead><tr><th>点</th><th>升温 °C</th><th>降温 °C</th><th>占空比 %</th></tr></thead>
-    <tbody>${rows}</tbody></table>`;
-  drawFanCurveChart([{ label: `OEM ${oemType}`, color: '#fbbf24', points }]);
-  $('curve-type').onchange = (e) => { oemType = e.target.value; renderOemCurve(); };
-  $('btn-curve-apply').onclick = () => applyOemCurve(false);
-  $('btn-curve-restore').onclick = () => applyOemCurve(true);
-  hint.textContent = 'OEM 表是服务内存里的表，EC 直读是硬件里的值；本机验证时两张表逐点一致。'
-    + '只能改占空；升温/降温阈值要停服务改 JSON，面板不做。'
-    + 'EC 会把非零但低于 30 % 的占空夹到 30 %，0 % 要等约 180 秒才真停转；'
-    + '改完风扇转速是慢慢爬的（约 5 %/秒），别连着点。'
-    + (can ? '' : ' 写入能力当前不可用（GCUBridge 未连接或高温保护），按钮已置灰。');
+  const points = oemActivePoints();
+  const duties = oemDraft[oemType];
+  setText('fan-table-meta', `${oemCurve.name} · ${points.length} 个温度点 · ${oemDraftChanged(oemType) ? '草稿未应用' : '当前读数'}`);
+  document.querySelectorAll('[data-curve-table]').forEach((button) => {
+    button.classList.toggle('active', button.dataset.curveTable === oemType);
+    button.disabled = oemLoading || oemWriting || curveLoading;
+  });
+  box.innerHTML = `<div class="fan-point-editor">${points.map((p) => `
+      <label><span>${p.up_t}°</span><input class="fan-point-input" data-idx="${p.id}" type="number"
+        min="0" max="100" step="1" value="${duties[p.id]}" ${can ? '' : 'disabled'}><small>%</small></label>`).join('')}</div>
+    <div class="fan-editor-footer">
+      <span>确认修改后保存；另一张曲线的草稿会保留。温度点和保护设置不改变。</span>
+      <button id="btn-curve-apply" class="primary" ${can ? '' : 'disabled'}>保存 ${oemType} 曲线</button>
+    </div>`;
+  box.querySelectorAll('.fan-point-input').forEach((input) => {
+    input.onchange = () => setOemDuty(Number(input.dataset.idx), Number(input.value));
+  });
+  $('btn-curve-apply').onclick = applyOemCurve;
+  bindOemCurveCanvas();
+  drawOemCurveEditor();
+  hint.textContent = oemReadError ? '读取失败：' + oemReadError + '；草稿保留，重新读取前不可下发。'
+    : oemWriting ? '正在下发并等待回读，暂时锁定曲线编辑。'
+    : '恢复默认只填入选中曲线的占空草稿，保存后才生效；撤销回到最近读数。'
+      + (!((lastState || {}).meta || {}).fan_curve_expected_name
+        ? ' 后端安全校验更新需下次重启面板生效，目前曲线保持只读。'
+        : (can ? ' 应用前会校验当前表名并检查高温保护。' : ' 当前条件不满足，曲线保持只读。'));
 }
 
-async function loadOemCurve(say) {
-  if (oemLoading) return;
+async function loadOemCurve(say, updatedType = null, submittedDuties = null) {
+  if (oemLoading || curveLoading || (oemWriting && !updatedType)) return;
+  if (say && ['CPU', 'GPU'].some(oemDraftChanged)
+      && !confirm('重新读取会覆盖 CPU 和 GPU 的未应用草稿，继续？')) return;
+  fanSource = 'mqtt';
+  oemReadAttempted = true;
+  oemReadError = '';
+  const epoch = ++oemEpoch;
+  const mode = currentOemMode(lastState);
   oemLoading = true;
   const btn = $('btn-fan-curve-oem');
-  btn.disabled = true; btn.textContent = '读取 OEM 表…';
-  try {
-    oemCurve = await api('/api/fan-curve?source=mqtt');
-    if (oemCurve && oemCurve.ok) {
-      // 只有用户主动点开（或第一次载入）才重置「还原点」；
-      // 下发后的自动刷新不重置，否则刚改完就再也回不到原来那张表了。
-      if (say || !oemOrig) {
-        oemOrig = {};
-        ['CPU', 'GPU'].forEach((k) => {
-          oemOrig[k] = ((oemCurve.tables || {})[k] || []).map((p) => Math.round(p.duty_pct));
-        });
-      }
-      if (say) {
-        toast(`OEM 表读到了：${oemCurve.name || '未报名'}，`
-          + (oemCurve.stale ? `这是 ${oemCurve.age_s} 秒前的缓存` : '新鲜应答'));
-      }
-    } else if (say) {
-      toast('OEM 表读不到：' + ((oemCurve || {}).reason || '未知原因'), true);
-    }
-  } catch (e) {
-    if (say) toast('读取 OEM 表失败：' + e.message, true);
-  }
-  oemLoading = false;
-  btn.disabled = false; btn.textContent = 'OEM 表（可编辑）';
-  if (oemCurve && oemCurve.ok) {
-    curveData = null;
-    const box = $('fan-curve'); if (box) box.innerHTML = '';
-    const tag = $('fan-curve-tag'); if (tag) tag.textContent = 'OEM 表 · 可写占空';
-  }
+  btn.textContent = '读取中…';
   renderOemCurve();
-  poll();
+  try {
+    const loaded = normalizeOemCurve(await api('/api/fan-curve?source=mqtt'));
+    if (epoch !== oemEpoch || mode !== currentOemMode(lastState) || fanSource !== 'mqtt') return;
+    const currentName = ((((lastState || {}).hardware || {}).oem) || {}).fan_table;
+    if (currentName && currentName !== loaded.name) throw new Error('OEM 表名已变化，请等状态刷新后重新读取');
+    if (updatedType && submittedDuties && !loaded.tables[updatedType].every((p) => p.duty_pct === submittedDuties[p.id])) {
+      throw new Error('提交尚未确认，回读与下发值不一致，请核对后重新读取');
+    }
+    const preserveOther = updatedType && oemDraft && oemOrigName === loaded.name;
+    oemCurve = loaded;
+    oemOrigName = loaded.name;
+    oemOrig = oemOrig || {};
+    oemDraft = oemDraft || {};
+    for (const type of ['CPU', 'GPU']) {
+      const values = loaded.tables[type].map((p) => p.duty_pct);
+      if (!preserveOther || type === updatedType) {
+        oemOrig[type] = values.slice();
+        oemDraft[type] = values.slice();
+      }
+    }
+    oemChartGeometry = null;
+    curveData = null;
+    $('fan-default-feedback').hidden = true;
+    $('fan-curve').innerHTML = '';
+    setText('fan-curve-tag', '设备曲线 · 可编辑');
+    if (say) toast(`已读取 ${loaded.name} 的当前曲线`);
+    return true;
+  } catch (e) {
+    if (epoch === oemEpoch) {
+      oemReadError = e.message;
+      if (oemCurve) oemCurve = { ...oemCurve, stale: true };
+      else $('fan-curve-chart-wrap').hidden = true;
+      setText('fan-table-meta', '读取失败');
+      setText('fan-curve-hint', '读取失败：' + e.message);
+      if (say) toast('读取 OEM 表失败：' + e.message, true);
+    }
+  } finally {
+    oemLoading = false;
+    btn.textContent = '读取当前曲线';
+    renderOemCurve();
+    if (lastState) fillSpc(lastState);
+    ensureCreatorCurve();
+  }
 }
 
-async function applyOemCurve(restore) {
-  if (!oemCurve || !oemCurve.ok) return;
-  if (!oemWritable()) { toast('写曲线当前不可用（GCUBridge 未连接或高温保护）', true); return; }
-  let duties;
-  if (restore) {
-    duties = ((oemOrig || {})[oemType] || []).slice();
-    if (duties.length !== 16) { toast('没有可还原的原始值，先重新读一次 OEM 表', true); return; }
-  } else {
-    duties = Array.from(document.querySelectorAll('.curve-duty')).map((el) => Number(el.value));
-    if (duties.length !== 16 || duties.some((v) => !Number.isFinite(v) || v < 0 || v > 100)) {
-      toast('16 个占空都要填，且只能是 0~100 的整数', true);
-      return;
-    }
-  }
-  const label = `${oemCurve.name || '当前表'} ${oemType}`;
-  const what = restore ? '还原到本次读取时的值' : '下发到 OEM 服务';
-  if (!confirm(`把 ${label} 的 16 个占空${what}？\n\n`
-      + '风扇会按新曲线转；EC 的斜坡约 5%/秒，改完不会立刻听到变化。')) return;
-  const btnApply = $('btn-curve-apply');
-  const btnRestore = $('btn-curve-restore');
-  [btnApply, btnRestore].forEach((b) => { if (b) b.disabled = true; });
-  toast('已下发，等待服务回读…');
+function restoreOemDraft() {
+  if (!oemWritable() || !oemOrig) return;
+  oemDraft[oemType] = oemOrig[oemType].slice();
+  $('fan-default-feedback').hidden = true;
+  renderOemCurve();
+  toast(`已撤销 ${oemType} 草稿改动，没有下发硬件命令`);
+}
+
+async function restoreOemDefaults() {
+  if (!oemWritable()) return;
+  const type = oemType, name = oemCurve.name, epoch = oemEpoch;
+  if (oemDraftChanged(type) && !confirm(`用本机默认占空替换 ${type} 的未保存草稿？另一张曲线不变。`)) return;
+  const feedback = $('fan-default-feedback');
+  feedback.hidden = false;
+  feedback.textContent = '正在读取本机默认缓存，不发送硬件命令…';
+  oemLoading = true;
+  renderOemCurve();
   try {
-    const r = await api('/api/fan-curve', { duties, type: oemType });
-    const detail = r.detail || '已下发';
-    // 用户要求延迟生效的动作给两段反馈：这里是「已下发」→「已生效」。
-    toast(detail.includes('回读一致') ? '已生效：' + detail : detail);
-    await loadOemCurve(false);
+    const loaded = normalizeOemCurve(await api('/api/fan-curve/defaults?name=' + encodeURIComponent(name)));
+    oemLoading = false;
+    if (epoch !== oemEpoch || !oemCurve || name !== oemCurve.name || type !== oemType) return;
+    if (!oemWritable()) throw new Error('设备状态已变化，请重新读取当前曲线');
+    if (loaded.name !== name || !loaded.tables[type].every((p, i) =>
+      p.up_t === oemCurve.tables[type][i].up_t && p.down_t === oemCurve.tables[type][i].down_t)) {
+      throw new Error('默认表与当前表的温度阈值不一致，不能仅恢复占空');
+    }
+    oemDraft[type] = loaded.tables[type].map((p, i) =>
+      oemCurve.tables[type][i].sentinel || oemCurve.tables[type][i].mailbox ? oemDraft[type][i] : p.duty_pct);
+    feedback.textContent = `${type} 默认占空已填入草稿（来源：${loaded.source}），尚未保存；另一张曲线、温度阈值与独立输出不变。`;
+    toast(`${type} 默认占空已填入，请核对后保存`);
+  } catch (e) {
+    if (epoch === oemEpoch) {
+      const reason = e.message === 'not found' || e.message === 'HTTP 404'
+        ? '运行中的后端尚不支持默认表读取，请正常重启面板后重试' : e.message;
+      feedback.textContent = '未恢复默认，草稿保留：' + reason;
+      toast(feedback.textContent, true);
+    }
+  } finally {
+    oemLoading = false;
+    if (epoch !== oemEpoch) feedback.hidden = true;
+    renderOemCurve();
+  }
+}
+
+async function applyOemCurve() {
+  if (!oemWritable() || !oemDraft) return;
+  const type = oemType;
+  const name = oemCurve.name;
+  const epoch = oemEpoch;
+  const duties = oemDraft[type].slice();
+  const active = oemActivePoints();
+  if (duties.length !== 16 || duties.some((v) => !Number.isInteger(v) || v < 0 || v > 100)) {
+    toast('曲线必须包含 16 个 0~100 的整数占空', true); return;
+  }
+  if (active.some((p, i) => i > 0 && duties[p.id] < duties[active[i - 1].id])) {
+    toast('曲线不能倒退：后一个温度点必须大于等于前一个', true); return;
+  }
+  if (!confirm(`应用 ${name} ${type} 曲线？\n\n有效温度点：${active.length} 个\n占空范围：${Math.min(...duties)}% ~ ${Math.max(...duties)}%\n\n`
+      + '仅修改占空，温度点不变；表名变化或高温保护开启时拒绝下发。')) return;
+  oemWriting = true;
+  oemDragIndex = null;
+  renderOemCurve();
+  toast('正在下发，等待服务回读…');
+  try {
+    const r = await api('/api/fan-curve', { duties, type, expected_name: name });
+    toast('已下发：' + (r.detail || '等待曲线回读'));
+    if (epoch === oemEpoch) {
+      const confirmed = await loadOemCurve(false, type, duties);
+      if (confirmed) toast(`已生效：${name} ${type} 曲线回读一致`);
+      else if (epoch === oemEpoch) toast('曲线尚未确认，草稿保留，请核对后重新读取', true);
+    }
   } catch (e) {
     toast('下发失败：' + e.message, true);
   } finally {
-    [btnApply, btnRestore].forEach((b) => { if (b) b.disabled = false; });
+    oemWriting = false;
     renderOemCurve();
   }
 }
@@ -1517,24 +2245,33 @@ function renderTier(s) {
 }
 
 async function poll() {
-  if (document.hidden) return;   // 页面看不见就不发请求，切回来会立刻补一次
+  if (document.hidden) return false;
+  const requestId = stateRequestId + 1;
   try {
-    const s = await api('/api/state');
-    lastState = s;
+    const s = await readDeviceState();
+    if (!s || requestId < stateSettledId) return false;
     META = Object.assign(META, s.meta || {});
     const ver = (s.meta || {}).version;
     if (ver) $('foot-version').textContent = 'Umi Control Panel v' + ver + ' · 本地运行';
     // 硬件档要 24 秒左右才回读得到；等到值对上时补一句「已生效」
     const wantMode = PENDING.mode ? PENDING.mode.want : null;
-    const modePend = pendingFor('mode', currentOemMode(s));
+    const modePend = pendingFor('mode', deviceOnline(s) ? currentOemMode(s) : null);
     if (wantMode && !modePend && currentOemMode(s) === wantMode) toast('OEM 硬件档：已生效');
     renderTier(s); renderPills(s); renderIntents(); renderProfiles(s); renderMeters(s);
     renderHardware(s); renderOem(s); renderLighting(s); renderCaps(s);
-    renderOverview(s); renderCustom(s);
+    renderOverview(s); renderCreator(s); renderCustom(s); renderFanSpeed(s); renderQuick(s);
+    if (presetBusy) renderPresetLock();
     if ((s.bench || {}).running || benchWasRunning) loadBench();
     benchWasRunning = !!(s.bench || {}).running;
+    return true;
   } catch (e) {
+    if (requestId < stateSettledId) return false;
     $('foot-status').textContent = '取数失败：' + e.message;
+    if (lastState) {
+      lastState = { ...lastState, ts: 0 };
+      renderQuick(lastState); renderCreator(lastState); renderCustom(lastState); renderLighting(lastState); renderFanSpeed(lastState);
+    }
+    return false;
   }
 }
 
@@ -1623,20 +2360,20 @@ async function startBench(mode) {
 }
 
 // ---------- 历史曲线（纯 canvas，不引任何图表库：面板必须断网可用）----------
-const TIER_COLOR = { perf: '#ff5d6c', mid: '#ffb648', bal: '#35e0d8', eco: '#4ade80' };
+const TIER_COLOR = { perf: '--red', mid: '--amber', bal: '--cyan', eco: '--green' };
 const SERIES = {
   temp: [
-    { key: 'cpu_temp', label: 'CPU 温度', axis: 'L', unit: '°C', color: '#ff5d6c' },
-    { key: 'cpu_mhz', label: '实际频率', axis: 'R', unit: 'MHz', color: '#ffb648' },
+    { key: 'cpu_temp', label: 'CPU 温度', axis: 'L', unit: '°C', color: '--cyan' },
+    { key: 'cpu_mhz', label: '实际频率', axis: 'R', unit: 'MHz', color: '--purple' },
   ],
   load: [
-    { key: 'cpu_pct', label: 'CPU 占用', axis: 'L', unit: '%', color: '#35e0d8', max: 100 },
-    { key: 'gpu_pct', label: 'GPU 占用', axis: 'L', unit: '%', color: '#4a9df8', max: 100 },
-    { key: 'fan_rpm', label: '风扇转速', axis: 'R', unit: ' RPM', color: '#4ade80' },
+    { key: 'cpu_pct', label: 'CPU 占用', axis: 'L', unit: '%', color: '--cyan', max: 100 },
+    { key: 'gpu_pct', label: 'GPU 占用', axis: 'L', unit: '%', color: '--purple', max: 100 },
+    { key: 'fan_rpm', label: '风扇转速', axis: 'R', unit: ' RPM', color: '--amber' },
   ],
   // 墙单独一轴：60 W 和 1500 MHz 差 25 倍，和工作温度/占用塞同轴会把墙压成一条直线
   wall: [
-    { key: 'pl1_setting', label: 'PL1 功耗墙', axis: 'L', unit: ' W', color: '#c084fc' },
+    { key: 'pl1_setting', label: 'PL1 功耗墙', axis: 'L', unit: ' W', color: '--cyan' },
   ],
 };
 
@@ -1658,10 +2395,11 @@ function drawChart(canvasId, series, data) {
   const g = cv.getContext('2d');
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, w, h);
+  const dim = chartColor('--dim');
   const box = document.getElementById(canvasId.replace('chart-', 'legend-'));
   if (rows.length < 3) {
-    g.fillStyle = '#7c8ba1'; g.font = '12px system-ui';
-    g.fillText('正在积累数据（每 5 秒一个点，已采到 %d 个）…', 12, h / 2);
+    g.fillStyle = dim; g.font = '12px system-ui';
+    g.fillText(`正在积累数据（每 5 秒一个点，已采到 ${rows.length} 个）…`, 12, h / 2);
     if (box) box.innerHTML = '';
     return;
   }
@@ -1685,7 +2423,7 @@ function drawChart(canvasId, series, data) {
     return padT + ih - k * ih;
   };
   // 网格 + 两侧刻度
-  g.strokeStyle = '#232c3b'; g.fillStyle = '#7c8ba1'; g.font = '10px system-ui'; g.lineWidth = 1;
+  g.strokeStyle = chartColor('--line'); g.fillStyle = dim; g.font = '10px system-ui'; g.lineWidth = 1;
   for (let i = 0; i <= 3; i += 1) {
     const y = padT + (ih / 3) * i;
     g.beginPath(); g.moveTo(padL, y); g.lineTo(w - padR, y); g.stroke();
@@ -1701,14 +2439,14 @@ function drawChart(canvasId, series, data) {
   (data.marks || []).forEach((m) => {
     if (m.t < t0 || m.t > t1) return;
     const x = px(m.t);
-    g.strokeStyle = TIER_COLOR[m.tier] || '#7c8ba1';
+    g.strokeStyle = chartColor(TIER_COLOR[m.tier] || '--dim');
     g.setLineDash([3, 3]);
     g.beginPath(); g.moveTo(x, padT); g.lineTo(x, padT + ih); g.stroke();
     g.setLineDash([]);
   });
   // 曲线
   series.forEach((s) => {
-    g.strokeStyle = s.color; g.lineWidth = 1.6; g.beginPath();
+    g.strokeStyle = chartColor(s.color); g.lineWidth = 1.6; g.beginPath();
     let pen = false; let last = null;
     rows.forEach((r) => {
       const v = r[s.key];
@@ -1721,7 +2459,7 @@ function drawChart(canvasId, series, data) {
     s._cur = last;
   });
   // 时间轴
-  g.fillStyle = '#7c8ba1'; g.textAlign = 'left';
+  g.fillStyle = dim; g.textAlign = 'left';
   g.fillText(new Date(t0 * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }), padL, h - 4);
   g.textAlign = 'right';
   g.fillText(new Date(t1 * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }), w - padR, h - 4);
@@ -1730,7 +2468,7 @@ function drawChart(canvasId, series, data) {
       const vals = rows.map((r) => r[s.key]).filter((v) => v != null);
       const lo = vals.length ? Math.min(...vals) : null;
       const hi = vals.length ? Math.max(...vals) : null;
-      return `<span><i style="background:${s.color}"></i>${esc(s.label)} `
+      return `<span><i style="background:${chartColor(s.color)}"></i>${esc(s.label)} `
         + `<b>${s._cur == null ? '—' : Math.round(s._cur) + esc(s.unit)}</b> `
         + `<span style="opacity:.7">（区间 ${lo == null ? '—' : Math.round(lo) + esc(s.unit)}`
         + ` ~ ${hi == null ? '—' : Math.round(hi) + esc(s.unit)}）</span></span>`;
@@ -1818,51 +2556,12 @@ $('btn-bench-compare').onclick = () => startBench('compare');
 $('btn-fan-curve').onclick = () => loadFanCurve(true);
 // OEM 表走 GCUBridge，读得快；编辑器里只有做过可逆验证的「写占空」是亮的
 $('btn-fan-curve-oem').onclick = () => loadOemCurve(true);
-// TCC 偏移 / 风扇换挡：控件是固定 DOM，不随 2 秒轮询重建
-$('btn-tcc-apply').onclick = async () => {
-  const oem = ((lastState || {}).hardware || {}).oem || {};
-  const max = oem.tcc_offset_max != null ? oem.tcc_offset_max : 5;
-  const value = Number(($('tcc-value') || {}).value);
-  if (!Number.isInteger(value) || value < 0 || value > max) {
-    toast(`TCC 偏移只支持 0~${max} °C`, true);
-    return;
-  }
-  try {
-    const r = await api('/api/tcc', { value, enabled: true });
-    toast(r.detail || '已下发');
-  } catch (e) { toast('下发失败：' + e.message, true); return; }
-  markPending('tcc', true, TCC_WAIT_S, 'TCC 偏移');
-  poll();
-};
-$('btn-tcc-off').onclick = async () => {
-  try {
-    const r = await api('/api/tcc', { enabled: false });
-    toast(r.detail || '已下发');
-  } catch (e) { toast('下发失败：' + e.message, true); return; }
-  markPending('tcc', false, TCC_WAIT_S, 'TCC 偏移');
-  poll();
-};
-$('btn-fanspeed-apply').onclick = async () => {
-  const ms = Number(($('fanspeed-value') || {}).value);
-  if (!Number.isInteger(ms) || ms < 100 || ms > 2000 || ms % 100) {
-    toast('风扇换挡间隔只支持 100~2000 ms，且为 100 的整数倍', true);
-    return;
-  }
-  try {
-    const r = await api('/api/fan-switch-speed', { ms, enabled: true });
-    toast(r.detail || '已下发');
-  } catch (e) { toast('下发失败：' + e.message, true); return; }
-  markPending('fanspeed', true, FANSPEED_WAIT_S, '风扇换挡间隔');
-  poll();
-};
-$('btn-fanspeed-off').onclick = async () => {
-  try {
-    const r = await api('/api/fan-switch-speed', { enabled: false });
-    toast(r.detail || '已下发');
-  } catch (e) { toast('下发失败：' + e.message, true); return; }
-  markPending('fanspeed', false, FANSPEED_WAIT_S, '风扇换挡间隔');
-  poll();
-};
+$('quick-kb').onclick = () => toggleQuick('kb');
+$('quick-win').onclick = () => toggleQuick('win');
+$('fanspeed-enabled').onchange = () => { fanSpeedDirty = true; renderFanSpeed(lastState); };
+$('fanspeed-value').oninput = () => { fanSpeedDirty = true; renderFanSpeed(lastState); };
+$('btn-fanspeed-apply').onclick = () => applyFanSpeed();
+$('btn-fanspeed-off').onclick = () => applyFanSpeed(false);
 $('btn-stop').onclick = async () => {
   if (!confirm('确定停止面板服务？停止后自适应调度与掉档守护都会失效。')) return;
   try { await api('/api/shutdown', {}); toast('服务已停止'); }
@@ -1889,7 +2588,17 @@ $('btn-preset-save').onclick = () => {
     fanspeed: !!($('preset-inc-fanspeed') || {}).checked,
     light: !!($('preset-inc-light') || {}).checked,
   };
+  if (!deviceOnline(lastState) || presetBusy || plBusy || plSubmitted || spcBusy || spcSubmitted
+      || fanSpeedBusy || fanSpeedSubmitted || lightBusy || lightSubmitted || quickSending.size || Object.keys(PENDING).length) {
+    toast('请等待设备连接和正在生效的设置完成后再保存方案', true); return;
+  }
   const p = capturePreset(name, include);
+  const missing = [[include.mode, p.mode, '造物者模式'], [include.tcc, p.tcc, '提前降温'],
+    [include.fanspeed, p.fanSpeed, '风扇响应'], [include.light, p.lighting, '键盘灯效']]
+    .filter(([selected, value]) => selected && !value).map(([, , label]) => label);
+  if (missing.length) {
+    toast('未保存：' + missing.join('、') + '没有可用读数，请先读取或取消勾选', true); return;
+  }
   if (!p.mode && !p.tcc && !p.fanSpeed && !p.lighting) {
     toast('当前读数里没有可保存的已验证设置，等面板转两秒再试', true);
     return;
@@ -1914,34 +2623,196 @@ $('btn-preset-refresh').onclick = () => { poll(); toast('正在刷新读数…')
   });
 });
 $('btn-pl-apply').onclick = async () => {
+  fillPlControls(lastState);
+  if ($('btn-pl-apply').disabled) return;
   const body = {};
+  const bounds = plBounds(lastState);
+  if (!bounds) return;
   for (const k of ['pl1', 'pl2', 'pl4']) {
-    const v = Number(($(k + '-range') || {}).value);
-    if (!Number.isFinite(v)) { toast('有滑块没读到值，先点「按当前读数重填」', true); return; }
+    const el = $(k + '-range');
+    if (el.disabled) continue;
+    const v = Number(el.value);
+    if (!Number.isInteger(v) || v < bounds[k][0] || v > bounds[k][1]) {
+      toast('功耗墙超出 OEM 范围，请先重填读数', true); return;
+    }
     body[k] = v;
   }
-  if (!confirm(`下发临时功耗墙？\n\nPL1 ${body.pl1} W\nPL2 ${body.pl2} W\nPL4 ${body.pl4} W\n\n`
-    + '这是当前档位的临时墙，切档、息屏或 OEM 服务重算都可能改回去。')) return;
-  const btn = $('btn-pl-apply');
-  btn.disabled = true;
-  btn.textContent = '下发中…';
+  if (!Object.keys(body).length) return;
+  if ((body.pl1 != null && body.pl2 != null && body.pl1 > body.pl2)
+      || (body.pl2 != null && body.pl4 != null && body.pl2 > body.pl4)) {
+    toast('请保持长时功耗 ≤ 短时功耗 ≤ 瞬时功耗上限', true); return;
+  }
+  if (!confirm('下发临时功耗墙？\n\n'
+    + Object.entries(body).map(([key, value]) => key.toUpperCase() + ' ' + value + ' W').join('\n')
+    + '\n\n未回读的项目不下发；切档、息屏或 OEM 服务重算都可能改回去。')) return;
+  const epoch = plEpoch;
+  plBusy = true; plDirty = true;
+  fillPlControls(lastState); renderCreator(lastState);
   try {
-    const r = await api('/api/power-limits', body);
-    toast(r.detail || '已下发临时功耗墙，几秒后回读确认');
-    plDirty = false;
-    plFilled = false;
-    setTimeout(poll, 1200);
+    await api('/api/power-limits', body);
+    if (epoch !== plEpoch) { plNeedsRefresh = true; return; }
+    plSubmitted = { body, until: Date.now() + 20000 };
+    toast('临时功耗已下发，等待设备确认');
   } catch (e) {
     toast('下发失败：' + e.message, true);
   } finally {
-    btn.disabled = false;
-    btn.textContent = '下发临时功耗墙';
+    plBusy = false;
+    fillPlControls(lastState); renderCreator(lastState);
   }
+  await poll();
 };
-$('btn-pl-refresh').onclick = () => {
-  plDirty = false;
-  plFilled = false;
-  fillPlControls(lastState, true);
+$('btn-pl-refresh').onclick = async () => {
+  fillPlControls(lastState);
+  if ($('btn-pl-refresh').disabled) return;
+  await poll();
+  if (deviceOnline(lastState)) fillPlControls(lastState, true);
+};
+
+// ---------- 造物者模式 ----------
+$('btn-creator-mode').onclick = async () => {
+  if ($('btn-creator-mode').disabled || PENDING.mode || oemWriting || spcBusy || spcSubmitted) return;
+  const mode = currentOemMode(lastState);
+  if (mode == null) { toast('认不出当前 OEM 档位，先等状态刷新', true); return; }
+  const want = mode === 'turbo' ? 'office' : 'turbo';
+  const btn = $('btn-creator-mode');
+  btn.disabled = true;
+  markPending('mode', want, 45, '造物者开关');
+  renderCreator(lastState);
+  try {
+    const r = await api('/api/mode', { mode: want });
+    toast((r.detail || '已下发')
+      + ` · 约 24 秒后切到${want === 'turbo' ? '性能档' : '省电档'}`);
+  } catch (e) {
+    delete PENDING.mode;
+    toast('切换失败：' + e.message, true);
+    renderCreator(lastState);
+  }
+  poll();
+};
+document.querySelectorAll('[data-creator-tab]').forEach((button, index, buttons) => {
+  button.onclick = () => showCreatorTab(button.dataset.creatorTab);
+  button.onkeydown = (e) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    e.preventDefault();
+    const next = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1
+      : (index + (e.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length;
+    showCreatorTab(buttons[next].dataset.creatorTab);
+    buttons[next].focus();
+  };
+});
+document.querySelectorAll('[data-curve-table]').forEach((button) => {
+  button.onclick = () => {
+    if (oemLoading || oemWriting || curveLoading) return;
+    oemType = button.dataset.curveTable;
+    oemDragIndex = null; oemFocusIndex = null;
+    if (fanSource === 'ec' && oemCurve) {
+      fanSource = 'mqtt';
+      $('fan-curve').innerHTML = '';
+      setText('fan-curve-tag', '设备曲线 · 可编辑');
+    }
+    renderOemCurve();
+  };
+});
+$('btn-curve-undo').onclick = restoreOemDraft;
+$('btn-curve-default').onclick = restoreOemDefaults;
+$('btn-spc-default').onclick = () => {
+  fillSpc(lastState);
+  if ($('btn-spc-default').disabled) return;
+  for (const [key, value] of Object.entries({ pl1: 75, pl2: 75, pl4: 165 })) {
+    $('spc-' + key).value = value;
+    spcDirty.add(key);
+  }
+  fillSpc(lastState);
+  toast('已填入 CC 默认功耗草稿，尚未发送给设备');
+};
+$('btn-spc-refresh').onclick = () => {
+  if (spcBusy || spcSubmitted) return;
+  fillSpc(lastState, true);
+  poll();
+};
+['pl1', 'pl2', 'pl4'].forEach((k) => {
+  const el = $('spc-' + k);
+  if (!el) return;
+  el.addEventListener('input', () => {
+    spcDirty.add(k);
+    const lab = $('spc-' + k + '-val');
+    if (lab) lab.textContent = el.value + ' W';
+    paintRange(el);
+  });
+});
+$('spc-tcc').addEventListener('input', () => {
+  spcDirty.add('tcc');
+  const el = $('spc-tcc');
+  const lab = $('spc-tcc-val');
+  if (lab) lab.textContent = el.value + ' °C';
+  paintRange(el);
+});
+$('spc-tcc-enabled').onchange = () => { spcDirty.add('tcc-enabled'); fillSpc(lastState); };
+$('btn-spc-apply').onclick = async () => {
+  if (spcBusy || spcSubmitted || spcNeedsRefresh || currentOemMode(lastState) !== 'turbo' || PENDING.mode) return;
+  const body = {};
+  const bounds = plBounds(lastState);
+  if (!bounds) return;
+  for (const k of ['pl1', 'pl2', 'pl4']) {
+    const el = $('spc-' + k);
+    if (el.disabled) continue;
+    const v = Number(el.value);
+    if (!Number.isInteger(v) || v < bounds[k][0] || v > bounds[k][1]) {
+      toast('功耗墙超出 OEM 范围，请重填读数', true); return;
+    }
+    body[k] = v;
+  }
+  if (!Object.keys(body).length) return;
+  if ((body.pl1 != null && body.pl2 != null && body.pl1 > body.pl2)
+      || (body.pl2 != null && body.pl4 != null && body.pl2 > body.pl4)) {
+    toast('请保持长时功耗 ≤ 短时功耗 ≤ 瞬时功耗上限', true); return;
+  }
+  const values = Object.entries(body).map(([key, value]) => key.toUpperCase() + ' ' + value + ' W');
+  if (!confirm('下发临时功耗墙？\n\n' + values.join('\n')
+      + '\n\n未回读的项目不下发；切档、息屏或 OEM 重算都可能改回去。')) return;
+  const epoch = spcEpoch;
+  spcBusy = true;
+  Object.keys(body).forEach((key) => spcDirty.add(key));
+  renderCreator(lastState);
+  try {
+    const r = await api('/api/power-limits', body);
+    toast(r.detail || '已下发临时功耗墙，等待读数确认');
+    if (epoch === spcEpoch) spcSubmitted = { values: body, until: Date.now() + 20000 };
+  } catch (e) {
+    toast('下发失败：' + e.message, true);
+  } finally {
+    spcBusy = false;
+    renderCreator(lastState);
+  }
+  setTimeout(poll, 1200);
+};
+$('btn-spc-tcc-apply').onclick = async () => {
+  if (spcBusy || spcSubmitted || spcNeedsRefresh || $('btn-spc-tcc-apply').disabled
+      || currentOemMode(lastState) !== 'turbo' || PENDING.mode) return;
+  const enabled = $('spc-tcc-enabled').checked;
+  const value = Number($('spc-tcc').value);
+  if (!Number.isInteger(value) || value < 0 || value > Number($('spc-tcc').max)) {
+    toast('TCC 值超出范围', true); return;
+  }
+  if (!confirm(`应用 TCC 偏移？\n\n值 ${value} °C，${enabled ? '开启' : '关闭'}\n\n`
+    + '这是当前档位的临时设置，切档会被服务重算。')) return;
+  const epoch = spcEpoch;
+  spcBusy = true;
+  spcDirty.add('tcc'); spcDirty.add('tcc-enabled');
+  renderCreator(lastState);
+  try {
+    const r = await api('/api/tcc', { value, enabled });
+    toast(r.detail || '已下发 TCC，等待读数确认');
+    if (epoch === spcEpoch) {
+      spcSubmitted = { values: { tcc: value, 'tcc-enabled': enabled },
+        until: Date.now() + TCC_WAIT_S * 1000 };
+    }
+  } catch (e) {
+    toast('下发失败：' + e.message, true);
+  } finally {
+    spcBusy = false;
+    renderCreator(lastState);
+  }
   poll();
 };
 
@@ -1976,13 +2847,12 @@ window.addEventListener('resize', () => {
   drawChart('chart-wall', SERIES.wall, histData);
   drawChart('chart-ov-temp', SERIES.temp, histData);
   drawChart('chart-ov-load', SERIES.load, histData);
-  if (curveData && curveData.tables) {
+  if (fanSource === 'ec' && curveData && curveData.tables) {
     drawFanCurveChart([
-      { label: 'EC CPU', color: '#2dd4bf', points: curveData.tables.CPU },
-      { label: 'EC GPU', color: '#8b5cf6', points: curveData.tables.GPU },
+      { label: 'EC CPU', color: '--cyan', points: curveData.tables.CPU },
+      { label: 'EC GPU', color: '--purple', points: curveData.tables.GPU },
     ]);
-  } else if (oemCurve && oemCurve.tables) {
-    drawFanCurveChart([{ label: `OEM ${oemType}`, color: '#fbbf24',
-                         points: oemCurve.tables[oemType] || [] }]);
+  } else if (fanSource === 'mqtt' && oemCurve && oemCurve.tables) {
+    drawOemCurveEditor();
   }
 });

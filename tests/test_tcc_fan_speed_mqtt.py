@@ -223,6 +223,22 @@ def t_snapshot_fields():
     assert oem['limits']['tcc_max'] == 5
 
 
+@case('SPC 只读字段：GPU 目标温度/TGP/DynamicBoost/核心与显存偏移都照 OEM 原值报')
+def t_spc_readonly_fields():
+    ch = _channel()
+    _seed(ch, GPU_TargetTemperature='87', GPU_CoreClockOffset='12',
+          GPU_MemoryClockOffset='-34', CPU_OffsetCoreVoltage='0',
+          GPU_ConfigurableTGPSwitch='1', GPU_ConfigurableTGPTarget='115',
+          GPU_DynamicBoostSwitch='1', GPU_DynamicBoost='5')
+    oem = ch._oem_switches(ch.payloads())
+    assert oem['gpu_target_temp'] == 87
+    assert oem['gpu_core_offset'] == 12
+    assert oem['gpu_mem_offset'] == -34
+    assert oem['core_voltage_offset'] == 0
+    assert oem['tgp_enabled'] is True and oem['tgp_target'] == 115
+    assert oem['dynamic_boost_on'] is True and oem['dynamic_boost'] == 5
+
+
 def main():
     bad = 0
     for name, fn in CASES:

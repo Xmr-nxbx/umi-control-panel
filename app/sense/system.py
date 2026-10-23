@@ -98,6 +98,33 @@ def memory_status():
             'pct': round(m.dwMemoryLoad, 1)}
 
 
+k32.GetDiskFreeSpaceExW.argtypes = [wt.LPCWSTR, ctypes.POINTER(ctypes.c_ulonglong),
+                                    ctypes.POINTER(ctypes.c_ulonglong),
+                                    ctypes.POINTER(ctypes.c_ulonglong)]
+
+
+def disk_status(path=None):
+    """系统盘（默认 C:\\）的容量/已用/占用率，纯用户态 GetDiskFreeSpaceExW。
+
+    型号与温度要 WMI / IOCTL_STORAGE_QUERY_PROPERTY，这一版先不做（notes 里记着 P3）；
+    拿不到就返回 None，前端照实显示「未知」，不编一个数。
+    """
+    root = path or (os.environ.get('SystemDrive') or 'C:') + '\\'
+    free = ctypes.c_ulonglong(0)
+    total = ctypes.c_ulonglong(0)
+    total_free = ctypes.c_ulonglong(0)
+    if not k32.GetDiskFreeSpaceExW(root, ctypes.byref(free),
+                                   ctypes.byref(total), ctypes.byref(total_free)):
+        return None
+    tb = total.value / 1073741824.0
+    fb = free.value / 1073741824.0
+    if tb <= 0:
+        return None
+    return {'drive': root.rstrip('\\'), 'total_gb': round(tb, 1),
+            'used_gb': round(tb - fb, 1), 'free_gb': round(fb, 1),
+            'pct': round((tb - fb) / tb * 100.0, 1)}
+
+
 k32.QueryFullProcessImageNameW.restype = wt.BOOL
 k32.QueryFullProcessImageNameW.argtypes = [wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD)]
 k32.OpenProcess.restype = wt.HANDLE
@@ -152,6 +179,7 @@ class SystemSense:
         for key, fn in (('cpu_pct', self._cpu.sample),
                         ('idle_s', idle_seconds),
                         ('mem', memory_status),
+                        ('disk', disk_status),
                         ('power', power_status)):
             try:
                 v = fn()

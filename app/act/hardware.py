@@ -205,11 +205,11 @@ class Hardware:
                 return ok, detail
         return False, 'GCUBridge 未连接，命令不下发'
 
-    def set_fan_curve(self, duties, type_='CPU'):
-        """经 OEM 服务写风扇曲线（只改 Duty）。通道自己的五条闸在 mqtt_gcu 里。"""
+    def set_fan_curve(self, duties, type_='CPU', expected_name=None):
+        """经 OEM 服务写风扇曲线（只改 Duty）。写闸与草稿表名核对由通道执行。"""
         for ch in self.channels:
             if hasattr(ch, 'set_fan_curve') and ch.alive:
-                return ch.set_fan_curve(duties, type_)
+                return ch.set_fan_curve(duties, type_, expected_name=expected_name)
         return False, 'GCUBridge 未连接，风扇曲线写不了'
 
     def set_tcc_offset(self, value=None, enabled=None):

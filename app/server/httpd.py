@@ -2,8 +2,10 @@
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 from app import __version__
+from app.fan_defaults import load_fan_defaults
 from app.paths import WEB_DIR
 
 MAX_BODY = 64 * 1024
@@ -142,6 +144,10 @@ def make_handler(daemon, cfg, on_shutdown):
                 self._send(200, daemon.history_view(minutes))
             elif path == '/api/ec/probe':
                 self._send(200, daemon.hw.ec.probe())
+            elif path == '/api/fan-curve/defaults':
+                names = parse_qs(urlsplit(self.path).query).get('name', [])
+                result = load_fan_defaults(names[0] if len(names) == 1 else None)
+                self._send(200 if result['ok'] else 409, result)
             elif path == '/api/fan-curve':
                 # 只读：一轮 92 个地址约 3 秒，通道内部有 10 秒缓存与并发闸，
                 # 所以放在 GET 上、由页面按钮触发，不进 2 秒轮询。
@@ -190,13 +196,17 @@ def make_handler(daemon, cfg, on_shutdown):
                 self._send(200 if ok else 409, {'ok': ok, 'detail': detail})
             elif path == '/api/fan-curve':
                 # 写曲线只有一条路：OEM 服务的 SET_FAN_SPEED_CURVE_SETTING。
-                # 五条闸（allow_write / verified / 16 点 0-100 / 表名来自服务 /
-                # 高温保护）都在 MqttChannel.set_fan_curve 里，这里只转发。
+                # 必须带草稿来源表名；写权限、能力、新鲜表名匹配与高温保护
+                # 都在 MqttChannel.set_fan_curve 里检查，这里只验证参数并转发。
                 duties = body.get('duties')
-                if not isinstance(duties, list):
+                expected_name = body.get('expected_name')
+                if not isinstance(expected_name, str) or not expected_name.strip():
+                    self._send(400, {'ok': False, 'detail': 'expected_name 必须是非空字符串'})
+                elif not isinstance(duties, list):
                     self._send(400, {'ok': False, 'detail': 'duties 必须是 16 个数的数组'})
                 else:
-                    ok, detail = daemon.hw.set_fan_curve(duties, str(body.get('type', 'CPU')))
+                    ok, detail = daemon.hw.set_fan_curve(
+                        duties, str(body.get('type', 'CPU')), expected_name=expected_name)
                     self._send(200 if ok else 409, {'ok': ok, 'detail': detail})
             elif path == '/api/mqtt-capture':
                 if str(body.get('action', 'start')) == 'stop':

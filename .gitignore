@@ -19,6 +19,12 @@ __pycache__/
 /tools/src/
 /tools/toolchain/
 
+# 本地设计输入、内部交接与截图工具
+/个人看法
+/cc截图和页面描述/
+/tools/cc_capture/
+/TASKS-workbuddy.md
+
 # 编辑器 / 系统
 .vscode/
 .idea/
